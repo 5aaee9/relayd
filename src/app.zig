@@ -1,0 +1,74 @@
+const std = @import("std");
+const config_mod = @import("config.zig");
+const Metrics = @import("metrics.zig").Metrics;
+const storage = @import("storage/sqlite.zig");
+const runtime = @import("runtime/manager.zig");
+const service_mod = @import("service/allocation_service.zig");
+const http_server = @import("http/server.zig");
+
+pub const App = struct {
+    allocator: std.mem.Allocator,
+    config: config_mod.Config,
+    metrics: Metrics,
+    repo: storage.Repository,
+    runtime_manager: runtime.RuntimeManager,
+    service: service_mod.Service,
+    http: http_server.HttpServer,
+
+    pub fn init(allocator: std.mem.Allocator) !*App {
+        const app = try allocator.create(App);
+        errdefer allocator.destroy(app);
+
+        var config = try config_mod.Config.parseEnv(allocator);
+        errdefer config.deinit(allocator);
+
+        var repo = try storage.Repository.open(allocator, config.db_path);
+        errdefer repo.close();
+        try repo.selfCheck();
+
+        app.* = .{
+            .allocator = allocator,
+            .config = config,
+            .metrics = .{},
+            .repo = repo,
+            .runtime_manager = undefined,
+            .service = undefined,
+            .http = undefined,
+        };
+
+        app.runtime_manager = try runtime.RuntimeManager.init(allocator, &app.metrics, config.force_tcp_copy_fallback);
+        errdefer app.runtime_manager.deinit();
+        try app.runtime_manager.start();
+
+        app.service = service_mod.Service.init(allocator, &app.repo, &app.runtime_manager, config.port_range, config.runtime_apply_timeout_ms);
+        try app.service.restoreAll(config.restore_sweep_timeout_ms);
+
+        app.http = .{
+            .allocator = allocator,
+            .service = &app.service,
+            .metrics = &app.metrics,
+            .host = config.http_listen_host,
+            .port = config.http_listen_port,
+            .auth_token = config.auth_token,
+        };
+
+        return app;
+    }
+
+    pub fn start(self: *App) !void {
+        try self.http.start();
+    }
+
+    pub fn stop(self: *App) void {
+        self.http.stop();
+        self.runtime_manager.stop();
+    }
+
+    pub fn deinit(self: *App) void {
+        self.http.stop();
+        self.runtime_manager.deinit();
+        self.repo.close();
+        self.config.deinit(self.allocator);
+        self.allocator.destroy(self);
+    }
+};

@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+
+jobs:
+  test:
+    runs-on: docker
+    steps:
+      - name: Checkout
+        uses: https://data.forgejo.org/actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl xz-utils libsqlite3-dev
+
+      - name: Install Zig 0.15.2
+        run: |
+          arch="$(uname -m)"
+          case "$arch" in
+            x86_64) zig_arch=x86_64 ;;
+            aarch64) zig_arch=aarch64 ;;
+            *) echo "unsupported arch: $arch" >&2; exit 1 ;;
+          esac
+          curl -L "https://ziglang.org/download/0.15.2/zig-linux-${zig_arch}-0.15.2.tar.xz" -o /tmp/zig.tar.xz
+          tar -C /opt -xf /tmp/zig.tar.xz
+          mv "/opt/zig-linux-${zig_arch}-0.15.2" /opt/zig
+          ln -sf /opt/zig/zig /usr/local/bin/zig
+          zig version
+
+      - name: Format check
+        run: |
+          zig fmt --check $(find src tests -type f -name '*.zig' -print) test_root.zig build.zig
+
+      - name: Build and test
+        run: |
+          zig build test
+          zig build
+
+      - name: Build Docker image
+        run: |
+          if command -v docker >/dev/null 2>&1; then
+            docker build -t relayd:ci .
+          else
+            echo "docker CLI not available on this runner; skipping image build"
+          fi

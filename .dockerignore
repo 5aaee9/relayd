@@ -1,0 +1,8 @@
+.git
+.omx
+.zig-cache
+zig-out
+.local
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
