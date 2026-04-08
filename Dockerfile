@@ -19,9 +19,9 @@ RUN arch="${TARGETARCH}" \
         aarch64|arm64) zig_arch=aarch64 ;; \
         *) echo "unsupported TARGETARCH: $arch" >&2; exit 1 ;; \
     esac \
-    && curl -L "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${zig_arch}-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz \
+    && curl -L "https://ziglang.org/download/${ZIG_VERSION}/zig-${zig_arch}-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz \
     && tar -C /opt -xf /tmp/zig.tar.xz \
-    && mv "/opt/zig-linux-${zig_arch}-${ZIG_VERSION}" /opt/zig \
+    && mv "/opt/zig-${zig_arch}-linux-${ZIG_VERSION}" /opt/zig \
     && ln -s /opt/zig/zig /usr/local/bin/zig
 
 WORKDIR /src
