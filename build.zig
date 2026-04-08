@@ -13,7 +13,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.linkLibC();
-    exe.addLibraryPath(b.path(".local/lib"));
+    if (dirExists(".local/lib")) exe.addLibraryPath(b.path(".local/lib"));
     exe.linkSystemLibrary("sqlite3");
     b.installArtifact(exe);
 
@@ -25,10 +25,15 @@ pub fn build(b: *std.Build) void {
         }),
     });
     tests.linkLibC();
-    tests.addLibraryPath(b.path(".local/lib"));
+    if (dirExists(".local/lib")) tests.addLibraryPath(b.path(".local/lib"));
     tests.linkSystemLibrary("sqlite3");
 
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run relayd tests");
     test_step.dependOn(&run_tests.step);
+}
+
+fn dirExists(path: []const u8) bool {
+    std.fs.cwd().access(path, .{}) catch return false;
+    return true;
 }

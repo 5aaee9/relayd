@@ -29,4 +29,4 @@ jobs:
       - name: Build and test
         run: |
           zig build test
-          zig Build
+          zig build
