@@ -29,6 +29,26 @@ zig build test
 HTTP_LISTEN=:8080 AUTH_TOKEN=mytoken zig-out/bin/relayd
 ```
 
+## End-to-end bandwidth harness
+Local e2e runs use `scripts/ci/e2e_iperf3.sh` to drive real TCP and UDP `iperf3` traffic through `relayd`.
+
+### Local prerequisites
+- `zig`
+- `python3`
+- `iperf3`
+
+### Local invocation
+```bash
+zig build
+./scripts/ci/e2e_iperf3.sh
+```
+
+By default the harness runs relayd with `AUTH_TOKEN=test-token`, `HTTP_LISTEN=127.0.0.1:18080`, and `PORT_RANGE=18100-18120`. The listen address and relay port range are overrideable for local reruns, for example:
+
+```bash
+HTTP_LISTEN=127.0.0.1:28080 PORT_RANGE=28100-28120 ./scripts/ci/e2e_iperf3.sh
+```
+
 ## API
 ### Create
 `POST /v1/ports`

@@ -30,3 +30,24 @@ jobs:
         run: |
           zig build test
           zig build
+
+  e2e-bandwidth:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: https://data.forgejo.org/actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl xz-utils libsqlite3-dev iperf3 python3
+
+      - name: Setup Zig
+        uses: https://codeberg.org/mlugg/setup-zig@v2
+
+      - name: Build relayd
+        run: zig build
+
+      - name: Run e2e bandwidth harness
+        run: ./scripts/ci/e2e_iperf3.sh
