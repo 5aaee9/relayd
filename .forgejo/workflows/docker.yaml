@@ -1,0 +1,65 @@
+name: build
+
+env:
+  BUILD_PROJECT_NAME: relayd
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  docker:
+    runs-on: kubernetes
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Git config
+        run: |
+          git config --global credential.helper "store --file=$HOME/.git-credentials"
+          echo -e "https://git:${{ secrets.REPO_CLONE_TOKEN }}@git.wanix.net" > ~/.git-credentials
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '>=1.21.0'
+          cache: false
+
+      - name: Generate tags
+        id: tags
+        run: |
+          build_type=release
+          firmware_version="$(git describe --exact-match --tags 2>/dev/null || true)"
+          if [ -z "$firmware_version" ]; then
+            firmware_version="$(git rev-parse --short=8 HEAD)"
+            build_type=dev
+          fi
+          echo "tags=$build_type-$firmware_version" >> "$GITHUB_OUTPUT"
+
+      - name: Install deps
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install iptables -y
+          sudo apt-get -y install podman containernetworking-plugins
+
+      - name: Log in to container registry
+        env:
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: |
+          set -ex
+          podman login "${{ vars.HARBOR_DOMAIN }}" -u "$HARBOR_USERNAME" -p "$HARBOR_PASSWORD"
+
+      - name: Build image
+        uses: https://github.com/redhat-actions/buildah-build@v2
+        with:
+          image: ${{ vars.HARBOR_ORGANIZATION }}/${{ env.BUILD_PROJECT_NAME }}
+          tags: latest ${{ steps.tags.outputs.tags }}
+          containerfiles: |
+            ./Dockerfile
+
+      - name: Push image to registry
+        uses: https://github.com/redhat-actions/push-to-registry@v2
+        with:
+          image: ${{ vars.HARBOR_ORGANIZATION }}/${{ env.BUILD_PROJECT_NAME }}
+          tags: latest ${{ steps.tags.outputs.tags }}
+          registry: ${{ vars.HARBOR_DOMAIN }}
