@@ -215,6 +215,14 @@ emit_stdout_report() {
 import json
 import sys
 
+def format_decimal(value, units):
+    value = float(value)
+    unit_index = 0
+    while value >= 1000.0 and unit_index < len(units) - 1:
+        value /= 1000.0
+        unit_index += 1
+    return f"{value:.2f} {units[unit_index]}"
+
 def tcp_summary(path):
     payload = json.load(open(path, encoding="utf-8"))
     end = payload.get("end") or {}
@@ -241,10 +249,10 @@ tcp = tcp_summary(sys.argv[1])
 udp = udp_summary(sys.argv[2])
 
 print("=== relayd e2e iperf3 report ===")
-print(f"TCP throughput: {tcp['bps']:.2f} bps")
-print(f"TCP transfer:   {tcp['bytes']} bytes")
-print(f"UDP throughput: {udp['bps']:.2f} bps")
-print(f"UDP transfer:   {udp['bytes']} bytes")
+print(f"TCP throughput: {format_decimal(tcp['bps'], ['bps', 'kbps', 'mbps', 'gbps'])}")
+print(f"TCP transfer:   {format_decimal(tcp['bytes'], ['bytes', 'kbytes', 'mbytes', 'gbytes'])}")
+print(f"UDP throughput: {format_decimal(udp['bps'], ['bps', 'kbps', 'mbps', 'gbps'])}")
+print(f"UDP transfer:   {format_decimal(udp['bytes'], ['bytes', 'kbytes', 'mbytes', 'gbytes'])}")
 print(f"UDP loss:       {udp['lost_packets']}/{udp['packets']} packets ({udp['lost_percent']:.2f}%)")
 print(f"UDP jitter:     {udp['jitter_ms']:.3f} ms")
 PY
