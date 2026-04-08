@@ -208,6 +208,48 @@ if lost_percent is not None:
 PY
 }
 
+emit_stdout_report() {
+  local tcp_json=$1
+  local udp_json=$2
+  python3 - "$tcp_json" "$udp_json" <<'PY'
+import json
+import sys
+
+def tcp_summary(path):
+    payload = json.load(open(path, encoding="utf-8"))
+    end = payload.get("end") or {}
+    summary = end.get("sum_received") or end.get("sum") or {}
+    return {
+        "bytes": summary.get("bytes", 0),
+        "bps": summary.get("bits_per_second", 0.0),
+    }
+
+def udp_summary(path):
+    payload = json.load(open(path, encoding="utf-8"))
+    end = payload.get("end") or {}
+    summary = end.get("sum_received") or end.get("sum") or {}
+    return {
+        "bytes": summary.get("bytes", 0),
+        "bps": summary.get("bits_per_second", 0.0),
+        "jitter_ms": summary.get("jitter_ms", 0.0),
+        "lost_packets": summary.get("lost_packets", 0),
+        "packets": summary.get("packets", 0),
+        "lost_percent": summary.get("lost_percent", 0.0),
+    }
+
+tcp = tcp_summary(sys.argv[1])
+udp = udp_summary(sys.argv[2])
+
+print("=== relayd e2e iperf3 report ===")
+print(f"TCP throughput: {tcp['bps']:.2f} bps")
+print(f"TCP transfer:   {tcp['bytes']} bytes")
+print(f"UDP throughput: {udp['bps']:.2f} bps")
+print(f"UDP transfer:   {udp['bytes']} bytes")
+print(f"UDP loss:       {udp['lost_packets']}/{udp['packets']} packets ({udp['lost_percent']:.2f}%)")
+print(f"UDP jitter:     {udp['jitter_ms']:.3f} ms")
+PY
+}
+
 pick_free_port() {
   local protocol=${1:-tcp}
   python3 - "$protocol" <<'PY'
@@ -426,4 +468,5 @@ if udp_loss=$(udp_lost_percent "$UDP_CLIENT_JSON"); then
 fi
 wait "$udp_server_pid"
 
+emit_stdout_report "$TCP_CLIENT_JSON" "$UDP_CLIENT_JSON"
 log "iperf3 TCP+UDP e2e coverage passed"
