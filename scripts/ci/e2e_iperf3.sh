@@ -6,7 +6,7 @@ HTTP_LISTEN="${HTTP_LISTEN:-127.0.0.1:18080}"
 PORT_RANGE="${PORT_RANGE:-18100-18120}"
 SQLITE_PATH="${SQLITE_PATH:-.zig-cache/e2e/relayd-$$.sqlite3}"
 TARGET_HOST="${TARGET_HOST:-127.0.0.1}"
-UDP_RATE="${UDP_RATE:-1M}"
+UDP_RATE="${UDP_RATE:-100G}"
 IPERF_DURATION="${IPERF_DURATION:-2}"
 READINESS_TIMEOUT_SEC="${READINESS_TIMEOUT_SEC:-30}"
 ACTIVE_TIMEOUT_SEC="${ACTIVE_TIMEOUT_SEC:-30}"
@@ -211,7 +211,8 @@ PY
 emit_stdout_report() {
   local tcp_json=$1
   local udp_json=$2
-  python3 - "$tcp_json" "$udp_json" <<'PY'
+  local udp_target_rate=$3
+  python3 - "$tcp_json" "$udp_json" "$udp_target_rate" <<'PY'
 import json
 import sys
 
@@ -247,10 +248,12 @@ def udp_summary(path):
 
 tcp = tcp_summary(sys.argv[1])
 udp = udp_summary(sys.argv[2])
+udp_target = sys.argv[3]
 
 print("=== relayd e2e iperf3 report ===")
 print(f"TCP throughput: {format_decimal(tcp['bps'], ['bps', 'kbps', 'mbps', 'gbps'])}")
 print(f"TCP transfer:   {format_decimal(tcp['bytes'], ['bytes', 'kbytes', 'mbytes', 'gbytes'])}")
+print(f"UDP target:     {udp_target}")
 print(f"UDP throughput: {format_decimal(udp['bps'], ['bps', 'kbps', 'mbps', 'gbps'])}")
 print(f"UDP transfer:   {format_decimal(udp['bytes'], ['bytes', 'kbytes', 'mbytes', 'gbytes'])}")
 print(f"UDP loss:       {udp['lost_packets']}/{udp['packets']} packets ({udp['lost_percent']:.2f}%)")
@@ -476,5 +479,5 @@ if udp_loss=$(udp_lost_percent "$UDP_CLIENT_JSON"); then
 fi
 wait "$udp_server_pid"
 
-emit_stdout_report "$TCP_CLIENT_JSON" "$UDP_CLIENT_JSON"
+emit_stdout_report "$TCP_CLIENT_JSON" "$UDP_CLIENT_JSON" "$UDP_RATE"
 log "iperf3 TCP+UDP e2e coverage passed"
