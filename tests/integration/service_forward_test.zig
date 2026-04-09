@@ -41,6 +41,35 @@ const UdpCaptureServer = struct {
     }
 };
 
+const DelayedUdpReplyState = struct {
+    fd: std.posix.fd_t,
+    fixed_response: []const u8,
+    record: UdpPacketRecord = .{},
+    actual_packets: usize = 0,
+    packet_received: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    release_reply: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    reply_sent: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+};
+
+const DelayedUdpReplyServer = struct {
+    fd: std.posix.fd_t,
+    port: u16,
+    thread: std.Thread,
+    state: *DelayedUdpReplyState,
+    joined: bool = false,
+
+    fn release(self: *DelayedUdpReplyServer) void {
+        self.state.release_reply.store(true, .monotonic);
+    }
+
+    fn deinit(self: *DelayedUdpReplyServer, allocator: std.mem.Allocator) void {
+        self.release();
+        if (!self.joined) self.thread.join();
+        closeIgnore(self.fd);
+        allocator.destroy(self.state);
+    }
+};
+
 fn tempDbPath(allocator: std.mem.Allocator) ![]u8 {
     try std.fs.cwd().makePath(".zig-cache/integration-tests");
     return std.fmt.allocPrint(allocator, ".zig-cache/integration-tests/{d}.sqlite", .{std.time.nanoTimestamp()});
@@ -142,6 +171,80 @@ fn udpCaptureThread(state: *UdpCaptureState) void {
         };
         _ = std.posix.sendto(state.fd, response, 0, &addr.any, addr.getOsSockLen()) catch {};
     }
+}
+
+fn startDelayedUdpReplyServer(allocator: std.mem.Allocator, fixed_response: []const u8) !DelayedUdpReplyServer {
+    const fd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
+    errdefer closeIgnore(fd);
+
+    const addr = try config.parseIpLiteral("127.0.0.1", 0);
+    try std.posix.bind(fd, &addr.any, addr.getOsSockLen());
+
+    var bound: std.net.Address = undefined;
+    var len: std.posix.socklen_t = @sizeOf(std.net.Address);
+    try std.posix.getsockname(fd, &bound.any, &len);
+
+    const state = try allocator.create(DelayedUdpReplyState);
+    errdefer allocator.destroy(state);
+    state.* = .{
+        .fd = fd,
+        .fixed_response = fixed_response,
+    };
+
+    const thread = try std.Thread.spawn(.{}, delayedUdpReplyThread, .{state});
+    return .{ .fd = fd, .port = bound.getPort(), .thread = thread, .state = state };
+}
+
+fn delayedUdpReplyThread(state: *DelayedUdpReplyState) void {
+    const recv_deadline_ms = std.time.milliTimestamp() + 2_000;
+    var peer: std.net.Address = undefined;
+    var peer_len: std.posix.socklen_t = @sizeOf(std.net.Address);
+    while (std.time.milliTimestamp() < recv_deadline_ms) {
+        var buf: [1024]u8 = undefined;
+        peer_len = @sizeOf(std.net.Address);
+        const amt = std.posix.recvfrom(state.fd, &buf, 0, &peer.any, &peer_len) catch |err| switch (err) {
+            error.WouldBlock => {
+                std.Thread.sleep(10 * std.time.ns_per_ms);
+                continue;
+            },
+            else => return,
+        };
+
+        const copy_len = @min(amt, state.record.payload.len);
+        state.record.remote_port = peer.getPort();
+        state.record.payload_len = copy_len;
+        @memcpy(state.record.payload[0..copy_len], buf[0..copy_len]);
+        state.actual_packets = 1;
+        state.packet_received.store(true, .monotonic);
+        break;
+    }
+
+    const reply_deadline_ms = std.time.milliTimestamp() + 2_000;
+    while (!state.release_reply.load(.monotonic) and std.time.milliTimestamp() < reply_deadline_ms) {
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+    }
+    if (!state.release_reply.load(.monotonic)) return;
+
+    _ = std.posix.sendto(state.fd, state.fixed_response, 0, &peer.any, peer.getOsSockLen()) catch {};
+    state.reply_sent.store(true, .monotonic);
+}
+
+fn waitForAtomicTrue(flag: *const std.atomic.Value(bool), timeout_ms: u32) !void {
+    const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+    while (std.time.milliTimestamp() < deadline_ms) {
+        if (flag.load(.monotonic)) return;
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+    }
+    return error.Timeout;
+}
+
+fn expectUdpReplyCountersIfActive(metrics: *const metrics_mod.Metrics, expected_primary: ?u64, min_dropped_or_stale: u64) !void {
+    const primary = metrics.udp_reply_primary_total.load();
+    const dropped_or_stale = metrics.udp_reply_drop_total.load() + metrics.udp_reply_stale_total.load();
+    if (expected_primary) |value| {
+        try std.testing.expectEqual(value, primary);
+    }
+    try std.testing.expect(dropped_or_stale >= min_dropped_or_stale);
 }
 
 fn createUdpClient() !std.posix.fd_t {
@@ -495,6 +598,175 @@ test "udp update replaces the active session and forwards to the new target" {
     upstream_two.joined = true;
 }
 
+test "udp delayed reply from replaced target is dropped and the new target still replies" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{});
+    defer rt.deinit();
+    try rt.start();
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = 56800, .end = 56900 }, 2000);
+
+    var upstream_old = try startDelayedUdpReplyServer(std.testing.allocator, "old");
+    defer upstream_old.deinit(std.testing.allocator);
+    var upstream_new = try startUdpCaptureServer(std.testing.allocator, 1, .fixed, "new");
+    defer upstream_new.deinit(std.testing.allocator);
+
+    var alloc = try svc.createAllocation(model.Protocol.udp, upstream_old.port);
+    defer alloc.deinit(std.testing.allocator);
+    var configured = try svc.setTarget(alloc.id, "127.0.0.1");
+    defer configured.deinit(std.testing.allocator);
+
+    const target = try config.parseIpLiteral("127.0.0.1", alloc.port);
+    const client = try createUdpClient();
+    defer closeIgnore(client);
+
+    _ = try std.posix.sendto(client, "before-update", 0, &target.any, target.getOsSockLen());
+    try waitForAtomicTrue(&upstream_old.state.packet_received, 500);
+    try waitForUdpSessionCount(&rt, alloc.id, 1, 500);
+
+    var updated = try svc.updateAllocation(alloc.id, upstream_new.port, null);
+    defer updated.deinit(std.testing.allocator);
+    try waitForUdpSessionCount(&rt, alloc.id, 0, 500);
+
+    upstream_old.release();
+    try waitForAtomicTrue(&upstream_old.state.reply_sent, 500);
+    try expectNoUdpResponse(client, 150);
+
+    try sendUdpAndExpect(client, target, "after-update", "new", 250);
+    try waitForUdpSessionCount(&rt, alloc.id, 1, 500);
+
+    upstream_old.thread.join();
+    upstream_old.joined = true;
+    upstream_new.thread.join();
+    upstream_new.joined = true;
+
+    try std.testing.expectEqual(@as(usize, 1), upstream_old.state.actual_packets);
+    try std.testing.expectEqual(@as(usize, 1), upstream_new.state.actual_packets);
+    try std.testing.expectEqual(@as(u64, 2), metrics.runtime_apply_total.load());
+    try std.testing.expectEqual(@as(u64, 2), metrics.udp_packets_in_total.load());
+    try std.testing.expectEqual(@as(u64, 1), metrics.udp_packets_out_total.load());
+    try std.testing.expectEqual(@as(u64, 2), metrics.udp_session_create_total.load());
+    try std.testing.expectEqual(@as(u64, 1), metrics.udp_active_sessions.load());
+    try expectUdpReplyCountersIfActive(&metrics, 1, 1);
+}
+
+test "udp delayed reply from deleted target is dropped without leaking the session" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{});
+    defer rt.deinit();
+    try rt.start();
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = 57000, .end = 57100 }, 2000);
+
+    var upstream = try startDelayedUdpReplyServer(std.testing.allocator, "gone");
+    defer upstream.deinit(std.testing.allocator);
+
+    var alloc = try svc.createAllocation(model.Protocol.udp, upstream.port);
+    defer alloc.deinit(std.testing.allocator);
+    var updated = try svc.setTarget(alloc.id, "127.0.0.1");
+    defer updated.deinit(std.testing.allocator);
+
+    const target = try config.parseIpLiteral("127.0.0.1", alloc.port);
+    const client = try createUdpClient();
+    defer closeIgnore(client);
+
+    _ = try std.posix.sendto(client, "before-delete", 0, &target.any, target.getOsSockLen());
+    try waitForAtomicTrue(&upstream.state.packet_received, 500);
+    try waitForUdpSessionCount(&rt, alloc.id, 1, 500);
+
+    try svc.deleteAllocation(alloc.id);
+    try waitForAllocationRemoval(&rt, alloc.id, 500);
+
+    upstream.release();
+    try waitForAtomicTrue(&upstream.state.reply_sent, 500);
+    try expectNoUdpResponse(client, 150);
+
+    upstream.thread.join();
+    upstream.joined = true;
+
+    try std.testing.expectEqual(@as(usize, 1), upstream.state.actual_packets);
+    try std.testing.expectEqual(@as(u64, 2), metrics.runtime_apply_total.load());
+    try std.testing.expectEqual(@as(u64, 1), metrics.udp_packets_in_total.load());
+    try std.testing.expectEqual(@as(u64, 0), metrics.udp_packets_out_total.load());
+    try std.testing.expectEqual(@as(u64, 1), metrics.udp_session_create_total.load());
+    try std.testing.expectEqual(@as(u64, 0), metrics.udp_active_sessions.load());
+    try expectUdpReplyCountersIfActive(&metrics, 0, 1);
+}
+
+const RuntimeDeinitCtx = struct {
+    rt: *runtime.RuntimeManager,
+    done: *std.atomic.Value(bool),
+};
+
+fn runtimeDeinitThread(ctx: RuntimeDeinitCtx) void {
+    ctx.rt.deinit();
+    ctx.done.store(true, .monotonic);
+}
+
+test "udp delayed reply during runtime deinit is dropped and shutdown completes" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{});
+    try rt.start();
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = 57200, .end = 57300 }, 2000);
+
+    var upstream = try startDelayedUdpReplyServer(std.testing.allocator, "late");
+    defer upstream.deinit(std.testing.allocator);
+
+    var alloc = try svc.createAllocation(model.Protocol.udp, upstream.port);
+    defer alloc.deinit(std.testing.allocator);
+    var updated = try svc.setTarget(alloc.id, "127.0.0.1");
+    defer updated.deinit(std.testing.allocator);
+
+    const target = try config.parseIpLiteral("127.0.0.1", alloc.port);
+    const client = try createUdpClient();
+    defer closeIgnore(client);
+
+    _ = try std.posix.sendto(client, "before-stop", 0, &target.any, target.getOsSockLen());
+    try waitForAtomicTrue(&upstream.state.packet_received, 500);
+    try waitForUdpSessionCount(&rt, alloc.id, 1, 500);
+
+    var deinit_done = std.atomic.Value(bool).init(false);
+    const deinit_thread = try std.Thread.spawn(.{}, runtimeDeinitThread, .{RuntimeDeinitCtx{ .rt = &rt, .done = &deinit_done }});
+    defer deinit_thread.join();
+
+    try waitForAtomicTrue(&deinit_done, 1_000);
+    upstream.release();
+    try waitForAtomicTrue(&upstream.state.reply_sent, 500);
+    try expectNoUdpResponse(client, 150);
+
+    upstream.thread.join();
+    upstream.joined = true;
+
+    try std.testing.expectEqual(@as(usize, 1), upstream.state.actual_packets);
+    try std.testing.expectEqual(@as(u64, 1), metrics.udp_packets_in_total.load());
+    try std.testing.expectEqual(@as(u64, 0), metrics.udp_packets_out_total.load());
+    try std.testing.expectEqual(@as(u64, 1), metrics.udp_session_create_total.load());
+    try std.testing.expectEqual(@as(u64, 0), metrics.udp_active_sessions.load());
+    try expectUdpReplyCountersIfActive(&metrics, 0, 1);
+}
+
 test "udp delete closes the active session and stops forwarding" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
@@ -536,6 +808,48 @@ test "udp delete closes the active session and stops forwarding" {
     try std.testing.expectEqual(@as(u64, 2), metrics.runtime_apply_total.load());
     try std.testing.expectEqual(@as(u64, 1), metrics.udp_session_create_total.load());
     try std.testing.expectEqual(@as(u64, 0), metrics.udp_active_sessions.load());
+    upstream.joined = true;
+}
+
+test "udp delete clears two active sessions and resets the active-session gauge" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{});
+    defer rt.deinit();
+    try rt.start();
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = 56320, .end = 56420 }, 2000);
+
+    var upstream = try startUdpCaptureServer(std.testing.allocator, 2, .echo, "");
+    defer upstream.deinit(std.testing.allocator);
+
+    var alloc = try svc.createAllocation(model.Protocol.udp, upstream.port);
+    defer alloc.deinit(std.testing.allocator);
+    var updated = try svc.setTarget(alloc.id, "127.0.0.1");
+    defer updated.deinit(std.testing.allocator);
+
+    const target = try config.parseIpLiteral("127.0.0.1", alloc.port);
+    const client_one = try createUdpClient();
+    defer closeIgnore(client_one);
+    const client_two = try createUdpClient();
+    defer closeIgnore(client_two);
+
+    try sendUdpAndExpect(client_one, target, "alpha", "alpha", 250);
+    try sendUdpAndExpect(client_two, target, "beta", "beta", 250);
+    try waitForUdpSessionCount(&rt, alloc.id, 2, 500);
+    try std.testing.expectEqual(@as(u64, 2), metrics.udp_active_sessions.load());
+
+    try svc.deleteAllocation(alloc.id);
+    try waitForAllocationRemoval(&rt, alloc.id, 500);
+    try std.testing.expectEqual(@as(u64, 0), metrics.udp_active_sessions.load());
+
+    upstream.thread.join();
     upstream.joined = true;
 }
 

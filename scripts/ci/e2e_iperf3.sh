@@ -14,6 +14,10 @@ UDP_SWEEP_RATES="${UDP_SWEEP_RATES:-1G,5G,10G,25G,50G,100G}"
 UDP_PACKET_SIZES="${UDP_PACKET_SIZES:-256,1200,1472}"
 IPERF_REPETITIONS="${IPERF_REPETITIONS:-3}"
 UDP_MATRIX_DURATION="${UDP_MATRIX_DURATION:-$IPERF_DURATION}"
+TCP_DIRECT_VS_RELAY="${TCP_DIRECT_VS_RELAY:-1}"
+TCP_BENCH_DURATION="${TCP_BENCH_DURATION:-$IPERF_DURATION}"
+TCP_BENCH_REPETITIONS="${TCP_BENCH_REPETITIONS:-$IPERF_REPETITIONS}"
+TCP_STREAMS="${TCP_STREAMS:-1}"
 IPERF_KEEP_RUN_DIR="${IPERF_KEEP_RUN_DIR:-0}"
 IPERF_SERVER_READY_TIMEOUT_SEC="${IPERF_SERVER_READY_TIMEOUT_SEC:-5}"
 READINESS_TIMEOUT_SEC="${READINESS_TIMEOUT_SEC:-30}"
@@ -33,6 +37,15 @@ RELAYD_LOG="${RUN_DIR}/relayd.log"
 TCP_SERVER_LOG="${RUN_DIR}/iperf3-tcp-server.log"
 TCP_CLIENT_JSON="${RUN_DIR}/iperf3-tcp-client.json"
 TCP_CLIENT_LOG="${RUN_DIR}/iperf3-tcp-client.log"
+TCP_DIRECT_VS_RELAY_DIR="${RUN_DIR}/tcp-direct-vs-relay"
+TCP_DIRECT_VS_RELAY_RESULTS="${RUN_DIR}/tcp-direct-vs-relay-results.ndjson"
+TCP_DIRECT_VS_RELAY_SUMMARY="${RUN_DIR}/tcp-direct-vs-relay-summary.txt"
+TCP_DIRECT_JSON="${RUN_DIR}/tcp-direct-client.json"
+TCP_DIRECT_LOG="${RUN_DIR}/tcp-direct-client.log"
+TCP_DIRECT_SERVER_LOG="${RUN_DIR}/tcp-direct-server.log"
+TCP_RELAY_JSON="${RUN_DIR}/tcp-relay-client.json"
+TCP_RELAY_LOG="${RUN_DIR}/tcp-relay-client.log"
+TCP_RELAY_SERVER_LOG="${RUN_DIR}/tcp-relay-server.log"
 UDP_SERVER_LOG="${RUN_DIR}/iperf3-udp-server.log"
 UDP_CLIENT_JSON="${RUN_DIR}/iperf3-udp-client.json"
 UDP_CLIENT_LOG="${RUN_DIR}/iperf3-udp-client.log"
@@ -99,6 +112,11 @@ dump_logs() {
   dump_file tcp_server "$TCP_SERVER_LOG"
   dump_file tcp_client "$TCP_CLIENT_LOG"
   dump_file tcp_client_json "$TCP_CLIENT_JSON"
+  dump_file tcp_direct_summary "$TCP_DIRECT_VS_RELAY_SUMMARY"
+  dump_file tcp_direct_client "$TCP_DIRECT_LOG"
+  dump_file tcp_direct_client_json "$TCP_DIRECT_JSON"
+  dump_file tcp_relay_client "$TCP_RELAY_LOG"
+  dump_file tcp_relay_client_json "$TCP_RELAY_JSON"
   dump_file udp_server "$UDP_SERVER_LOG"
   dump_file udp_client "$UDP_CLIENT_LOG"
   dump_file udp_client_json "$UDP_CLIENT_JSON"
@@ -524,6 +542,172 @@ with open(results_file, 'a', encoding='utf-8') as handle:
 PY
 }
 
+append_tcp_result() {
+  local results_file=$1
+  local path_label=$2
+  local repetition=$3
+  local duration=$4
+  local streams=$5
+  local json_file=$6
+  local client_log=$7
+  local server_log=$8
+  python3 - "$results_file" "$path_label" "$repetition" "$duration" "$streams" "$json_file" "$client_log" "$server_log" <<'PY'
+import json
+import pathlib
+import sys
+
+results_file = pathlib.Path(sys.argv[1])
+path_label = sys.argv[2]
+repetition = int(sys.argv[3])
+duration = float(sys.argv[4])
+streams = int(sys.argv[5])
+json_file = pathlib.Path(sys.argv[6])
+client_log = pathlib.Path(sys.argv[7])
+server_log = pathlib.Path(sys.argv[8])
+payload = json.load(open(json_file, encoding='utf-8'))
+end = payload.get('end') or {}
+summary = end.get('sum_received') or end.get('sum') or {}
+record = {
+    'path': path_label,
+    'repetition': repetition,
+    'duration_sec': duration,
+    'streams': streams,
+    'bytes': summary.get('bytes', 0),
+    'bits_per_second': summary.get('bits_per_second', 0.0),
+    'json_file': json_file.relative_to(results_file.parent).as_posix(),
+    'client_log': client_log.relative_to(results_file.parent).as_posix(),
+    'server_log': server_log.relative_to(results_file.parent).as_posix(),
+}
+with open(results_file, 'a', encoding='utf-8') as handle:
+    handle.write(json.dumps(record, sort_keys=True))
+    handle.write('\n')
+PY
+}
+
+emit_tcp_direct_vs_relay_summary() {
+  local results_file=$1
+  local summary_txt=$2
+  local direct_json=$3
+  local direct_log=$4
+  local direct_server_log=$5
+  local relay_json=$6
+  local relay_log=$7
+  local relay_server_log=$8
+  local legacy_relay_json=$9
+  local legacy_relay_log=${10}
+  local legacy_relay_server_log=${11}
+  python3 - "$results_file" "$summary_txt" "$direct_json" "$direct_log" "$direct_server_log" "$relay_json" "$relay_log" "$relay_server_log" "$legacy_relay_json" "$legacy_relay_log" "$legacy_relay_server_log" <<'PY'
+import json
+import pathlib
+import shutil
+import statistics
+import sys
+
+results_path = pathlib.Path(sys.argv[1])
+summary_path = pathlib.Path(sys.argv[2])
+direct_json_out = pathlib.Path(sys.argv[3])
+direct_log_out = pathlib.Path(sys.argv[4])
+direct_server_log_out = pathlib.Path(sys.argv[5])
+relay_json_out = pathlib.Path(sys.argv[6])
+relay_log_out = pathlib.Path(sys.argv[7])
+relay_server_log_out = pathlib.Path(sys.argv[8])
+legacy_relay_json_out = pathlib.Path(sys.argv[9])
+legacy_relay_log_out = pathlib.Path(sys.argv[10])
+legacy_relay_server_log_out = pathlib.Path(sys.argv[11])
+records = [json.loads(line) for line in results_path.read_text(encoding='utf-8').splitlines() if line.strip()]
+if not records:
+    raise SystemExit("no TCP direct-vs-relay records found")
+
+UNITS_BPS = ['bps', 'kbps', 'mbps', 'gbps']
+
+def format_decimal(value, units):
+    value = float(value)
+    unit_index = 0
+    while value >= 1000.0 and unit_index < len(units) - 1:
+        value /= 1000.0
+        unit_index += 1
+    return f"{value:.2f} {units[unit_index]}"
+
+def summarize(items):
+    throughputs = [item['bits_per_second'] for item in items]
+    median_bps = statistics.median(throughputs)
+    best_bps = max(throughputs)
+    representative = min(
+        items,
+        key=lambda item: (abs(item['bits_per_second'] - median_bps), item['repetition']),
+    )
+    return {
+        'samples': len(items),
+        'median_bps': median_bps,
+        'best_bps': best_bps,
+        'duration_sec': items[0]['duration_sec'],
+        'streams': items[0]['streams'],
+        'representative': representative,
+    }
+
+def copy_record_artifacts(record, json_out, log_out, server_log_out):
+    base = results_path.parent
+    shutil.copy2(base / record['json_file'], json_out)
+    shutil.copy2(base / record['client_log'], log_out)
+    shutil.copy2(base / record['server_log'], server_log_out)
+
+grouped = {}
+for record in records:
+    grouped.setdefault(record['path'], []).append(record)
+
+direct_records = sorted(grouped.get('direct', []), key=lambda item: item['repetition'])
+relay_records = sorted(grouped.get('relay', []), key=lambda item: item['repetition'])
+if not direct_records or not relay_records:
+    raise SystemExit("expected both direct and relay TCP records")
+
+direct = summarize(direct_records)
+relay = summarize(relay_records)
+copy_record_artifacts(direct['representative'], direct_json_out, direct_log_out, direct_server_log_out)
+copy_record_artifacts(relay['representative'], relay_json_out, relay_log_out, relay_server_log_out)
+shutil.copy2(relay_json_out, legacy_relay_json_out)
+shutil.copy2(relay_log_out, legacy_relay_log_out)
+shutil.copy2(relay_server_log_out, legacy_relay_server_log_out)
+
+ratio = direct['median_bps'] / relay['median_bps'] if relay['median_bps'] else None
+relay_share = relay['median_bps'] / direct['median_bps'] if direct['median_bps'] else None
+decision_threshold = 1.15
+decision = 'splice not yet justified'
+note = 'copy-vs-splice note: median relay throughput was unavailable, so the benchmark is not decision-quality.'
+if ratio is not None and relay_share is not None:
+    relay_share_pct = relay_share * 100.0
+    if ratio >= decision_threshold:
+        decision = 'splice next'
+        note = (
+            f"copy-vs-splice note: relay held {relay_share_pct:.1f}% of direct throughput "
+            "at this 1-stream point, so copy-path overhead still looks material enough to justify a splice-focused follow-up."
+        )
+    else:
+        note = (
+            f"copy-vs-splice note: relay held {relay_share_pct:.1f}% of direct throughput "
+            "at this 1-stream point, so the measured copy-path gap is not large enough to justify a splice-first follow-up yet."
+        )
+
+ratio_text = 'n/a' if ratio is None else f"{ratio:.2f}x"
+lines = [
+    '=== relayd tcp direct vs relay summary ===',
+    f"repetitions: {direct['samples']}",
+    f"duration:    {direct['duration_sec']:g}s",
+    f"streams:     {direct['streams']}",
+    f"decision threshold: direct/relay >= {decision_threshold:.2f}x => splice next",
+    '',
+    f"direct throughput: {format_decimal(direct['median_bps'], UNITS_BPS)} median / {format_decimal(direct['best_bps'], UNITS_BPS)} best",
+    f"relay throughput:  {format_decimal(relay['median_bps'], UNITS_BPS)} median / {format_decimal(relay['best_bps'], UNITS_BPS)} best",
+    f"direct/relay ratio: {ratio_text}",
+    f"direct artifact: {direct['representative']['json_file']} | {direct['representative']['client_log']}",
+    f"relay artifact:  {relay['representative']['json_file']} | {relay['representative']['client_log']}",
+    note,
+    decision,
+]
+summary_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+print(summary_path.read_text(encoding='utf-8'), end='')
+PY
+}
+
 emit_matrix_report() {
   local results_file=$1
   local summary_txt=$2
@@ -673,9 +857,7 @@ import sys
 src = pathlib.Path(sys.argv[1])
 dst = pathlib.Path(sys.argv[2])
 dst.parent.mkdir(parents=True, exist_ok=True)
-if dst.exists():
-    shutil.rmtree(dst)
-shutil.copytree(src, dst)
+shutil.copytree(src, dst, dirs_exist_ok=True)
 PY
 }
 
@@ -689,6 +871,10 @@ UDP_PACKET_SIZE=${UDP_PACKET_SIZE}
 UDP_SWEEP_RATES=${UDP_SWEEP_RATES}
 UDP_PACKET_SIZES=${UDP_PACKET_SIZES}
 IPERF_REPETITIONS=${IPERF_REPETITIONS}
+TCP_DIRECT_VS_RELAY=${TCP_DIRECT_VS_RELAY}
+TCP_BENCH_DURATION=${TCP_BENCH_DURATION}
+TCP_BENCH_REPETITIONS=${TCP_BENCH_REPETITIONS}
+TCP_STREAMS=${TCP_STREAMS}
 RUN_DIR=${RUN_DIR}
 LATEST_RUN_DIR=${LATEST_RUN_DIR}
 EOF_MANIFEST
@@ -711,6 +897,18 @@ run_iperf_udp_client() {
   iperf3 "${args[@]}" >"$output_json" 2>"$output_log"
 }
 
+run_iperf_tcp_client() {
+  local target_port=$1
+  local duration=$2
+  local streams=$3
+  local output_json=$4
+  local output_log=$5
+  local -a args
+
+  args=(-c "$TARGET_HOST" -p "$target_port" -t "$duration" -P "$streams" -J)
+  iperf3 "${args[@]}" >"$output_json" 2>"$output_log"
+}
+
 run_tcp_relay_smoke() {
   tcp_target_port=$(pick_free_port tcp)
   log "starting tcp iperf3 server on ${TARGET_HOST}:${tcp_target_port}"
@@ -724,7 +922,7 @@ run_tcp_relay_smoke() {
   tcp_relay_port=$CREATED_RELAY_PORT
   log "tcp allocation id=${tcp_allocation_id} relay_port=${tcp_relay_port}"
 
-  iperf3 -c "$TARGET_HOST" -p "$tcp_relay_port" -t "$IPERF_DURATION" -J >"$TCP_CLIENT_JSON" 2>"$TCP_CLIENT_LOG"
+  run_iperf_tcp_client "$tcp_relay_port" "$IPERF_DURATION" "$TCP_STREAMS" "$TCP_CLIENT_JSON" "$TCP_CLIENT_LOG"
   log "tcp $(assert_iperf_positive "$TCP_CLIENT_JSON" tcp)"
   wait "$tcp_server_pid"
   delete_allocation "$tcp_allocation_id"
@@ -761,10 +959,97 @@ run_udp_relay_smoke() {
 
 run_one_shot_suite() {
   local report
-  run_tcp_relay_smoke
+  if [[ "$TCP_DIRECT_VS_RELAY" == "1" ]]; then
+    run_tcp_direct_vs_relay_suite
+  else
+    run_tcp_relay_smoke
+  fi
   run_udp_relay_smoke
   report=$(emit_stdout_report "$TCP_CLIENT_JSON" "$UDP_CLIENT_JSON" "$UDP_RATE" "$UDP_PACKET_SIZE")
   printf '%s\n' "$report" | tee "$ONE_SHOT_REPORT"
+}
+
+run_tcp_direct_trial() {
+  local repetition=$1
+  local duration=$2
+  local streams=$3
+  local output_prefix=$4
+  local target_port server_log client_json client_log server_pid
+
+  target_port=$(pick_free_port tcp)
+  server_log="${output_prefix}-server.log"
+  client_json="${output_prefix}-client.json"
+  client_log="${output_prefix}-client.log"
+
+  log "tcp direct trial repetition=${repetition} streams=${streams} target_port=${target_port}"
+  iperf3 -s -1 -B "$TARGET_HOST" -p "$target_port" >"$server_log" 2>&1 &
+  server_pid=$!
+  track_child "$server_pid"
+  wait_for_tcp_listener "$TARGET_HOST" "$target_port" "$IPERF_SERVER_READY_TIMEOUT_SEC" || die "tcp direct iperf3 server did not become ready on ${TARGET_HOST}:${target_port}"
+
+  run_iperf_tcp_client "$target_port" "$duration" "$streams" "$client_json" "$client_log"
+  log "tcp direct repetition=${repetition} $(assert_iperf_positive "$client_json" tcp)"
+  wait "$server_pid"
+  append_tcp_result "$TCP_DIRECT_VS_RELAY_RESULTS" direct "$repetition" "$duration" "$streams" "$client_json" "$client_log" "$server_log"
+}
+
+run_tcp_relay_trial() {
+  local repetition=$1
+  local duration=$2
+  local streams=$3
+  local output_prefix=$4
+  local target_port server_log client_json client_log server_pid
+  local allocation_id relay_port
+
+  target_port=$(pick_free_port tcp)
+  server_log="${output_prefix}-server.log"
+  client_json="${output_prefix}-client.json"
+  client_log="${output_prefix}-client.log"
+
+  log "tcp relay trial repetition=${repetition} streams=${streams} target_port=${target_port}"
+  iperf3 -s -1 -B "$TARGET_HOST" -p "$target_port" >"$server_log" 2>&1 &
+  server_pid=$!
+  track_child "$server_pid"
+  wait_for_tcp_listener "$TARGET_HOST" "$target_port" "$IPERF_SERVER_READY_TIMEOUT_SEC" || die "tcp relay iperf3 server did not become ready on ${TARGET_HOST}:${target_port}"
+
+  create_allocation tcp "$target_port"
+  allocation_id=$CREATED_ALLOCATION_ID
+  relay_port=$CREATED_RELAY_PORT
+
+  run_iperf_tcp_client "$relay_port" "$duration" "$streams" "$client_json" "$client_log"
+  log "tcp relay repetition=${repetition} relay_port=${relay_port} $(assert_iperf_positive "$client_json" tcp)"
+  wait "$server_pid"
+  delete_allocation "$allocation_id"
+  append_tcp_result "$TCP_DIRECT_VS_RELAY_RESULTS" relay "$repetition" "$duration" "$streams" "$client_json" "$client_log" "$server_log"
+}
+
+run_tcp_direct_vs_relay_suite() {
+  local repetition trial_dir output_prefix
+
+  mkdir -p "$TCP_DIRECT_VS_RELAY_DIR"
+  : >"$TCP_DIRECT_VS_RELAY_RESULTS"
+
+  for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
+    trial_dir="${TCP_DIRECT_VS_RELAY_DIR}/rep-${repetition}"
+    mkdir -p "$trial_dir"
+    output_prefix="${trial_dir}/direct"
+    run_tcp_direct_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix"
+    output_prefix="${trial_dir}/relay"
+    run_tcp_relay_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix"
+  done
+
+  emit_tcp_direct_vs_relay_summary \
+    "$TCP_DIRECT_VS_RELAY_RESULTS" \
+    "$TCP_DIRECT_VS_RELAY_SUMMARY" \
+    "$TCP_DIRECT_JSON" \
+    "$TCP_DIRECT_LOG" \
+    "$TCP_DIRECT_SERVER_LOG" \
+    "$TCP_RELAY_JSON" \
+    "$TCP_RELAY_LOG" \
+    "$TCP_RELAY_SERVER_LOG" \
+    "$TCP_CLIENT_JSON" \
+    "$TCP_CLIENT_LOG" \
+    "$TCP_SERVER_LOG"
 }
 
 run_udp_direct_trial() {

@@ -38,6 +38,7 @@ pub const RuntimeManager = struct {
     registry_mutex: std.Thread.Mutex,
     listeners: std.StringHashMap(*ListenerEntry),
     listener_fds: std.AutoHashMap(posix.fd_t, *ListenerEntry),
+    udp_reply_fds: std.AutoHashMap(posix.fd_t, UdpReplyDispatch),
     tcp_sessions_mutex: std.Thread.Mutex,
     tcp_sessions: std.ArrayList(*TcpSessionCtx),
 
@@ -56,6 +57,7 @@ pub const RuntimeManager = struct {
             .registry_mutex = .{},
             .listeners = std.StringHashMap(*ListenerEntry).init(allocator),
             .listener_fds = std.AutoHashMap(posix.fd_t, *ListenerEntry).init(allocator),
+            .udp_reply_fds = std.AutoHashMap(posix.fd_t, UdpReplyDispatch).init(allocator),
             .tcp_sessions_mutex = .{},
             .tcp_sessions = .{},
         };
@@ -81,6 +83,7 @@ pub const RuntimeManager = struct {
         }
         self.listeners.deinit();
         self.listener_fds.deinit();
+        self.udp_reply_fds.deinit();
         self.registry_mutex.unlock();
         self.shutdownTcpSessions();
         self.tcp_sessions.deinit(self.allocator);
@@ -208,17 +211,32 @@ pub const RuntimeManager = struct {
 
     fn handleFd(self: *RuntimeManager, fd: posix.fd_t) void {
         self.registry_mutex.lock();
-        const entry = self.listener_fds.get(fd) orelse {
-            self.registry_mutex.unlock();
+        if (self.listener_fds.get(fd)) |entry| {
+            entry.mutex.lock();
+            switch (entry.protocol) {
+                .tcp => {
+                    self.registry_mutex.unlock();
+                    defer entry.mutex.unlock();
+                    handleTcpAccept(self.allocator, self.metrics, self.force_tcp_copy_fallback, entry);
+                },
+                .udp => {
+                    defer self.registry_mutex.unlock();
+                    defer entry.mutex.unlock();
+                    handleUdpReadable(self.allocator, self.metrics, entry);
+                },
+            }
             return;
-        };
-        entry.mutex.lock();
-        self.registry_mutex.unlock();
-        defer entry.mutex.unlock();
-        switch (entry.protocol) {
-            .tcp => handleTcpAccept(self.allocator, self.metrics, self.force_tcp_copy_fallback, entry),
-            .udp => handleUdpReadable(self.allocator, self.metrics, entry),
         }
+        if (self.udp_reply_fds.get(fd)) |dispatch| {
+            const entry = dispatch.entry;
+            entry.mutex.lock();
+            defer self.registry_mutex.unlock();
+            defer entry.mutex.unlock();
+            handleUdpReplyReadable(self.metrics, entry, dispatch.key);
+            return;
+        }
+        self.metrics.udp_reply_stale_total.inc();
+        self.registry_mutex.unlock();
     }
 
     fn cleanupUdpSessions(self: *RuntimeManager) void {
@@ -247,13 +265,7 @@ pub const RuntimeManager = struct {
                         }
                     }
                     self.metrics.udp_session_expire_total.inc();
-                    self.metrics.udp_active_sessions.dec();
-                    shutdownIgnoreBadFd(session.upstream_fd);
-                    closeIgnoreBadFd(session.upstream_fd);
-                    if (session.thread) |thread| thread.join();
-                    self.allocator.destroy(session);
-                    entry.udp_cached_key = null;
-                    entry.udp_cached_session = null;
+                    removeUdpSessionLocked(entry, owned_key, session, false);
                     removed_any = true;
                     break;
                 }
@@ -393,13 +405,17 @@ const ClientKey = struct {
     addr: [16]u8,
 };
 
+const UdpReplyDispatch = struct {
+    entry: *ListenerEntry,
+    key: ClientKey,
+};
+
 const UdpSession = struct {
     key: ClientKey,
     client_addr: net.Address,
     client_addr_len: posix.socklen_t,
     upstream_fd: posix.fd_t,
     last_seen_ms: std.atomic.Value(i64),
-    thread: ?std.Thread = null,
 };
 
 fn destroyEntry(allocator: std.mem.Allocator, entry: *ListenerEntry) void {
@@ -413,14 +429,12 @@ fn destroyEntry(allocator: std.mem.Allocator, entry: *ListenerEntry) void {
 }
 
 fn closeUdpSessions(allocator: std.mem.Allocator, entry: *ListenerEntry) void {
-    var it = entry.udp_sessions.iterator();
-    while (it.next()) |kv| {
+    _ = allocator;
+    while (entry.udp_sessions.count() > 0) {
+        var it = entry.udp_sessions.iterator();
+        const kv = it.next() orelse break;
         const session = kv.value_ptr.*;
-        shutdownIgnoreBadFd(session.upstream_fd);
-        closeIgnoreBadFd(session.upstream_fd);
-        if (session.thread) |thread| thread.join();
-        entry.manager.metrics.udp_active_sessions.dec();
-        allocator.destroy(session);
+        removeUdpSessionLocked(entry, session.key, session, true);
     }
     entry.udp_sessions.clearRetainingCapacity();
     entry.udp_cached_key = null;
@@ -745,7 +759,7 @@ fn getOrCreateUdpSession(allocator: std.mem.Allocator, metrics: *Metrics, entry:
         metrics.udp_send_errors_total.inc();
         return null;
     };
-    const upstream_fd = posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.CLOEXEC, posix.IPPROTO.UDP) catch {
+    const upstream_fd = posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, posix.IPPROTO.UDP) catch {
         metrics.udp_send_errors_total.inc();
         return null;
     };
@@ -775,7 +789,6 @@ fn getOrCreateUdpSession(allocator: std.mem.Allocator, metrics: *Metrics, entry:
         .client_addr_len = addr.getOsSockLen(),
         .upstream_fd = upstream_fd,
         .last_seen_ms = std.atomic.Value(i64).init(std.time.milliTimestamp()),
-        .thread = null,
     };
     entry.udp_sessions.put(key, session) catch {
         posix.close(upstream_fd);
@@ -785,23 +798,22 @@ fn getOrCreateUdpSession(allocator: std.mem.Allocator, metrics: *Metrics, entry:
     };
     metrics.udp_session_create_total.inc();
     metrics.udp_active_sessions.inc();
-
-    const session_ctx = allocator.create(UdpSessionThreadCtx) catch {
-        _ = entry.udp_sessions.remove(key);
-        allocator.destroy(session);
-        metrics.udp_active_sessions.dec();
-        return null;
-    };
-    session_ctx.* = .{ .allocator = allocator, .listener_fd = entry.fd orelse upstream_fd, .metrics = metrics, .session = session };
-    const thread = std.Thread.spawn(.{}, udpSessionThread, .{session_ctx}) catch {
-        allocator.destroy(session_ctx);
+    var event = std.os.linux.epoll_event{ .events = std.os.linux.EPOLL.IN, .data = .{ .fd = upstream_fd } };
+    posix.epoll_ctl(entry.manager.epoll_fd, std.os.linux.EPOLL.CTL_ADD, upstream_fd, &event) catch {
         _ = entry.udp_sessions.remove(key);
         posix.close(upstream_fd);
         allocator.destroy(session);
         metrics.udp_active_sessions.dec();
         return null;
     };
-    session.thread = thread;
+    entry.manager.udp_reply_fds.put(upstream_fd, .{ .entry = entry, .key = key }) catch {
+        posix.epoll_ctl(entry.manager.epoll_fd, std.os.linux.EPOLL.CTL_DEL, upstream_fd, &event) catch {};
+        _ = entry.udp_sessions.remove(key);
+        posix.close(upstream_fd);
+        allocator.destroy(session);
+        metrics.udp_active_sessions.dec();
+        return null;
+    };
     entry.udp_cached_key = key;
     entry.udp_cached_session = session;
     return session;
@@ -862,31 +874,56 @@ fn flushUdpConnectedBatch(metrics: *Metrics, session: *UdpSession, buffers: *con
     }
 }
 
-const UdpSessionThreadCtx = struct {
-    allocator: std.mem.Allocator,
-    listener_fd: posix.fd_t,
-    metrics: *Metrics,
-    session: *UdpSession,
-};
+fn handleUdpReplyReadable(metrics: *Metrics, entry: *ListenerEntry, key: ClientKey) void {
+    const session = entry.udp_sessions.get(key) orelse {
+        metrics.udp_reply_stale_total.inc();
+        return;
+    };
 
-fn udpSessionThread(ctx: *UdpSessionThreadCtx) void {
-    defer ctx.allocator.destroy(ctx);
     var buffer: [64 * 1024]u8 = undefined;
     while (true) {
-        const amt = posix.recv(ctx.session.upstream_fd, &buffer, 0) catch {
-            ctx.metrics.udp_recv_errors_total.inc();
+        const amt = posix.recv(session.upstream_fd, &buffer, 0) catch |err| switch (err) {
+            error.WouldBlock => break,
+            else => {
+                metrics.udp_recv_errors_total.inc();
+                metrics.udp_reply_drop_total.inc();
+                removeUdpSessionLocked(entry, key, session, false);
+                break;
+            },
+        };
+        if (amt == 0) {
+            removeUdpSessionLocked(entry, key, session, false);
+            break;
+        }
+        _ = posix.sendto(entry.fd orelse break, buffer[0..amt], 0, &session.client_addr.any, session.client_addr_len) catch {
+            metrics.udp_send_errors_total.inc();
+            metrics.udp_reply_drop_total.inc();
+            removeUdpSessionLocked(entry, key, session, false);
             break;
         };
-        if (amt == 0) break;
-        _ = posix.sendto(ctx.listener_fd, buffer[0..amt], 0, &ctx.session.client_addr.any, ctx.session.client_addr_len) catch {
-            std.debug.print("udp reply send failed port={d} len={d}\n", .{ ctx.session.client_addr.getPort(), ctx.session.client_addr_len });
-            ctx.metrics.udp_send_errors_total.inc();
-            break;
-        };
-        ctx.metrics.udp_packets_out_total.inc();
-        ctx.metrics.udp_bytes_out_total.add(@intCast(amt));
-        ctx.session.last_seen_ms.store(std.time.milliTimestamp(), .monotonic);
+        metrics.udp_reply_primary_total.inc();
+        metrics.udp_packets_out_total.inc();
+        metrics.udp_bytes_out_total.add(@intCast(amt));
+        session.last_seen_ms.store(std.time.milliTimestamp(), .monotonic);
     }
+}
+
+fn removeUdpSessionLocked(entry: *ListenerEntry, key: ClientKey, session: *UdpSession, count_as_reply_drop: bool) void {
+    var event = std.os.linux.epoll_event{ .events = 0, .data = .{ .fd = session.upstream_fd } };
+    posix.epoll_ctl(entry.manager.epoll_fd, std.os.linux.EPOLL.CTL_DEL, session.upstream_fd, &event) catch {};
+    _ = entry.manager.udp_reply_fds.remove(session.upstream_fd);
+    _ = entry.udp_sessions.remove(key);
+    if (entry.udp_cached_key) |cached_key| {
+        if (std.meta.eql(cached_key, key)) {
+            entry.udp_cached_key = null;
+            entry.udp_cached_session = null;
+        }
+    }
+    shutdownIgnoreBadFd(session.upstream_fd);
+    closeIgnoreBadFd(session.upstream_fd);
+    if (count_as_reply_drop) entry.manager.metrics.udp_reply_drop_total.inc();
+    entry.manager.metrics.udp_active_sessions.dec();
+    entry.allocator.destroy(session);
 }
 
 fn makeClientKey(addr: net.Address, len: posix.socklen_t) ClientKey {

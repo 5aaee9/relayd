@@ -65,9 +65,10 @@ UDP_MATRIX_DURATION=2 \
 
 Useful knobs:
 - `UDP_RATE` / `UDP_PACKET_SIZE` for one-shot mode
+- `TCP_DIRECT_VS_RELAY`, `TCP_BENCH_DURATION`, `TCP_BENCH_REPETITIONS`, `TCP_STREAMS` for the one-shot TCP direct-vs-relay decision artifact
 - `UDP_SWEEP_RATES`, `UDP_PACKET_SIZES`, `IPERF_REPETITIONS`, `UDP_MATRIX_DURATION` for matrix mode
 - `UDP_SOCKET_RCVBUF_BYTES`, `UDP_SOCKET_SNDBUF_BYTES` for relay UDP socket buffer tuning
-- artifacts are written under `.zig-cache/e2e/iperf3-latest`
+- artifacts are written under `.zig-cache/e2e/iperf3-latest`, including `tcp-direct-vs-relay-summary.txt` plus representative direct/relay TCP JSON/log outputs
 
 ## API
 ### Create
