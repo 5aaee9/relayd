@@ -75,7 +75,40 @@ fn tempDbPath(allocator: std.mem.Allocator) ![]u8 {
     return std.fmt.allocPrint(allocator, ".zig-cache/integration-tests/{d}.sqlite", .{std.time.nanoTimestamp()});
 }
 
-fn startTcpEchoServer() !struct { server: std.net.Server, port: u16, thread: std.Thread } {
+const TcpEchoServer = struct {
+    server: std.net.Server,
+    port: u16,
+    thread: std.Thread,
+
+    fn deinit(self: *TcpEchoServer) void {
+        self.server.deinit();
+        self.thread.join();
+    }
+};
+
+const TcpForwardHarness = struct {
+    path: []u8,
+    repo: sqlite.Repository,
+    metrics: metrics_mod.Metrics,
+    rt: runtime.RuntimeManager,
+    svc: service_mod.Service,
+    echo: TcpEchoServer,
+    alloc: model.Allocation,
+    updated: model.Allocation,
+
+    fn deinit(self: *TcpForwardHarness, allocator: std.mem.Allocator) void {
+        self.updated.deinit(allocator);
+        self.alloc.deinit(allocator);
+        self.echo.deinit();
+        self.rt.deinit();
+        self.repo.close();
+        std.fs.cwd().deleteFile(self.path) catch {};
+        allocator.free(self.path);
+        allocator.destroy(self);
+    }
+};
+
+fn startTcpEchoServer() !TcpEchoServer {
     const addr = try config.parseIpLiteral("127.0.0.1", 0);
     const server = try addr.listen(.{ .reuse_address = true });
     var bound: std.net.Address = undefined;
@@ -93,6 +126,68 @@ fn tcpEchoThread(fd: std.posix.fd_t) void {
     var buf: [4]u8 = undefined;
     const amt = std.posix.read(conn.stream.handle, &buf) catch return;
     if (amt > 0) _ = std.posix.write(conn.stream.handle, buf[0..amt]) catch {};
+}
+
+fn startTcpForwardHarness(options: runtime.Options) !*TcpForwardHarness {
+    const allocator = std.testing.allocator;
+    const harness = try allocator.create(TcpForwardHarness);
+    errdefer allocator.destroy(harness);
+    const path = try tempDbPath(allocator);
+    errdefer {
+        std.fs.cwd().deleteFile(path) catch {};
+        allocator.free(path);
+    }
+
+    harness.* = .{
+        .path = path,
+        .repo = try sqlite.Repository.open(allocator, path),
+        .metrics = .{},
+        .rt = undefined,
+        .svc = undefined,
+        .echo = undefined,
+        .alloc = undefined,
+        .updated = undefined,
+    };
+    errdefer harness.repo.close();
+
+    harness.rt = try runtime.RuntimeManager.init(allocator, &harness.metrics, options);
+    errdefer harness.rt.deinit();
+    try harness.rt.start();
+
+    harness.svc = service_mod.Service.init(allocator, &harness.repo, &harness.rt, .{ .start = 55000, .end = 55100 }, 2000);
+    harness.echo = try startTcpEchoServer();
+    errdefer harness.echo.deinit();
+
+    harness.alloc = try harness.svc.createAllocation(model.Protocol.tcp, harness.echo.port);
+    errdefer harness.alloc.deinit(allocator);
+    harness.updated = try harness.svc.setTarget(harness.alloc.id, "127.0.0.1");
+    errdefer harness.updated.deinit(allocator);
+
+    return harness;
+}
+
+fn connectRelayStream(port: u16) !std.net.Stream {
+    const addr = try config.parseIpLiteral("127.0.0.1", port);
+    return try std.net.tcpConnectToAddress(addr);
+}
+
+fn expectTcpReadClosed(stream: *const std.net.Stream, timeout_ms: u32) !void {
+    const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+    var pollfds = [_]std.posix.pollfd{
+        .{ .fd = stream.handle, .events = std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR, .revents = 0 },
+    };
+    while (std.time.milliTimestamp() < deadline_ms) {
+        const ready = try std.posix.poll(&pollfds, 50);
+        if (ready == 0) continue;
+        var buf: [16]u8 = undefined;
+        const amt = std.posix.read(stream.handle, &buf) catch |err| switch (err) {
+            error.ConnectionResetByPeer => return,
+            else => return err,
+        };
+        try std.testing.expectEqual(@as(usize, 0), amt);
+        return;
+    }
+    return error.Timeout;
 }
 
 fn startUdpEchoServer() !struct { fd: std.posix.fd_t, port: u16, thread: std.Thread } {
@@ -238,6 +333,15 @@ fn waitForAtomicTrue(flag: *const std.atomic.Value(bool), timeout_ms: u32) !void
     return error.Timeout;
 }
 
+fn waitForCounterValue(counter: *const metrics_mod.Counter, expected: u64, timeout_ms: u32) !void {
+    const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+    while (std.time.milliTimestamp() < deadline_ms) {
+        if (counter.load() == expected) return;
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+    }
+    return error.Timeout;
+}
+
 fn expectUdpReplyCountersIfActive(metrics: *const metrics_mod.Metrics, expected_primary: ?u64, min_dropped_or_stale: u64) !void {
     const primary = metrics.udp_reply_primary_total.load();
     const dropped_or_stale = metrics.udp_reply_drop_total.load() + metrics.udp_reply_stale_total.load();
@@ -341,39 +445,124 @@ fn closeIgnore(fd: std.posix.fd_t) void {
 }
 
 test "service forwards tcp traffic after target is configured" {
-    const path = try tempDbPath(std.testing.allocator);
-    defer {
-        std.fs.cwd().deleteFile(path) catch {};
-        std.testing.allocator.free(path);
-    }
+    var harness = try startTcpForwardHarness(.{});
+    defer harness.deinit(std.testing.allocator);
 
-    var repo = try sqlite.Repository.open(std.testing.allocator, path);
-    defer repo.close();
-    var metrics = metrics_mod.Metrics{};
-    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{});
-    defer rt.deinit();
-    try rt.start();
-    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = 55000, .end = 55100 }, 2000);
-
-    var echo = try startTcpEchoServer();
-    defer {
-        echo.server.deinit();
-        echo.thread.join();
-    }
-
-    var alloc = try svc.createAllocation(model.Protocol.tcp, echo.port);
-    defer alloc.deinit(std.testing.allocator);
-    var updated = try svc.setTarget(alloc.id, "127.0.0.1");
-    defer updated.deinit(std.testing.allocator);
-
-    const addr = try config.parseIpLiteral("127.0.0.1", alloc.port);
-    const stream = try std.net.tcpConnectToAddress(addr);
-    defer stream.close();
+    const stream = try connectRelayStream(harness.alloc.port);
+    defer closeIgnore(stream.handle);
     _ = try std.posix.write(stream.handle, "ping");
     var buf: [4]u8 = undefined;
     const amt = try std.posix.read(stream.handle, &buf);
     try std.testing.expectEqual(@as(usize, 4), amt);
     try std.testing.expectEqualStrings("ping", &buf);
+    try std.testing.expectEqual(@as(u64, 0), harness.metrics.tcp_splice_attempt_total.load());
+    try std.testing.expectEqual(@as(u64, 0), harness.metrics.tcp_splice_success_total.load());
+    try std.testing.expectEqual(@as(u64, 0), harness.metrics.tcp_splice_fallback_total.load());
+    try std.testing.expectEqual(@as(u64, 1), harness.metrics.tcp_copy_fallback_total.load());
+}
+
+test "tcp forced-copy override wins over splice-enabled mode" {
+    var harness = try startTcpForwardHarness(.{
+        .tcp_splice_enabled = true,
+        .force_tcp_copy_fallback = true,
+    });
+    defer harness.deinit(std.testing.allocator);
+
+    const stream = try connectRelayStream(harness.alloc.port);
+    defer closeIgnore(stream.handle);
+    _ = try std.posix.write(stream.handle, "ping");
+    var buf: [4]u8 = undefined;
+    const amt = try std.posix.read(stream.handle, &buf);
+    try std.testing.expectEqual(@as(usize, 4), amt);
+    try std.testing.expectEqualStrings("ping", &buf);
+    try std.testing.expectEqual(@as(u64, 0), harness.metrics.tcp_splice_attempt_total.load());
+    try std.testing.expectEqual(@as(u64, 0), harness.metrics.tcp_splice_success_total.load());
+    try std.testing.expectEqual(@as(u64, 1), harness.metrics.tcp_splice_fallback_total.load());
+    try std.testing.expectEqual(@as(u64, 1), harness.metrics.tcp_splice_fallback_forced_total.load());
+    try std.testing.expectEqual(@as(u64, 1), harness.metrics.tcp_copy_fallback_total.load());
+}
+
+test "tcp splice-enabled mode records splice success" {
+    var harness = try startTcpForwardHarness(.{
+        .tcp_splice_enabled = true,
+    });
+    defer harness.deinit(std.testing.allocator);
+
+    const stream = try connectRelayStream(harness.alloc.port);
+    _ = try std.posix.write(stream.handle, "ping");
+    var buf: [4]u8 = undefined;
+    const amt = try std.posix.read(stream.handle, &buf);
+    try std.testing.expectEqual(@as(usize, 4), amt);
+    try std.testing.expectEqualStrings("ping", &buf);
+    stream.close();
+    try waitForCounterValue(&harness.metrics.tcp_splice_success_total, 1, 500);
+    try std.testing.expectEqual(@as(u64, 1), harness.metrics.tcp_splice_attempt_total.load());
+    try std.testing.expectEqual(@as(u64, 1), harness.metrics.tcp_splice_success_total.load());
+    try std.testing.expectEqual(@as(u64, 1), harness.metrics.tcp_splice_fast_path_total.load());
+    try std.testing.expectEqual(@as(u64, 0), harness.metrics.tcp_splice_fallback_total.load());
+    try std.testing.expectEqual(@as(u64, 0), harness.metrics.tcp_splice_hard_failure_total.load());
+}
+
+test "tcp splice recoverable setup failure falls back to copy" {
+    var harness = try startTcpForwardHarness(.{
+        .tcp_splice_enabled = true,
+        .tcp_splice_test_mode = .recoverable_setup_failure,
+    });
+    defer harness.deinit(std.testing.allocator);
+
+    const stream = try connectRelayStream(harness.alloc.port);
+    defer closeIgnore(stream.handle);
+    _ = try std.posix.write(stream.handle, "ping");
+    var buf: [4]u8 = undefined;
+    const amt = try std.posix.read(stream.handle, &buf);
+    try std.testing.expectEqual(@as(usize, 4), amt);
+    try std.testing.expectEqualStrings("ping", &buf);
+    try std.testing.expectEqual(@as(u64, 1), harness.metrics.tcp_splice_attempt_total.load());
+    try std.testing.expectEqual(@as(u64, 0), harness.metrics.tcp_splice_success_total.load());
+    try std.testing.expectEqual(@as(u64, 1), harness.metrics.tcp_splice_fallback_total.load());
+    try std.testing.expectEqual(@as(u64, 1), harness.metrics.tcp_splice_fallback_unsupported_total.load());
+    try std.testing.expectEqual(@as(u64, 0), harness.metrics.tcp_splice_hard_failure_total.load());
+    try std.testing.expectEqual(@as(u64, 1), harness.metrics.tcp_copy_fallback_total.load());
+}
+
+test "tcp splice recoverable runtime failure increments runtime fallback bucket" {
+    var harness = try startTcpForwardHarness(.{
+        .tcp_splice_enabled = true,
+        .tcp_splice_test_mode = .recoverable_runtime_failure,
+    });
+    defer harness.deinit(std.testing.allocator);
+
+    const stream = try connectRelayStream(harness.alloc.port);
+    defer closeIgnore(stream.handle);
+    _ = try std.posix.write(stream.handle, "ping");
+    var buf: [4]u8 = undefined;
+    const amt = try std.posix.read(stream.handle, &buf);
+    try std.testing.expectEqual(@as(usize, 4), amt);
+    try std.testing.expectEqualStrings("ping", &buf);
+    try std.testing.expectEqual(@as(u64, 1), harness.metrics.tcp_splice_attempt_total.load());
+    try std.testing.expectEqual(@as(u64, 0), harness.metrics.tcp_splice_success_total.load());
+    try std.testing.expectEqual(@as(u64, 1), harness.metrics.tcp_splice_fallback_total.load());
+    try std.testing.expectEqual(@as(u64, 1), harness.metrics.tcp_splice_fallback_runtime_error_total.load());
+    try std.testing.expectEqual(@as(u64, 0), harness.metrics.tcp_splice_hard_failure_total.load());
+    try std.testing.expectEqual(@as(u64, 1), harness.metrics.tcp_copy_fallback_total.load());
+}
+
+test "tcp splice hard failure aborts session predictably" {
+    var harness = try startTcpForwardHarness(.{
+        .tcp_splice_enabled = true,
+        .tcp_splice_test_mode = .hard_failure,
+    });
+    defer harness.deinit(std.testing.allocator);
+
+    const stream = try connectRelayStream(harness.alloc.port);
+    defer closeIgnore(stream.handle);
+    _ = std.posix.write(stream.handle, "ping") catch {};
+    try expectTcpReadClosed(&stream, 500);
+    try std.testing.expectEqual(@as(u64, 1), harness.metrics.tcp_splice_attempt_total.load());
+    try std.testing.expectEqual(@as(u64, 0), harness.metrics.tcp_splice_success_total.load());
+    try std.testing.expectEqual(@as(u64, 0), harness.metrics.tcp_splice_fallback_total.load());
+    try std.testing.expectEqual(@as(u64, 1), harness.metrics.tcp_splice_hard_failure_total.load());
+    try std.testing.expectEqual(@as(u64, 0), harness.metrics.tcp_copy_fallback_total.load());
 }
 
 test "runtime deinit does not hang with active tcp session" {
@@ -403,7 +592,7 @@ test "runtime deinit does not hang with active tcp session" {
 
     const addr = try config.parseIpLiteral("127.0.0.1", alloc.port);
     const stream = try std.net.tcpConnectToAddress(addr);
-    defer stream.close();
+    defer closeIgnore(stream.handle);
 
     rt.deinit();
 }

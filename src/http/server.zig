@@ -164,6 +164,7 @@ fn handleRequest(server: *HttpServer, request: *http.Server.Request) !void {
 
     const target = request.head.target;
     if (request.head.method == .GET and std.mem.eql(u8, target, "/v1/ports")) return handleList(server, request);
+    if (request.head.method == .GET and std.mem.eql(u8, target, "/v1/metrics")) return handleMetrics(server, request);
     if (request.head.method == .POST and std.mem.eql(u8, target, "/v1/ports")) return handleCreate(server, request);
     if (request.head.method == .POST and std.mem.eql(u8, target, "/v1/ports/target")) return handleSetTarget(server, request);
     if (std.mem.startsWith(u8, target, "/v1/ports/")) {
@@ -255,6 +256,46 @@ fn handleList(server: *HttpServer, request: *http.Server.Request) !void {
     try request.respond(payload, .{ .status = .ok, .keep_alive = false, .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }} });
 }
 
+const JsonMetrics = struct {
+    allocations_total: u64,
+    runtime_apply_total: u64,
+    restore_failures_total: u64,
+    rejected_no_host_total: u64,
+    bind_fail_total: u64,
+    tcp_splice_fast_path_total: u64,
+    tcp_copy_fallback_total: u64,
+    tcp_splice_attempt_total: u64,
+    tcp_splice_success_total: u64,
+    tcp_splice_fallback_total: u64,
+    tcp_splice_hard_failure_total: u64,
+    tcp_splice_fallback_forced_total: u64,
+    tcp_splice_fallback_unsupported_total: u64,
+    tcp_splice_fallback_runtime_error_total: u64,
+    udp_packets_in_total: u64,
+    udp_packets_out_total: u64,
+    udp_bytes_in_total: u64,
+    udp_bytes_out_total: u64,
+    udp_recv_errors_total: u64,
+    udp_send_errors_total: u64,
+    udp_session_create_total: u64,
+    udp_session_expire_total: u64,
+    udp_batch_calls_total: u64,
+    udp_batch_messages_total: u64,
+    udp_drop_total: u64,
+    udp_reply_primary_total: u64,
+    udp_reply_drop_total: u64,
+    udp_reply_stale_total: u64,
+    udp_active_sessions: u64,
+    restore_timeout_total: u64,
+    http_non_loopback_bind_total: u64,
+};
+
+fn handleMetrics(server: *HttpServer, request: *http.Server.Request) !void {
+    const payload = try encodeMetrics(server.allocator, server.metrics);
+    defer server.allocator.free(payload);
+    try request.respond(payload, .{ .status = .ok, .keep_alive = false, .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }} });
+}
+
 fn authorized(token: []const u8, request: *const http.Server.Request) bool {
     var it = request.iterateHeaders();
     while (it.next()) |header| {
@@ -321,6 +362,42 @@ fn toJsonView(view: model.AllocationView) JsonView {
     };
 }
 
+fn toJsonMetrics(metrics: *const Metrics) JsonMetrics {
+    return .{
+        .allocations_total = metrics.allocations_total.load(),
+        .runtime_apply_total = metrics.runtime_apply_total.load(),
+        .restore_failures_total = metrics.restore_failures_total.load(),
+        .rejected_no_host_total = metrics.rejected_no_host_total.load(),
+        .bind_fail_total = metrics.bind_fail_total.load(),
+        .tcp_splice_fast_path_total = metrics.tcp_splice_fast_path_total.load(),
+        .tcp_copy_fallback_total = metrics.tcp_copy_fallback_total.load(),
+        .tcp_splice_attempt_total = metrics.tcp_splice_attempt_total.load(),
+        .tcp_splice_success_total = metrics.tcp_splice_success_total.load(),
+        .tcp_splice_fallback_total = metrics.tcp_splice_fallback_total.load(),
+        .tcp_splice_hard_failure_total = metrics.tcp_splice_hard_failure_total.load(),
+        .tcp_splice_fallback_forced_total = metrics.tcp_splice_fallback_forced_total.load(),
+        .tcp_splice_fallback_unsupported_total = metrics.tcp_splice_fallback_unsupported_total.load(),
+        .tcp_splice_fallback_runtime_error_total = metrics.tcp_splice_fallback_runtime_error_total.load(),
+        .udp_packets_in_total = metrics.udp_packets_in_total.load(),
+        .udp_packets_out_total = metrics.udp_packets_out_total.load(),
+        .udp_bytes_in_total = metrics.udp_bytes_in_total.load(),
+        .udp_bytes_out_total = metrics.udp_bytes_out_total.load(),
+        .udp_recv_errors_total = metrics.udp_recv_errors_total.load(),
+        .udp_send_errors_total = metrics.udp_send_errors_total.load(),
+        .udp_session_create_total = metrics.udp_session_create_total.load(),
+        .udp_session_expire_total = metrics.udp_session_expire_total.load(),
+        .udp_batch_calls_total = metrics.udp_batch_calls_total.load(),
+        .udp_batch_messages_total = metrics.udp_batch_messages_total.load(),
+        .udp_drop_total = metrics.udp_drop_total.load(),
+        .udp_reply_primary_total = metrics.udp_reply_primary_total.load(),
+        .udp_reply_drop_total = metrics.udp_reply_drop_total.load(),
+        .udp_reply_stale_total = metrics.udp_reply_stale_total.load(),
+        .udp_active_sessions = metrics.udp_active_sessions.load(),
+        .restore_timeout_total = metrics.restore_timeout_total.load(),
+        .http_non_loopback_bind_total = metrics.http_non_loopback_bind_total.load(),
+    };
+}
+
 fn encodeView(allocator: std.mem.Allocator, view: model.AllocationView) ![]u8 {
     return std.fmt.allocPrint(allocator, "{f}", .{json.fmt(toJsonView(view), .{})});
 }
@@ -330,4 +407,8 @@ fn encodeViews(allocator: std.mem.Allocator, views: []const model.AllocationView
     defer allocator.free(payloads);
     for (views, 0..) |view, i| payloads[i] = toJsonView(view);
     return std.fmt.allocPrint(allocator, "{f}", .{json.fmt(payloads, .{})});
+}
+
+fn encodeMetrics(allocator: std.mem.Allocator, metrics: *const Metrics) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{f}", .{json.fmt(toJsonMetrics(metrics), .{})});
 }

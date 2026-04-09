@@ -4,13 +4,14 @@ Linux-first Zig port-forwarder with:
 - authenticated HTTP API
 - SQLite persistence
 - startup restore
-- TCP forwarding with copy path + Linux splice fast-path structure
+- TCP forwarding with copy path + gated Linux splice fast-path
 - UDP forwarding with async listener/session handling
 
 ## Env
 - `HTTP_LISTEN` — HTTP API listen address, e.g. `:8080` or `127.0.0.1:8080`
 - `PORT_RANGE` — default `10000-30000`
 - `AUTH_TOKEN` — required bearer token
+- `TCP_SPLICE_ENABLED` — optional `true/false`, default `false`
 - `FORCE_TCP_COPY_FALLBACK` — optional `true/false`
 - `UDP_SOCKET_RCVBUF_BYTES` — optional UDP listener/upstream receive buffer size, default `8388608`
 - `UDP_SOCKET_SNDBUF_BYTES` — optional UDP listener/upstream send buffer size, default `8388608`
@@ -65,10 +66,15 @@ UDP_MATRIX_DURATION=2 \
 
 Useful knobs:
 - `UDP_RATE` / `UDP_PACKET_SIZE` for one-shot mode
-- `TCP_DIRECT_VS_RELAY`, `TCP_BENCH_DURATION`, `TCP_BENCH_REPETITIONS`, `TCP_STREAMS` for the one-shot TCP direct-vs-relay decision artifact
+- `TCP_DIRECT_VS_RELAY`, `TCP_BENCH_DURATION`, `TCP_BENCH_REPETITIONS`, `TCP_STREAMS` for the one-shot TCP direct/copy/splice comparison suite
+- `TCP_SPLICE_ENABLED` enables the relay splice path; `FORCE_TCP_COPY_FALLBACK=1` overrides it and keeps relay TCP on copy
 - `UDP_SWEEP_RATES`, `UDP_PACKET_SIZES`, `IPERF_REPETITIONS`, `UDP_MATRIX_DURATION` for matrix mode
 - `UDP_SOCKET_RCVBUF_BYTES`, `UDP_SOCKET_SNDBUF_BYTES` for relay UDP socket buffer tuning
-- artifacts are written under `.zig-cache/e2e/iperf3-latest`, including `tcp-direct-vs-relay-summary.txt` plus representative direct/relay TCP JSON/log outputs
+- artifacts are written under `.zig-cache/e2e/iperf3-latest`, including:
+  - `tcp-copy-vs-splice-streams-1-summary.txt`
+  - `tcp-copy-vs-splice-streams-4-summary.txt`
+  - `tcp-copy-vs-splice-overall-summary.txt`
+  - representative direct/copy/splice TCP JSON/log outputs under `tcp-copy-vs-splice/streams-*`
 
 ## API
 ### Create
@@ -94,6 +100,9 @@ Useful knobs:
 
 ### List
 `GET /v1/ports`
+
+### Metrics
+`GET /v1/metrics`
 
 All requests must send:
 ```text

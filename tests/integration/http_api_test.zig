@@ -185,6 +185,20 @@ test "http create target forward delete tcp" {
     try std.testing.expectEqual(@as(u16, 204), delete_resp.status);
 }
 
+test "http metrics endpoint exposes tcp splice counters" {
+    const harness = try Harness.init(std.testing.allocator);
+    defer harness.deinit();
+
+    const http_port = try harness.http.assignedPort();
+    const response = try doHttp(std.testing.allocator, http_port, "GET", "/v1/metrics", "");
+    defer std.testing.allocator.free(response.body);
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_splice_attempt_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_splice_success_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_splice_hard_failure_total\":") != null);
+}
+
 test "http start failure does not deadlock cleanup" {
     const addr = try config.parseIpLiteral("127.0.0.1", 0);
     var occupied = try addr.listen(.{});

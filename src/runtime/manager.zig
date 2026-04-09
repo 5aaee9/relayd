@@ -20,15 +20,26 @@ pub const ObservedState = struct {
 };
 
 pub const Options = struct {
+    tcp_splice_enabled: bool = false,
     force_tcp_copy_fallback: bool = false,
+    tcp_splice_test_mode: TcpSpliceTestMode = .off,
     udp_socket_recv_buffer_bytes: u32 = 0,
     udp_socket_send_buffer_bytes: u32 = 0,
+};
+
+pub const TcpSpliceTestMode = enum {
+    off,
+    recoverable_setup_failure,
+    recoverable_runtime_failure,
+    hard_failure,
 };
 
 pub const RuntimeManager = struct {
     allocator: std.mem.Allocator,
     metrics: *Metrics,
+    tcp_splice_enabled: bool,
     force_tcp_copy_fallback: bool,
+    tcp_splice_test_mode: TcpSpliceTestMode,
     udp_socket_recv_buffer_bytes: u32,
     udp_socket_send_buffer_bytes: u32,
     epoll_fd: posix.fd_t,
@@ -47,7 +58,9 @@ pub const RuntimeManager = struct {
         return .{
             .allocator = allocator,
             .metrics = metrics,
+            .tcp_splice_enabled = options.tcp_splice_enabled,
             .force_tcp_copy_fallback = options.force_tcp_copy_fallback,
+            .tcp_splice_test_mode = options.tcp_splice_test_mode,
             .udp_socket_recv_buffer_bytes = options.udp_socket_recv_buffer_bytes,
             .udp_socket_send_buffer_bytes = options.udp_socket_send_buffer_bytes,
             .epoll_fd = epoll_fd,
@@ -217,7 +230,7 @@ pub const RuntimeManager = struct {
                 .tcp => {
                     self.registry_mutex.unlock();
                     defer entry.mutex.unlock();
-                    handleTcpAccept(self.allocator, self.metrics, self.force_tcp_copy_fallback, entry);
+                    handleTcpAccept(self.allocator, self.metrics, self.tcp_splice_enabled, self.force_tcp_copy_fallback, self.tcp_splice_test_mode, entry);
                 },
                 .udp => {
                     defer self.registry_mutex.unlock();
@@ -493,7 +506,37 @@ fn bindUdpSocket(port: u16, epoll_fd: posix.fd_t, recv_buf_bytes: u32, send_buf_
     return fd;
 }
 
-fn handleTcpAccept(allocator: std.mem.Allocator, metrics: *Metrics, force_fallback: bool, entry: *ListenerEntry) void {
+const TcpSpliceFallbackReason = enum {
+    forced,
+    unsupported,
+    runtime_error,
+};
+
+const TcpSessionMode = enum {
+    copy,
+    splice,
+};
+
+const TcpSpliceOutcome = union(enum) {
+    success,
+    fallback: TcpSpliceFallbackReason,
+    hard_failure,
+};
+
+const SplicePumpResult = enum {
+    success,
+    unsupported,
+    runtime_error,
+};
+
+fn handleTcpAccept(
+    allocator: std.mem.Allocator,
+    metrics: *Metrics,
+    tcp_splice_enabled: bool,
+    force_fallback: bool,
+    tcp_splice_test_mode: TcpSpliceTestMode,
+    entry: *ListenerEntry,
+) void {
     const listen_fd = entry.fd orelse return;
     while (true) {
         var addr: net.Address = undefined;
@@ -521,7 +564,9 @@ fn handleTcpAccept(allocator: std.mem.Allocator, metrics: *Metrics, force_fallba
                 continue;
             },
             .port = entry.effective_target_port.?,
+            .session_mode = if (tcp_splice_enabled and !force_fallback) .splice else .copy,
             .force_copy = force_fallback,
+            .splice_test_mode = tcp_splice_test_mode,
             .metrics = metrics,
             .upstream_fd = null,
             .thread = null,
@@ -563,7 +608,9 @@ const TcpSessionCtx = struct {
     client_fd: posix.fd_t,
     host: []u8,
     port: u16,
+    session_mode: TcpSessionMode,
     force_copy: bool,
+    splice_test_mode: TcpSpliceTestMode,
     metrics: *Metrics,
     upstream_fd: ?posix.fd_t,
     thread: ?std.Thread,
@@ -584,8 +631,41 @@ fn tcpSessionThread(ctx: *TcpSessionCtx) void {
     const upstream = net.tcpConnectToAddress(addr) catch return;
     const upstream_fd = upstream.handle;
     ctx.upstream_fd = upstream_fd;
-    ctx.metrics.tcp_copy_fallback_total.inc();
-    runTcpCopy(ctx.client_fd, upstream_fd);
+    if (ctx.force_copy) {
+        recordTcpFallback(ctx.metrics, .forced);
+        runTcpCopy(ctx.client_fd, upstream_fd);
+        return;
+    }
+    if (ctx.session_mode == .copy) {
+        ctx.metrics.tcp_copy_fallback_total.inc();
+        runTcpCopy(ctx.client_fd, upstream_fd);
+        return;
+    }
+
+    ctx.metrics.tcp_splice_attempt_total.inc();
+    switch (runTcpSplice(ctx.client_fd, upstream_fd, ctx.splice_test_mode)) {
+        .success => {
+            ctx.metrics.tcp_splice_success_total.inc();
+            ctx.metrics.tcp_splice_fast_path_total.inc();
+        },
+        .fallback => |reason| {
+            recordTcpFallback(ctx.metrics, reason);
+            runTcpCopy(ctx.client_fd, upstream_fd);
+        },
+        .hard_failure => {
+            ctx.metrics.tcp_splice_hard_failure_total.inc();
+        },
+    }
+}
+
+fn recordTcpFallback(metrics: *Metrics, reason: TcpSpliceFallbackReason) void {
+    metrics.tcp_copy_fallback_total.inc();
+    metrics.tcp_splice_fallback_total.inc();
+    switch (reason) {
+        .forced => metrics.tcp_splice_fallback_forced_total.inc(),
+        .unsupported => metrics.tcp_splice_fallback_unsupported_total.inc(),
+        .runtime_error => metrics.tcp_splice_fallback_runtime_error_total.inc(),
+    }
 }
 
 fn runTcpCopy(client_fd: posix.fd_t, upstream_fd: posix.fd_t) void {
@@ -617,37 +697,74 @@ fn copyPumpThread(ctx: anytype) void {
 
 extern "c" fn splice(fd_in: c_int, off_in: ?*i64, fd_out: c_int, off_out: ?*i64, len: usize, flags: c_uint) isize;
 
-fn runTcpSplice(client_fd: posix.fd_t, upstream_fd: posix.fd_t, metrics: *Metrics) !bool {
-    const pipe_fds = try posix.pipe2(.{ .CLOEXEC = true });
+fn runTcpSplice(client_fd: posix.fd_t, upstream_fd: posix.fd_t, test_mode: TcpSpliceTestMode) TcpSpliceOutcome {
+    if (test_mode == .recoverable_setup_failure) return .{ .fallback = .unsupported };
+    if (test_mode == .hard_failure) return .hard_failure;
+
+    const forward_pipe = posix.pipe2(.{ .CLOEXEC = true }) catch return .{ .fallback = .unsupported };
     defer {
-        posix.close(pipe_fds[0]);
-        posix.close(pipe_fds[1]);
+        closeIgnoreBadFd(forward_pipe[0]);
+        closeIgnoreBadFd(forward_pipe[1]);
+    }
+    const reverse_pipe = posix.pipe2(.{ .CLOEXEC = true }) catch return .{ .fallback = .unsupported };
+    defer {
+        closeIgnoreBadFd(reverse_pipe[0]);
+        closeIgnoreBadFd(reverse_pipe[1]);
     }
 
-    const SpliceCtx = struct { src: posix.fd_t, dst: posix.fd_t, pipe_r: posix.fd_t, pipe_w: posix.fd_t };
-    var reverse = SpliceCtx{ .src = upstream_fd, .dst = client_fd, .pipe_r = pipe_fds[0], .pipe_w = pipe_fds[1] };
-    const thread = try std.Thread.spawn(.{}, splicePumpThread, .{&reverse});
-    var forward = SpliceCtx{ .src = client_fd, .dst = upstream_fd, .pipe_r = pipe_fds[0], .pipe_w = pipe_fds[1] };
+    if (test_mode == .recoverable_runtime_failure) return .{ .fallback = .runtime_error };
+
+    const SpliceCtx = struct {
+        src: posix.fd_t,
+        dst: posix.fd_t,
+        pipe_r: posix.fd_t,
+        pipe_w: posix.fd_t,
+        result: SplicePumpResult = .success,
+    };
+    var reverse = SpliceCtx{ .src = upstream_fd, .dst = client_fd, .pipe_r = reverse_pipe[0], .pipe_w = reverse_pipe[1] };
+    const thread = std.Thread.spawn(.{}, splicePumpThread, .{&reverse}) catch return .{ .fallback = .unsupported };
+    var forward = SpliceCtx{ .src = client_fd, .dst = upstream_fd, .pipe_r = forward_pipe[0], .pipe_w = forward_pipe[1] };
     splicePumpThread(&forward);
     thread.join();
-    metrics.tcp_splice_fast_path_total.inc();
-    return true;
+
+    return mergeSplicePumpResults(forward.result, reverse.result);
 }
 
 fn splicePumpThread(ctx: anytype) void {
+    ctx.result = splicePump(ctx.src, ctx.dst, ctx.pipe_r, ctx.pipe_w);
+}
+
+fn splicePump(src: posix.fd_t, dst: posix.fd_t, pipe_r: posix.fd_t, pipe_w: posix.fd_t) SplicePumpResult {
     while (true) {
-        const moved = splice(ctx.src, null, ctx.pipe_w, null, 64 * 1024, 0);
+        const moved = splice(src, null, pipe_w, null, 64 * 1024, 0);
         if (moved == 0) break;
-        if (moved < 0) break;
+        if (moved < 0) return classifySpliceErrno();
         var remaining: usize = @intCast(moved);
         while (remaining > 0) {
-            const sent = splice(ctx.pipe_r, null, ctx.dst, null, remaining, 0);
-            if (sent <= 0) break;
+            const sent = splice(pipe_r, null, dst, null, remaining, 0);
+            if (sent == 0) return .runtime_error;
+            if (sent < 0) return classifySpliceErrno();
             remaining -= @intCast(sent);
         }
-        if (remaining > 0) break;
+        if (remaining > 0) return .runtime_error;
     }
-    posix.shutdown(ctx.dst, .send) catch {};
+    shutdownIgnore(dst, .send);
+    return .success;
+}
+
+fn mergeSplicePumpResults(a: SplicePumpResult, b: SplicePumpResult) TcpSpliceOutcome {
+    if (a == .runtime_error or b == .runtime_error) return .{ .fallback = .runtime_error };
+    if (a == .unsupported or b == .unsupported) return .{ .fallback = .unsupported };
+    return .success;
+}
+
+fn classifySpliceErrno() SplicePumpResult {
+    const err: posix.E = @enumFromInt(std.c._errno().*);
+    return switch (err) {
+        .INVAL, .NOSYS, .OPNOTSUPP, .XDEV => .unsupported,
+        .PIPE, .CONNRESET, .NOTCONN => .success,
+        else => .runtime_error,
+    };
 }
 
 fn handleUdpReadable(allocator: std.mem.Allocator, metrics: *Metrics, entry: *ListenerEntry) void {

@@ -6,6 +6,8 @@ HTTP_LISTEN="${HTTP_LISTEN:-127.0.0.1:18080}"
 PORT_RANGE="${PORT_RANGE:-18100-18120}"
 SQLITE_PATH="${SQLITE_PATH:-.zig-cache/e2e/relayd-$$.sqlite3}"
 TARGET_HOST="${TARGET_HOST:-127.0.0.1}"
+TCP_SPLICE_ENABLED="${TCP_SPLICE_ENABLED:-0}"
+FORCE_TCP_COPY_FALLBACK="${FORCE_TCP_COPY_FALLBACK:-0}"
 UDP_RATE="${UDP_RATE:-100G}"
 UDP_PACKET_SIZE="${UDP_PACKET_SIZE:-}"
 IPERF_DURATION="${IPERF_DURATION:-2}"
@@ -37,15 +39,20 @@ RELAYD_LOG="${RUN_DIR}/relayd.log"
 TCP_SERVER_LOG="${RUN_DIR}/iperf3-tcp-server.log"
 TCP_CLIENT_JSON="${RUN_DIR}/iperf3-tcp-client.json"
 TCP_CLIENT_LOG="${RUN_DIR}/iperf3-tcp-client.log"
-TCP_DIRECT_VS_RELAY_DIR="${RUN_DIR}/tcp-direct-vs-relay"
-TCP_DIRECT_VS_RELAY_RESULTS="${RUN_DIR}/tcp-direct-vs-relay-results.ndjson"
-TCP_DIRECT_VS_RELAY_SUMMARY="${RUN_DIR}/tcp-direct-vs-relay-summary.txt"
+TCP_COPY_VS_SPLICE_DIR="${RUN_DIR}/tcp-copy-vs-splice/streams-${TCP_STREAMS}"
+TCP_COPY_VS_SPLICE_RESULTS="${RUN_DIR}/tcp-copy-vs-splice-streams-${TCP_STREAMS}-results.ndjson"
+TCP_COPY_VS_SPLICE_SUMMARY_TXT="${RUN_DIR}/tcp-copy-vs-splice-streams-${TCP_STREAMS}-summary.txt"
+TCP_COPY_VS_SPLICE_SUMMARY_JSON="${RUN_DIR}/tcp-copy-vs-splice-streams-${TCP_STREAMS}-summary.json"
+TCP_COPY_VS_SPLICE_OVERALL_SUMMARY="${RUN_DIR}/tcp-copy-vs-splice-overall-summary.txt"
 TCP_DIRECT_JSON="${RUN_DIR}/tcp-direct-client.json"
 TCP_DIRECT_LOG="${RUN_DIR}/tcp-direct-client.log"
 TCP_DIRECT_SERVER_LOG="${RUN_DIR}/tcp-direct-server.log"
-TCP_RELAY_JSON="${RUN_DIR}/tcp-relay-client.json"
-TCP_RELAY_LOG="${RUN_DIR}/tcp-relay-client.log"
-TCP_RELAY_SERVER_LOG="${RUN_DIR}/tcp-relay-server.log"
+TCP_COPY_JSON="${RUN_DIR}/tcp-copy-client.json"
+TCP_COPY_LOG="${RUN_DIR}/tcp-copy-client.log"
+TCP_COPY_SERVER_LOG="${RUN_DIR}/tcp-copy-server.log"
+TCP_SPLICE_JSON="${RUN_DIR}/tcp-splice-client.json"
+TCP_SPLICE_LOG="${RUN_DIR}/tcp-splice-client.log"
+TCP_SPLICE_SERVER_LOG="${RUN_DIR}/tcp-splice-server.log"
 UDP_SERVER_LOG="${RUN_DIR}/iperf3-udp-server.log"
 UDP_CLIENT_JSON="${RUN_DIR}/iperf3-udp-client.json"
 UDP_CLIENT_LOG="${RUN_DIR}/iperf3-udp-client.log"
@@ -62,6 +69,7 @@ allocation_ids=()
 cleanup_running=0
 CREATED_ALLOCATION_ID=
 CREATED_RELAY_PORT=
+RELAYD_PID=
 
 log() {
   printf '[e2e_iperf3] %s\n' "$*" >&2
@@ -112,11 +120,14 @@ dump_logs() {
   dump_file tcp_server "$TCP_SERVER_LOG"
   dump_file tcp_client "$TCP_CLIENT_LOG"
   dump_file tcp_client_json "$TCP_CLIENT_JSON"
-  dump_file tcp_direct_summary "$TCP_DIRECT_VS_RELAY_SUMMARY"
+  dump_file tcp_copy_vs_splice_summary "$TCP_COPY_VS_SPLICE_SUMMARY_TXT"
+  dump_file tcp_copy_vs_splice_overall "$TCP_COPY_VS_SPLICE_OVERALL_SUMMARY"
   dump_file tcp_direct_client "$TCP_DIRECT_LOG"
   dump_file tcp_direct_client_json "$TCP_DIRECT_JSON"
-  dump_file tcp_relay_client "$TCP_RELAY_LOG"
-  dump_file tcp_relay_client_json "$TCP_RELAY_JSON"
+  dump_file tcp_copy_client "$TCP_COPY_LOG"
+  dump_file tcp_copy_client_json "$TCP_COPY_JSON"
+  dump_file tcp_splice_client "$TCP_SPLICE_LOG"
+  dump_file tcp_splice_client_json "$TCP_SPLICE_JSON"
   dump_file udp_server "$UDP_SERVER_LOG"
   dump_file udp_client "$UDP_CLIENT_LOG"
   dump_file udp_client_json "$UDP_CLIENT_JSON"
@@ -396,6 +407,54 @@ wait_for_status() {
   return 1
 }
 
+start_relayd() {
+  local tcp_splice_enabled=$1
+  local force_tcp_copy_fallback=$2
+  local mode_label=$3
+  local sqlite_path="${RUN_DIR}/relayd-${mode_label}.sqlite3"
+
+  stop_relayd
+  rm -f "$sqlite_path"
+  : >"${RUN_DIR}/readiness.status"
+  : >"${RUN_DIR}/readiness.body"
+  : >"${RUN_DIR}/unauth.status"
+  : >"${RUN_DIR}/unauth.body"
+  printf '\n=== relayd start mode=%s tcp_splice_enabled=%s force_tcp_copy_fallback=%s ===\n' \
+    "$mode_label" "$tcp_splice_enabled" "$force_tcp_copy_fallback" >>"$RELAYD_LOG"
+
+  log "starting relayd mode=${mode_label} on ${HTTP_LISTEN} with port range ${PORT_RANGE}"
+  AUTH_TOKEN="$AUTH_TOKEN" \
+  HTTP_LISTEN="$HTTP_LISTEN" \
+  PORT_RANGE="$PORT_RANGE" \
+  SQLITE_PATH="$sqlite_path" \
+  TCP_SPLICE_ENABLED="$tcp_splice_enabled" \
+  FORCE_TCP_COPY_FALLBACK="$force_tcp_copy_fallback" \
+  "$RELAYD_BIN" >>"$RELAYD_LOG" 2>&1 &
+  RELAYD_PID=$!
+  track_child "$RELAYD_PID"
+
+  readiness_body="${RUN_DIR}/readiness.body"
+  readiness_status="${RUN_DIR}/readiness.status"
+  if ! wait_for_status 200 "$AUTH_TOKEN" /v1/ports "$READINESS_TIMEOUT_SEC" "$readiness_body" "$readiness_status"; then
+    die "authenticated readiness probe did not return 200"
+  fi
+  log "authenticated readiness probe returned 200"
+
+  unauth_body="${RUN_DIR}/unauth.body"
+  unauth_status="${RUN_DIR}/unauth.status"
+  api_request "$unauth_status" "$unauth_body" GET /v1/ports bad-token
+  [[ $(<"$unauth_status") == "401" ]] || die "bad token probe expected 401, got $(<"$unauth_status")"
+  log "bad token probe returned 401"
+}
+
+stop_relayd() {
+  if [[ -n "${RELAYD_PID:-}" ]] && kill -0 "$RELAYD_PID" 2>/dev/null; then
+    kill "$RELAYD_PID" 2>/dev/null || true
+    wait "$RELAYD_PID" 2>/dev/null || true
+  fi
+  RELAYD_PID=
+}
+
 wait_for_active() {
   local allocation_id=$1
   local attempt
@@ -493,6 +552,13 @@ create_allocation() {
   CREATED_RELAY_PORT=$relay_port
 }
 
+capture_metrics_snapshot() {
+  local output_json=$1
+  local status_file="${output_json}.status"
+  api_request "$status_file" "$output_json" GET /v1/metrics "$AUTH_TOKEN"
+  [[ $(<"$status_file") == "200" ]] || die "metrics request failed with status $(<"$status_file")"
+}
+
 append_udp_result() {
   local results_file=$1
   local path_label=$2
@@ -551,7 +617,9 @@ append_tcp_result() {
   local json_file=$6
   local client_log=$7
   local server_log=$8
-  python3 - "$results_file" "$path_label" "$repetition" "$duration" "$streams" "$json_file" "$client_log" "$server_log" <<'PY'
+  local before_metrics=${9}
+  local after_metrics=${10}
+  python3 - "$results_file" "$path_label" "$repetition" "$duration" "$streams" "$json_file" "$client_log" "$server_log" "$before_metrics" "$after_metrics" <<'PY'
 import json
 import pathlib
 import sys
@@ -564,9 +632,17 @@ streams = int(sys.argv[5])
 json_file = pathlib.Path(sys.argv[6])
 client_log = pathlib.Path(sys.argv[7])
 server_log = pathlib.Path(sys.argv[8])
+before_metrics_file = pathlib.Path(sys.argv[9])
+after_metrics_file = pathlib.Path(sys.argv[10])
 payload = json.load(open(json_file, encoding='utf-8'))
+before_metrics = json.load(open(before_metrics_file, encoding='utf-8'))
+after_metrics = json.load(open(after_metrics_file, encoding='utf-8'))
 end = payload.get('end') or {}
 summary = end.get('sum_received') or end.get('sum') or {}
+
+def delta(key):
+    return int(after_metrics.get(key, 0)) - int(before_metrics.get(key, 0))
+
 record = {
     'path': path_label,
     'repetition': repetition,
@@ -577,6 +653,15 @@ record = {
     'json_file': json_file.relative_to(results_file.parent).as_posix(),
     'client_log': client_log.relative_to(results_file.parent).as_posix(),
     'server_log': server_log.relative_to(results_file.parent).as_posix(),
+    'metrics_before': before_metrics_file.relative_to(results_file.parent).as_posix(),
+    'metrics_after': after_metrics_file.relative_to(results_file.parent).as_posix(),
+    'tcp_splice_attempt_delta': delta('tcp_splice_attempt_total'),
+    'tcp_splice_success_delta': delta('tcp_splice_success_total'),
+    'tcp_splice_fallback_delta': delta('tcp_splice_fallback_total'),
+    'tcp_splice_hard_failure_delta': delta('tcp_splice_hard_failure_total'),
+    'tcp_splice_fallback_forced_delta': delta('tcp_splice_fallback_forced_total'),
+    'tcp_splice_fallback_unsupported_delta': delta('tcp_splice_fallback_unsupported_total'),
+    'tcp_splice_fallback_runtime_error_delta': delta('tcp_splice_fallback_runtime_error_total'),
 }
 with open(results_file, 'a', encoding='utf-8') as handle:
     handle.write(json.dumps(record, sort_keys=True))
@@ -584,19 +669,23 @@ with open(results_file, 'a', encoding='utf-8') as handle:
 PY
 }
 
-emit_tcp_direct_vs_relay_summary() {
+emit_tcp_copy_vs_splice_summary() {
   local results_file=$1
   local summary_txt=$2
-  local direct_json=$3
-  local direct_log=$4
-  local direct_server_log=$5
-  local relay_json=$6
-  local relay_log=$7
-  local relay_server_log=$8
-  local legacy_relay_json=$9
-  local legacy_relay_log=${10}
-  local legacy_relay_server_log=${11}
-  python3 - "$results_file" "$summary_txt" "$direct_json" "$direct_log" "$direct_server_log" "$relay_json" "$relay_log" "$relay_server_log" "$legacy_relay_json" "$legacy_relay_log" "$legacy_relay_server_log" <<'PY'
+  local summary_json=$3
+  local direct_json=$4
+  local direct_log=$5
+  local direct_server_log=$6
+  local copy_json=$7
+  local copy_log=$8
+  local copy_server_log=$9
+  local splice_json=${10}
+  local splice_log=${11}
+  local splice_server_log=${12}
+  local legacy_tcp_json=${13}
+  local legacy_tcp_log=${14}
+  local legacy_tcp_server_log=${15}
+  python3 - "$results_file" "$summary_txt" "$summary_json" "$direct_json" "$direct_log" "$direct_server_log" "$copy_json" "$copy_log" "$copy_server_log" "$splice_json" "$splice_log" "$splice_server_log" "$legacy_tcp_json" "$legacy_tcp_log" "$legacy_tcp_server_log" <<'PY'
 import json
 import pathlib
 import shutil
@@ -605,18 +694,22 @@ import sys
 
 results_path = pathlib.Path(sys.argv[1])
 summary_path = pathlib.Path(sys.argv[2])
-direct_json_out = pathlib.Path(sys.argv[3])
-direct_log_out = pathlib.Path(sys.argv[4])
-direct_server_log_out = pathlib.Path(sys.argv[5])
-relay_json_out = pathlib.Path(sys.argv[6])
-relay_log_out = pathlib.Path(sys.argv[7])
-relay_server_log_out = pathlib.Path(sys.argv[8])
-legacy_relay_json_out = pathlib.Path(sys.argv[9])
-legacy_relay_log_out = pathlib.Path(sys.argv[10])
-legacy_relay_server_log_out = pathlib.Path(sys.argv[11])
+summary_json_path = pathlib.Path(sys.argv[3])
+direct_json_out = pathlib.Path(sys.argv[4])
+direct_log_out = pathlib.Path(sys.argv[5])
+direct_server_log_out = pathlib.Path(sys.argv[6])
+copy_json_out = pathlib.Path(sys.argv[7])
+copy_log_out = pathlib.Path(sys.argv[8])
+copy_server_log_out = pathlib.Path(sys.argv[9])
+splice_json_out = pathlib.Path(sys.argv[10])
+splice_log_out = pathlib.Path(sys.argv[11])
+splice_server_log_out = pathlib.Path(sys.argv[12])
+legacy_tcp_json_out = pathlib.Path(sys.argv[13])
+legacy_tcp_log_out = pathlib.Path(sys.argv[14])
+legacy_tcp_server_log_out = pathlib.Path(sys.argv[15])
 records = [json.loads(line) for line in results_path.read_text(encoding='utf-8').splitlines() if line.strip()]
 if not records:
-    raise SystemExit("no TCP direct-vs-relay records found")
+    raise SystemExit("no TCP copy-vs-splice records found")
 
 UNITS_BPS = ['bps', 'kbps', 'mbps', 'gbps']
 
@@ -643,6 +736,10 @@ def summarize(items):
         'duration_sec': items[0]['duration_sec'],
         'streams': items[0]['streams'],
         'representative': representative,
+        'attempts': sum(item.get('tcp_splice_attempt_delta', 0) for item in items),
+        'successes': sum(item.get('tcp_splice_success_delta', 0) for item in items),
+        'fallbacks': sum(item.get('tcp_splice_fallback_delta', 0) for item in items),
+        'hard_failures': sum(item.get('tcp_splice_hard_failure_delta', 0) for item in items),
     }
 
 def copy_record_artifacts(record, json_out, log_out, server_log_out):
@@ -656,55 +753,128 @@ for record in records:
     grouped.setdefault(record['path'], []).append(record)
 
 direct_records = sorted(grouped.get('direct', []), key=lambda item: item['repetition'])
-relay_records = sorted(grouped.get('relay', []), key=lambda item: item['repetition'])
-if not direct_records or not relay_records:
-    raise SystemExit("expected both direct and relay TCP records")
+copy_records = sorted(grouped.get('copy', []), key=lambda item: item['repetition'])
+splice_records = sorted(grouped.get('splice', []), key=lambda item: item['repetition'])
+if not direct_records or not copy_records or not splice_records:
+    raise SystemExit("expected direct, copy, and splice TCP records")
 
 direct = summarize(direct_records)
-relay = summarize(relay_records)
+copy = summarize(copy_records)
+splice = summarize(splice_records)
 copy_record_artifacts(direct['representative'], direct_json_out, direct_log_out, direct_server_log_out)
-copy_record_artifacts(relay['representative'], relay_json_out, relay_log_out, relay_server_log_out)
-shutil.copy2(relay_json_out, legacy_relay_json_out)
-shutil.copy2(relay_log_out, legacy_relay_log_out)
-shutil.copy2(relay_server_log_out, legacy_relay_server_log_out)
+copy_record_artifacts(copy['representative'], copy_json_out, copy_log_out, copy_server_log_out)
+copy_record_artifacts(splice['representative'], splice_json_out, splice_log_out, splice_server_log_out)
+shutil.copy2(splice_json_out, legacy_tcp_json_out)
+shutil.copy2(splice_log_out, legacy_tcp_log_out)
+shutil.copy2(splice_server_log_out, legacy_tcp_server_log_out)
 
-ratio = direct['median_bps'] / relay['median_bps'] if relay['median_bps'] else None
-relay_share = relay['median_bps'] / direct['median_bps'] if direct['median_bps'] else None
-decision_threshold = 1.15
-decision = 'splice not yet justified'
-note = 'copy-vs-splice note: median relay throughput was unavailable, so the benchmark is not decision-quality.'
-if ratio is not None and relay_share is not None:
-    relay_share_pct = relay_share * 100.0
-    if ratio >= decision_threshold:
-        decision = 'splice next'
-        note = (
-            f"copy-vs-splice note: relay held {relay_share_pct:.1f}% of direct throughput "
-            "at this 1-stream point, so copy-path overhead still looks material enough to justify a splice-focused follow-up."
-        )
-    else:
-        note = (
-            f"copy-vs-splice note: relay held {relay_share_pct:.1f}% of direct throughput "
-            "at this 1-stream point, so the measured copy-path gap is not large enough to justify a splice-first follow-up yet."
-        )
+copy_vs_splice_ratio = splice['median_bps'] / copy['median_bps'] if copy['median_bps'] else None
+direct_vs_splice_ratio = direct['median_bps'] / splice['median_bps'] if splice['median_bps'] else None
+threshold = 1.15 if direct['streams'] == 1 else 0.95
+success_rate = splice['successes'] / splice['attempts'] if splice['attempts'] else 0.0
+decision = 'splice not justified enough in current tcp architecture'
+if (
+    copy_vs_splice_ratio is not None
+    and copy_vs_splice_ratio >= threshold
+    and splice['hard_failures'] == 0
+    and success_rate >= 0.90
+):
+    decision = 'splice remains justified in current tcp architecture'
 
-ratio_text = 'n/a' if ratio is None else f"{ratio:.2f}x"
+summary_payload = {
+    'streams': direct['streams'],
+    'repetitions': direct['samples'],
+    'duration_sec': direct['duration_sec'],
+    'threshold': threshold,
+    'decision': decision,
+    'direct_median_bps': direct['median_bps'],
+    'direct_best_bps': direct['best_bps'],
+    'copy_median_bps': copy['median_bps'],
+    'copy_best_bps': copy['best_bps'],
+    'splice_median_bps': splice['median_bps'],
+    'splice_best_bps': splice['best_bps'],
+    'copy_vs_splice_ratio': copy_vs_splice_ratio,
+    'direct_vs_splice_ratio': direct_vs_splice_ratio,
+    'splice_attempts': splice['attempts'],
+    'splice_successes': splice['successes'],
+    'splice_fallbacks': splice['fallbacks'],
+    'splice_hard_failures': splice['hard_failures'],
+    'splice_success_rate': success_rate,
+}
+summary_json_path.write_text(json.dumps(summary_payload, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+
+copy_vs_splice_text = 'n/a' if copy_vs_splice_ratio is None else f"{copy_vs_splice_ratio:.2f}x"
+direct_vs_splice_text = 'n/a' if direct_vs_splice_ratio is None else f"{direct_vs_splice_ratio:.2f}x"
 lines = [
-    '=== relayd tcp direct vs relay summary ===',
+    '=== relayd tcp copy vs splice summary ===',
     f"repetitions: {direct['samples']}",
     f"duration:    {direct['duration_sec']:g}s",
     f"streams:     {direct['streams']}",
-    f"decision threshold: direct/relay >= {decision_threshold:.2f}x => splice next",
+    f"decision threshold: splice/copy >= {threshold:.2f}x",
     '',
     f"direct throughput: {format_decimal(direct['median_bps'], UNITS_BPS)} median / {format_decimal(direct['best_bps'], UNITS_BPS)} best",
-    f"relay throughput:  {format_decimal(relay['median_bps'], UNITS_BPS)} median / {format_decimal(relay['best_bps'], UNITS_BPS)} best",
-    f"direct/relay ratio: {ratio_text}",
+    f"relay-copy throughput:   {format_decimal(copy['median_bps'], UNITS_BPS)} median / {format_decimal(copy['best_bps'], UNITS_BPS)} best",
+    f"relay-splice throughput: {format_decimal(splice['median_bps'], UNITS_BPS)} median / {format_decimal(splice['best_bps'], UNITS_BPS)} best",
+    f"splice/copy ratio: {copy_vs_splice_text}",
+    f"direct/splice ratio: {direct_vs_splice_text}",
+    f"splice hard failures: {splice['hard_failures']}",
+    f"splice success-rate note: {splice['successes']}/{splice['attempts']} sessions ({success_rate * 100.0:.2f}%)",
     f"direct artifact: {direct['representative']['json_file']} | {direct['representative']['client_log']}",
-    f"relay artifact:  {relay['representative']['json_file']} | {relay['representative']['client_log']}",
-    note,
+    f"copy artifact:   {copy['representative']['json_file']} | {copy['representative']['client_log']}",
+    f"splice artifact: {splice['representative']['json_file']} | {splice['representative']['client_log']}",
     decision,
 ]
 summary_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 print(summary_path.read_text(encoding='utf-8'), end='')
+PY
+}
+
+refresh_tcp_copy_vs_splice_overall_summary() {
+  local latest_dir=$1
+  python3 - "$latest_dir" <<'PY'
+import json
+import pathlib
+import sys
+
+latest_dir = pathlib.Path(sys.argv[1])
+summary_paths = sorted(latest_dir.glob("tcp-copy-vs-splice-streams-*-summary.json"))
+overall_path = latest_dir / "tcp-copy-vs-splice-overall-summary.txt"
+if not summary_paths:
+    overall_path.write_text("=== relayd tcp copy vs splice overall summary ===\nno stream summaries available\n", encoding="utf-8")
+    print(overall_path.read_text(encoding="utf-8"), end="")
+    raise SystemExit(0)
+
+UNITS_BPS = ['bps', 'kbps', 'mbps', 'gbps']
+
+def format_decimal(value, units):
+    value = float(value)
+    unit_index = 0
+    while value >= 1000.0 and unit_index < len(units) - 1:
+        value /= 1000.0
+        unit_index += 1
+    return f"{value:.2f} {units[unit_index]}"
+
+summaries = [json.loads(path.read_text(encoding="utf-8")) for path in summary_paths]
+lines = [
+    "=== relayd tcp copy vs splice overall summary ===",
+]
+for item in summaries:
+    ratio = item.get("copy_vs_splice_ratio")
+    ratio_text = "n/a" if ratio is None else f"{ratio:.2f}x"
+    lines.append(
+        f"streams={item['streams']}: copy {format_decimal(item['copy_median_bps'], UNITS_BPS)}, "
+        f"splice {format_decimal(item['splice_median_bps'], UNITS_BPS)}, "
+        f"splice/copy {ratio_text}, hard_failures={item['splice_hard_failures']}, "
+        f"success_rate={item['splice_success_rate'] * 100.0:.2f}% -> {item['decision']}"
+    )
+overall_decision = (
+    "splice remains justified in current tcp architecture"
+    if all(item['decision'] == "splice remains justified in current tcp architecture" for item in summaries)
+    else "splice not justified enough in current tcp architecture"
+)
+lines.extend(["", overall_decision])
+overall_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+print(overall_path.read_text(encoding="utf-8"), end="")
 PY
 }
 
@@ -868,6 +1038,8 @@ IPERF_DURATION=${IPERF_DURATION}
 UDP_MATRIX_DURATION=${UDP_MATRIX_DURATION}
 UDP_RATE=${UDP_RATE}
 UDP_PACKET_SIZE=${UDP_PACKET_SIZE}
+TCP_SPLICE_ENABLED=${TCP_SPLICE_ENABLED}
+FORCE_TCP_COPY_FALLBACK=${FORCE_TCP_COPY_FALLBACK}
 UDP_SWEEP_RATES=${UDP_SWEEP_RATES}
 UDP_PACKET_SIZES=${UDP_PACKET_SIZES}
 IPERF_REPETITIONS=${IPERF_REPETITIONS}
@@ -960,11 +1132,15 @@ run_udp_relay_smoke() {
 run_one_shot_suite() {
   local report
   if [[ "$TCP_DIRECT_VS_RELAY" == "1" ]]; then
-    run_tcp_direct_vs_relay_suite
+    run_tcp_copy_vs_splice_suite
   else
+    start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" tcp-relay-smoke
     run_tcp_relay_smoke
+    stop_relayd
   fi
+  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-relay-smoke
   run_udp_relay_smoke
+  stop_relayd
   report=$(emit_stdout_report "$TCP_CLIENT_JSON" "$UDP_CLIENT_JSON" "$UDP_RATE" "$UDP_PACKET_SIZE")
   printf '%s\n' "$report" | tee "$ONE_SHOT_REPORT"
 }
@@ -990,7 +1166,13 @@ run_tcp_direct_trial() {
   run_iperf_tcp_client "$target_port" "$duration" "$streams" "$client_json" "$client_log"
   log "tcp direct repetition=${repetition} $(assert_iperf_positive "$client_json" tcp)"
   wait "$server_pid"
-  append_tcp_result "$TCP_DIRECT_VS_RELAY_RESULTS" direct "$repetition" "$duration" "$streams" "$client_json" "$client_log" "$server_log"
+  cat >"${output_prefix}-metrics-before.json" <<'EOF_METRICS'
+{}
+EOF_METRICS
+  cat >"${output_prefix}-metrics-after.json" <<'EOF_METRICS'
+{}
+EOF_METRICS
+  append_tcp_result "$TCP_COPY_VS_SPLICE_RESULTS" direct "$repetition" "$duration" "$streams" "$client_json" "$client_log" "$server_log" "${output_prefix}-metrics-before.json" "${output_prefix}-metrics-after.json"
 }
 
 run_tcp_relay_trial() {
@@ -998,55 +1180,79 @@ run_tcp_relay_trial() {
   local duration=$2
   local streams=$3
   local output_prefix=$4
+  local path_label=$5
   local target_port server_log client_json client_log server_pid
   local allocation_id relay_port
+  local before_metrics after_metrics
 
   target_port=$(pick_free_port tcp)
   server_log="${output_prefix}-server.log"
   client_json="${output_prefix}-client.json"
   client_log="${output_prefix}-client.log"
+  before_metrics="${output_prefix}-metrics-before.json"
+  after_metrics="${output_prefix}-metrics-after.json"
 
-  log "tcp relay trial repetition=${repetition} streams=${streams} target_port=${target_port}"
+  log "tcp ${path_label} trial repetition=${repetition} streams=${streams} target_port=${target_port}"
   iperf3 -s -1 -B "$TARGET_HOST" -p "$target_port" >"$server_log" 2>&1 &
   server_pid=$!
   track_child "$server_pid"
-  wait_for_tcp_listener "$TARGET_HOST" "$target_port" "$IPERF_SERVER_READY_TIMEOUT_SEC" || die "tcp relay iperf3 server did not become ready on ${TARGET_HOST}:${target_port}"
+  wait_for_tcp_listener "$TARGET_HOST" "$target_port" "$IPERF_SERVER_READY_TIMEOUT_SEC" || die "tcp ${path_label} iperf3 server did not become ready on ${TARGET_HOST}:${target_port}"
 
   create_allocation tcp "$target_port"
   allocation_id=$CREATED_ALLOCATION_ID
   relay_port=$CREATED_RELAY_PORT
+  capture_metrics_snapshot "$before_metrics"
 
   run_iperf_tcp_client "$relay_port" "$duration" "$streams" "$client_json" "$client_log"
-  log "tcp relay repetition=${repetition} relay_port=${relay_port} $(assert_iperf_positive "$client_json" tcp)"
+  log "tcp ${path_label} repetition=${repetition} relay_port=${relay_port} $(assert_iperf_positive "$client_json" tcp)"
   wait "$server_pid"
+  sleep 0.1
+  capture_metrics_snapshot "$after_metrics"
   delete_allocation "$allocation_id"
-  append_tcp_result "$TCP_DIRECT_VS_RELAY_RESULTS" relay "$repetition" "$duration" "$streams" "$client_json" "$client_log" "$server_log"
+  append_tcp_result "$TCP_COPY_VS_SPLICE_RESULTS" "$path_label" "$repetition" "$duration" "$streams" "$client_json" "$client_log" "$server_log" "$before_metrics" "$after_metrics"
 }
 
-run_tcp_direct_vs_relay_suite() {
+run_tcp_copy_vs_splice_suite() {
   local repetition trial_dir output_prefix
 
-  mkdir -p "$TCP_DIRECT_VS_RELAY_DIR"
-  : >"$TCP_DIRECT_VS_RELAY_RESULTS"
+  mkdir -p "$TCP_COPY_VS_SPLICE_DIR"
+  : >"$TCP_COPY_VS_SPLICE_RESULTS"
 
   for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
-    trial_dir="${TCP_DIRECT_VS_RELAY_DIR}/rep-${repetition}"
+    trial_dir="${TCP_COPY_VS_SPLICE_DIR}/rep-${repetition}"
     mkdir -p "$trial_dir"
     output_prefix="${trial_dir}/direct"
     run_tcp_direct_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix"
-    output_prefix="${trial_dir}/relay"
-    run_tcp_relay_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix"
   done
 
-  emit_tcp_direct_vs_relay_summary \
-    "$TCP_DIRECT_VS_RELAY_RESULTS" \
-    "$TCP_DIRECT_VS_RELAY_SUMMARY" \
+  start_relayd 0 1 tcp-copy
+  for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
+    trial_dir="${TCP_COPY_VS_SPLICE_DIR}/rep-${repetition}"
+    output_prefix="${trial_dir}/copy"
+    run_tcp_relay_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix" copy
+  done
+
+  start_relayd 1 0 tcp-splice
+  for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
+    trial_dir="${TCP_COPY_VS_SPLICE_DIR}/rep-${repetition}"
+    output_prefix="${trial_dir}/splice"
+    run_tcp_relay_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix" splice
+  done
+  stop_relayd
+
+  emit_tcp_copy_vs_splice_summary \
+    "$TCP_COPY_VS_SPLICE_RESULTS" \
+    "$TCP_COPY_VS_SPLICE_SUMMARY_TXT" \
+    "$TCP_COPY_VS_SPLICE_SUMMARY_JSON" \
     "$TCP_DIRECT_JSON" \
     "$TCP_DIRECT_LOG" \
     "$TCP_DIRECT_SERVER_LOG" \
-    "$TCP_RELAY_JSON" \
-    "$TCP_RELAY_LOG" \
-    "$TCP_RELAY_SERVER_LOG" \
+    "$TCP_COPY_JSON" \
+    "$TCP_COPY_LOG" \
+    "$TCP_COPY_SERVER_LOG" \
+    "$TCP_SPLICE_JSON" \
+    "$TCP_SPLICE_LOG" \
+    "$TCP_SPLICE_SERVER_LOG" \
     "$TCP_CLIENT_JSON" \
     "$TCP_CLIENT_LOG" \
     "$TCP_SERVER_LOG"
@@ -1138,6 +1344,7 @@ run_udp_matrix() {
   duration=$UDP_MATRIX_DURATION
   mkdir -p "${RUN_DIR}/udp-matrix"
   : >"$UDP_MATRIX_RESULTS"
+  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-matrix
 
   for rate in "${rates[@]}"; do
     for packet_size in "${packet_sizes[@]}"; do
@@ -1153,6 +1360,7 @@ run_udp_matrix() {
   done
 
   emit_matrix_report "$UDP_MATRIX_RESULTS" "$UDP_MATRIX_SUMMARY_TXT" "$UDP_MATRIX_SUMMARY_JSON" "$UDP_SWEEP_RATES" "$UDP_PACKET_SIZES" "$IPERF_REPETITIONS" "$duration"
+  stop_relayd
 }
 
 cleanup() {
@@ -1217,28 +1425,6 @@ require_cmd iperf3
 validate_mode
 write_manifest
 
-log "starting relayd on ${HTTP_LISTEN} with port range ${PORT_RANGE}"
-AUTH_TOKEN="$AUTH_TOKEN" \
-HTTP_LISTEN="$HTTP_LISTEN" \
-PORT_RANGE="$PORT_RANGE" \
-SQLITE_PATH="$SQLITE_PATH" \
-"$RELAYD_BIN" >"$RELAYD_LOG" 2>&1 &
-relayd_pid=$!
-track_child "$relayd_pid"
-
-readiness_body="${RUN_DIR}/readiness.body"
-readiness_status="${RUN_DIR}/readiness.status"
-if ! wait_for_status 200 "$AUTH_TOKEN" /v1/ports "$READINESS_TIMEOUT_SEC" "$readiness_body" "$readiness_status"; then
-  die "authenticated readiness probe did not return 200"
-fi
-log "authenticated readiness probe returned 200"
-
-unauth_body="${RUN_DIR}/unauth.body"
-unauth_status="${RUN_DIR}/unauth.status"
-api_request "$unauth_status" "$unauth_body" GET /v1/ports bad-token
-[[ $(<"$unauth_status") == "401" ]] || die "bad token probe expected 401, got $(<"$unauth_status")"
-log "bad token probe returned 401"
-
 case "$IPERF_MODE" in
   oneshot)
     run_one_shot_suite
@@ -1253,5 +1439,6 @@ case "$IPERF_MODE" in
 esac
 
 publish_artifacts
+refresh_tcp_copy_vs_splice_overall_summary "$LATEST_RUN_DIR" >"$TCP_COPY_VS_SPLICE_OVERALL_SUMMARY"
 log "artifacts available at ${LATEST_RUN_DIR}"
 log "iperf3 e2e harness completed (${IPERF_MODE})"
