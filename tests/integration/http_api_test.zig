@@ -37,7 +37,7 @@ const Harness = struct {
             .http = undefined,
             .db_path = db_path,
         };
-        self.runtime_manager = try runtime.RuntimeManager.init(allocator, &self.metrics, false);
+        self.runtime_manager = try runtime.RuntimeManager.init(allocator, &self.metrics, .{});
         try self.runtime_manager.start();
         const base: u16 = @intCast(56000 + @as(u16, @intCast(@mod(std.time.nanoTimestamp(), 500))));
         self.service = service_mod.Service.init(allocator, &self.repo, &self.runtime_manager, .{ .start = base, .end = base + 50 }, 2000);
@@ -203,7 +203,7 @@ test "http start failure does not deadlock cleanup" {
     var repo = try sqlite.Repository.open(std.testing.allocator, db_path);
     defer repo.close();
     var metrics = metrics_mod.Metrics{};
-    var runtime_manager = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, false);
+    var runtime_manager = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{});
     defer runtime_manager.deinit();
     try runtime_manager.start();
     var service = service_mod.Service.init(std.testing.allocator, &repo, &runtime_manager, .{ .start = 57000, .end = 57100 }, 2000);

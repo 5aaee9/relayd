@@ -7,7 +7,15 @@ PORT_RANGE="${PORT_RANGE:-18100-18120}"
 SQLITE_PATH="${SQLITE_PATH:-.zig-cache/e2e/relayd-$$.sqlite3}"
 TARGET_HOST="${TARGET_HOST:-127.0.0.1}"
 UDP_RATE="${UDP_RATE:-100G}"
+UDP_PACKET_SIZE="${UDP_PACKET_SIZE:-}"
 IPERF_DURATION="${IPERF_DURATION:-2}"
+IPERF_MODE="${IPERF_MODE:-oneshot}"
+UDP_SWEEP_RATES="${UDP_SWEEP_RATES:-1G,5G,10G,25G,50G,100G}"
+UDP_PACKET_SIZES="${UDP_PACKET_SIZES:-256,1200,1472}"
+IPERF_REPETITIONS="${IPERF_REPETITIONS:-3}"
+UDP_MATRIX_DURATION="${UDP_MATRIX_DURATION:-$IPERF_DURATION}"
+IPERF_KEEP_RUN_DIR="${IPERF_KEEP_RUN_DIR:-0}"
+IPERF_SERVER_READY_TIMEOUT_SEC="${IPERF_SERVER_READY_TIMEOUT_SEC:-5}"
 READINESS_TIMEOUT_SEC="${READINESS_TIMEOUT_SEC:-30}"
 ACTIVE_TIMEOUT_SEC="${ACTIVE_TIMEOUT_SEC:-30}"
 RELAYD_BIN="zig-out/bin/relayd"
@@ -20,6 +28,7 @@ fi
 
 ARTIFACT_DIR=".zig-cache/e2e"
 RUN_DIR="${ARTIFACT_DIR}/iperf3-$$"
+LATEST_RUN_DIR="${ARTIFACT_DIR}/iperf3-latest"
 RELAYD_LOG="${RUN_DIR}/relayd.log"
 TCP_SERVER_LOG="${RUN_DIR}/iperf3-tcp-server.log"
 TCP_CLIENT_JSON="${RUN_DIR}/iperf3-tcp-client.json"
@@ -29,6 +38,11 @@ UDP_CLIENT_JSON="${RUN_DIR}/iperf3-udp-client.json"
 UDP_CLIENT_LOG="${RUN_DIR}/iperf3-udp-client.log"
 LATEST_LIST_JSON="${RUN_DIR}/ports-list.json"
 LATEST_LIST_STATUS="${RUN_DIR}/ports-list.status"
+ONE_SHOT_REPORT="${RUN_DIR}/one-shot-report.txt"
+UDP_MATRIX_RESULTS="${RUN_DIR}/udp-matrix-results.ndjson"
+UDP_MATRIX_SUMMARY_TXT="${RUN_DIR}/udp-matrix-summary.txt"
+UDP_MATRIX_SUMMARY_JSON="${RUN_DIR}/udp-matrix-summary.json"
+RUN_MANIFEST="${RUN_DIR}/run-manifest.txt"
 
 child_pids=()
 allocation_ids=()
@@ -53,6 +67,24 @@ track_child() {
   child_pids+=("$1")
 }
 
+split_csv() {
+  local -n out=$1
+  local csv=$2
+  local item
+  IFS=',' read -r -a out <<<"$csv"
+  for item in "${!out[@]}"; do
+    out[$item]="${out[$item]// /}"
+    [[ -n "${out[$item]}" ]] || die "empty item in CSV list: ${csv}"
+  done
+}
+
+validate_mode() {
+  case "$IPERF_MODE" in
+    oneshot|matrix|both) ;;
+    *) die "IPERF_MODE must be one of: oneshot, matrix, both (got ${IPERF_MODE})" ;;
+  esac
+}
+
 dump_file() {
   local label=$1
   local path=$2
@@ -72,6 +104,8 @@ dump_logs() {
   dump_file udp_client_json "$UDP_CLIENT_JSON"
   dump_file ports_list_status "$LATEST_LIST_STATUS"
   dump_file ports_list_json "$LATEST_LIST_JSON"
+  dump_file one_shot_report "$ONE_SHOT_REPORT"
+  dump_file udp_matrix_summary "$UDP_MATRIX_SUMMARY_TXT"
 }
 
 api_request() {
@@ -90,7 +124,6 @@ api_request() {
   HTTP_BODY_PAYLOAD="$body" \
   python3 <<'PY'
 import os
-import sys
 import urllib.error
 import urllib.request
 
@@ -212,7 +245,8 @@ emit_stdout_report() {
   local tcp_json=$1
   local udp_json=$2
   local udp_target_rate=$3
-  python3 - "$tcp_json" "$udp_json" "$udp_target_rate" <<'PY'
+  local udp_packet_size=$4
+  python3 - "$tcp_json" "$udp_json" "$udp_target_rate" "$udp_packet_size" <<'PY'
 import json
 import sys
 
@@ -249,11 +283,14 @@ def udp_summary(path):
 tcp = tcp_summary(sys.argv[1])
 udp = udp_summary(sys.argv[2])
 udp_target = sys.argv[3]
+udp_packet_size = sys.argv[4]
 
 print("=== relayd e2e iperf3 report ===")
 print(f"TCP throughput: {format_decimal(tcp['bps'], ['bps', 'kbps', 'mbps', 'gbps'])}")
 print(f"TCP transfer:   {format_decimal(tcp['bytes'], ['bytes', 'kbytes', 'mbytes', 'gbytes'])}")
 print(f"UDP target:     {udp_target}")
+if udp_packet_size:
+    print(f"UDP payload:    {udp_packet_size} bytes")
 print(f"UDP throughput: {format_decimal(udp['bps'], ['bps', 'kbps', 'mbps', 'gbps'])}")
 print(f"UDP transfer:   {format_decimal(udp['bytes'], ['bytes', 'kbytes', 'mbytes', 'gbytes'])}")
 print(f"UDP loss:       {udp['lost_packets']}/{udp['packets']} packets ({udp['lost_percent']:.2f}%)")
@@ -273,6 +310,48 @@ sock = socket.socket(socket.AF_INET, sock_type)
 sock.bind(("127.0.0.1", 0))
 print(sock.getsockname()[1])
 sock.close()
+PY
+}
+
+wait_for_tcp_listener() {
+  local host=$1
+  local port=$2
+  local timeout_sec=$3
+  python3 - "$host" "$port" "$timeout_sec" <<'PY'
+import sys
+import time
+
+_host = sys.argv[1]
+port = int(sys.argv[2])
+timeout = float(sys.argv[3])
+listen_port = f"{port:04X}"
+deadline = time.time() + timeout
+
+def has_listener() -> bool:
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(table, encoding="utf-8") as handle:
+                next(handle, None)
+                for line in handle:
+                    fields = line.split()
+                    if len(fields) < 4:
+                        continue
+                    local_address = fields[1]
+                    state = fields[3]
+                    if state != "0A":
+                        continue
+                    _, local_port = local_address.rsplit(":", 1)
+                    if local_port.upper() == listen_port:
+                        return True
+        except FileNotFoundError:
+            continue
+    return False
+
+while time.time() < deadline:
+    if has_listener():
+        raise SystemExit(0)
+    time.sleep(0.05)
+raise SystemExit(1)
 PY
 }
 
@@ -324,6 +403,26 @@ wait_for_active() {
   return 1
 }
 
+wait_for_absent() {
+  local allocation_id=$1
+  local attempt
+  for ((attempt = 1; attempt <= ACTIVE_TIMEOUT_SEC; attempt++)); do
+    api_request "$LATEST_LIST_STATUS" "$LATEST_LIST_JSON" GET /v1/ports "$AUTH_TOKEN"
+    local status
+    status=$(<"$LATEST_LIST_STATUS")
+    [[ "$status" == "200" ]] || {
+      sleep 1
+      continue
+    }
+
+    if ! allocation_field_from_list "$LATEST_LIST_JSON" "$allocation_id" runtime_status >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 delete_allocation() {
   local allocation_id=$1
   local delete_status="${RUN_DIR}/delete-now-${allocation_id}.status"
@@ -334,6 +433,9 @@ delete_allocation() {
   status=$(<"$delete_status")
   if [[ "$status" != "204" && "$status" != "404" ]]; then
     die "allocation delete failed for ${allocation_id} with status ${status}"
+  fi
+  if [[ "$status" == "204" ]]; then
+    wait_for_absent "$allocation_id" || die "allocation ${allocation_id} still present after delete"
   fi
 }
 
@@ -353,8 +455,17 @@ create_allocation() {
   relay_port=$(json_get "$create_body" port)
   allocation_ids+=("$allocation_id")
 
-  api_request "$update_status" "$update_body" POST /v1/ports/target "$AUTH_TOKEN" "{\"id\":\"${allocation_id}\",\"host\":\"${TARGET_HOST}\"}"
-  [[ $(<"$update_status") == "200" ]] || die "${protocol} allocation host update failed with status $(<"$update_status")"
+  local attempt update_result
+  for ((attempt = 1; attempt <= 20; attempt++)); do
+    api_request "$update_status" "$update_body" POST /v1/ports/target "$AUTH_TOKEN" "{\"id\":\"${allocation_id}\",\"host\":\"${TARGET_HOST}\"}"
+    update_result=$(<"$update_status")
+    if [[ "$update_result" == "200" ]]; then
+      break
+    fi
+    [[ "$update_result" == "404" ]] || break
+    sleep 0.1
+  done
+  [[ "$update_result" == "200" ]] || die "${protocol} allocation host update failed with status ${update_result}"
 
   if ! wait_for_active "$allocation_id"; then
     die "${protocol} allocation ${allocation_id} did not become active"
@@ -362,6 +473,401 @@ create_allocation() {
 
   CREATED_ALLOCATION_ID=$allocation_id
   CREATED_RELAY_PORT=$relay_port
+}
+
+append_udp_result() {
+  local results_file=$1
+  local path_label=$2
+  local rate=$3
+  local packet_size=$4
+  local repetition=$5
+  local duration=$6
+  local json_file=$7
+  local client_log=$8
+  local server_log=$9
+  python3 - "$results_file" "$path_label" "$rate" "$packet_size" "$repetition" "$duration" "$json_file" "$client_log" "$server_log" <<'PY'
+import json
+import pathlib
+import sys
+
+results_file = pathlib.Path(sys.argv[1])
+path_label = sys.argv[2]
+rate = sys.argv[3]
+packet_size = int(sys.argv[4])
+repetition = int(sys.argv[5])
+duration = float(sys.argv[6])
+json_file = pathlib.Path(sys.argv[7])
+client_log = pathlib.Path(sys.argv[8])
+server_log = pathlib.Path(sys.argv[9])
+payload = json.load(open(json_file, encoding='utf-8'))
+end = payload.get('end') or {}
+summary = end.get('sum_received') or end.get('sum') or {}
+record = {
+    'path': path_label,
+    'rate': rate,
+    'packet_size': packet_size,
+    'repetition': repetition,
+    'duration_sec': duration,
+    'bytes': summary.get('bytes', 0),
+    'bits_per_second': summary.get('bits_per_second', 0.0),
+    'jitter_ms': summary.get('jitter_ms', 0.0),
+    'lost_packets': summary.get('lost_packets', 0),
+    'packets': summary.get('packets', 0),
+    'lost_percent': summary.get('lost_percent', 0.0),
+    'json_file': json_file.relative_to(results_file.parent).as_posix(),
+    'client_log': client_log.relative_to(results_file.parent).as_posix(),
+    'server_log': server_log.relative_to(results_file.parent).as_posix(),
+}
+with open(results_file, 'a', encoding='utf-8') as handle:
+    handle.write(json.dumps(record, sort_keys=True))
+    handle.write('\n')
+PY
+}
+
+emit_matrix_report() {
+  local results_file=$1
+  local summary_txt=$2
+  local summary_json=$3
+  local rates_csv=$4
+  local packet_sizes_csv=$5
+  local repetitions=$6
+  local duration=$7
+  python3 - "$results_file" "$summary_txt" "$summary_json" "$rates_csv" "$packet_sizes_csv" "$repetitions" "$duration" <<'PY'
+import json
+import pathlib
+import statistics
+import sys
+
+results_path = pathlib.Path(sys.argv[1])
+summary_txt_path = pathlib.Path(sys.argv[2])
+summary_json_path = pathlib.Path(sys.argv[3])
+rates = [item.strip() for item in sys.argv[4].split(',') if item.strip()]
+packet_sizes = [int(item.strip()) for item in sys.argv[5].split(',') if item.strip()]
+repetitions = int(sys.argv[6])
+duration = float(sys.argv[7])
+records = [json.loads(line) for line in results_path.read_text(encoding='utf-8').splitlines() if line.strip()]
+
+UNITS_BPS = ['bps', 'kbps', 'mbps', 'gbps']
+UNITS_BYTES = ['bytes', 'kbytes', 'mbytes', 'gbytes']
+
+def format_decimal(value, units):
+    value = float(value)
+    unit_index = 0
+    while value >= 1000.0 and unit_index < len(units) - 1:
+        value /= 1000.0
+        unit_index += 1
+    return f"{value:.2f} {units[unit_index]}"
+
+def aggregate(items):
+    throughputs = [item['bits_per_second'] for item in items]
+    losses = [item['lost_percent'] for item in items]
+    jitters = [item['jitter_ms'] for item in items]
+    transfers = [item['bytes'] for item in items]
+    return {
+        'samples': len(items),
+        'median_bps': statistics.median(throughputs),
+        'best_bps': max(throughputs),
+        'median_loss_percent': statistics.median(losses),
+        'best_loss_percent': min(losses),
+        'median_jitter_ms': statistics.median(jitters),
+        'best_jitter_ms': min(jitters),
+        'median_bytes': statistics.median(transfers),
+        'best_bytes': max(transfers),
+    }
+
+def ratio(relay, direct):
+    return relay / direct if direct else None
+
+by_key = {}
+for record in records:
+    key = (record['rate'], record['packet_size'], record['path'])
+    by_key.setdefault(key, []).append(record)
+
+pairs = []
+for rate in rates:
+    for packet_size in packet_sizes:
+        direct_records = by_key.get((rate, packet_size, 'direct'), [])
+        relay_records = by_key.get((rate, packet_size, 'relay'), [])
+        if not direct_records or not relay_records:
+            continue
+        direct = aggregate(direct_records)
+        relay = aggregate(relay_records)
+        pair = {
+            'rate': rate,
+            'packet_size': packet_size,
+            'repetitions': repetitions,
+            'duration_sec': duration,
+            'direct': direct,
+            'relay': relay,
+            'relay_to_direct_median_bps_ratio': ratio(relay['median_bps'], direct['median_bps']),
+            'relay_to_direct_best_bps_ratio': ratio(relay['best_bps'], direct['best_bps']),
+            'loss_delta_percent_points': relay['median_loss_percent'] - direct['median_loss_percent'],
+        }
+        pairs.append(pair)
+
+summary = {
+    'rates': rates,
+    'packet_sizes': packet_sizes,
+    'repetitions': repetitions,
+    'duration_sec': duration,
+    'runs': records,
+    'pairs': pairs,
+    'focus_points': {},
+}
+for rate, packet_size in [('10G', 1472), ('25G', 1472)]:
+    for pair in pairs:
+        if pair['rate'] == rate and pair['packet_size'] == packet_size:
+            summary['focus_points'][f'{rate}/{packet_size}'] = pair
+            break
+
+summary_json_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding='utf-8')
+
+lines = [
+    '=== relayd udp matrix summary ===',
+    f'repetitions: {repetitions}',
+    f'duration:    {duration:g}s',
+    f'runs:        {len(records)}',
+    '',
+    'rate  pkt   direct median/best      relay median/best       relay/direct   direct loss  relay loss  delta',
+]
+for pair in pairs:
+    ratio_value = pair['relay_to_direct_median_bps_ratio']
+    ratio_text = 'n/a' if ratio_value is None else f"{ratio_value:.2f}x"
+    delta = pair['loss_delta_percent_points']
+    delta_text = f"{delta:+.2f} pp"
+    lines.append(
+        f"{pair['rate']:<5} {pair['packet_size']:<5} "
+        f"{format_decimal(pair['direct']['median_bps'], UNITS_BPS):>18} / {format_decimal(pair['direct']['best_bps'], UNITS_BPS):<18} "
+        f"{format_decimal(pair['relay']['median_bps'], UNITS_BPS):>18} / {format_decimal(pair['relay']['best_bps'], UNITS_BPS):<18} "
+        f"{ratio_text:>8} "
+        f"{pair['direct']['median_loss_percent']:>10.2f}% "
+        f"{pair['relay']['median_loss_percent']:>10.2f}% "
+        f"{delta_text:>10}"
+    )
+
+if summary['focus_points']:
+    lines.extend(['', 'focus points:'])
+    for label, pair in summary['focus_points'].items():
+        lines.append(
+            f"- {label}: relay median {format_decimal(pair['relay']['median_bps'], UNITS_BPS)}, "
+            f"relay best {format_decimal(pair['relay']['best_bps'], UNITS_BPS)}, "
+            f"median loss {pair['relay']['median_loss_percent']:.2f}%, "
+            f"ratio vs direct {pair['relay_to_direct_median_bps_ratio']:.2f}x"
+            if pair['relay_to_direct_median_bps_ratio'] is not None else
+            f"- {label}: relay median {format_decimal(pair['relay']['median_bps'], UNITS_BPS)}, "
+            f"relay best {format_decimal(pair['relay']['best_bps'], UNITS_BPS)}, "
+            f"median loss {pair['relay']['median_loss_percent']:.2f}%"
+        )
+
+summary_txt_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+print(summary_txt_path.read_text(encoding='utf-8'), end='')
+PY
+}
+
+publish_artifacts() {
+  python3 - "$RUN_DIR" "$LATEST_RUN_DIR" <<'PY'
+import pathlib
+import shutil
+import sys
+
+src = pathlib.Path(sys.argv[1])
+dst = pathlib.Path(sys.argv[2])
+dst.parent.mkdir(parents=True, exist_ok=True)
+if dst.exists():
+    shutil.rmtree(dst)
+shutil.copytree(src, dst)
+PY
+}
+
+write_manifest() {
+  cat >"$RUN_MANIFEST" <<EOF_MANIFEST
+IPERF_MODE=${IPERF_MODE}
+IPERF_DURATION=${IPERF_DURATION}
+UDP_MATRIX_DURATION=${UDP_MATRIX_DURATION}
+UDP_RATE=${UDP_RATE}
+UDP_PACKET_SIZE=${UDP_PACKET_SIZE}
+UDP_SWEEP_RATES=${UDP_SWEEP_RATES}
+UDP_PACKET_SIZES=${UDP_PACKET_SIZES}
+IPERF_REPETITIONS=${IPERF_REPETITIONS}
+RUN_DIR=${RUN_DIR}
+LATEST_RUN_DIR=${LATEST_RUN_DIR}
+EOF_MANIFEST
+}
+
+run_iperf_udp_client() {
+  local target_port=$1
+  local rate=$2
+  local duration=$3
+  local packet_size=$4
+  local output_json=$5
+  local output_log=$6
+  local -a args
+
+  args=(-c "$TARGET_HOST" -p "$target_port" -u -b "$rate" -t "$duration" -J)
+  if [[ -n "$packet_size" ]]; then
+    args+=(-l "$packet_size")
+  fi
+
+  iperf3 "${args[@]}" >"$output_json" 2>"$output_log"
+}
+
+run_tcp_relay_smoke() {
+  tcp_target_port=$(pick_free_port tcp)
+  log "starting tcp iperf3 server on ${TARGET_HOST}:${tcp_target_port}"
+  iperf3 -s -1 -B "$TARGET_HOST" -p "$tcp_target_port" >"$TCP_SERVER_LOG" 2>&1 &
+  tcp_server_pid=$!
+  track_child "$tcp_server_pid"
+  wait_for_tcp_listener "$TARGET_HOST" "$tcp_target_port" "$IPERF_SERVER_READY_TIMEOUT_SEC" || die "tcp iperf3 server did not become ready on ${TARGET_HOST}:${tcp_target_port}"
+
+  create_allocation tcp "$tcp_target_port"
+  tcp_allocation_id=$CREATED_ALLOCATION_ID
+  tcp_relay_port=$CREATED_RELAY_PORT
+  log "tcp allocation id=${tcp_allocation_id} relay_port=${tcp_relay_port}"
+
+  iperf3 -c "$TARGET_HOST" -p "$tcp_relay_port" -t "$IPERF_DURATION" -J >"$TCP_CLIENT_JSON" 2>"$TCP_CLIENT_LOG"
+  log "tcp $(assert_iperf_positive "$TCP_CLIENT_JSON" tcp)"
+  wait "$tcp_server_pid"
+  delete_allocation "$tcp_allocation_id"
+}
+
+run_udp_relay_smoke() {
+  udp_target_port=$(pick_free_port tcp)
+  log "starting udp iperf3 server on ${TARGET_HOST}:${udp_target_port} (requires tcp control + udp data on the same relay port)"
+  iperf3 -s -1 -B "$TARGET_HOST" -p "$udp_target_port" >"$UDP_SERVER_LOG" 2>&1 &
+  udp_server_pid=$!
+  track_child "$udp_server_pid"
+  wait_for_tcp_listener "$TARGET_HOST" "$udp_target_port" "$IPERF_SERVER_READY_TIMEOUT_SEC" || die "udp iperf3 server did not become ready on ${TARGET_HOST}:${udp_target_port}"
+
+  create_allocation tcp "$udp_target_port"
+  udp_control_allocation_id=$CREATED_ALLOCATION_ID
+  udp_control_relay_port=$CREATED_RELAY_PORT
+  log "udp control allocation id=${udp_control_allocation_id} relay_port=${udp_control_relay_port}"
+
+  create_allocation udp "$udp_target_port"
+  udp_allocation_id=$CREATED_ALLOCATION_ID
+  udp_relay_port=$CREATED_RELAY_PORT
+  log "udp allocation id=${udp_allocation_id} relay_port=${udp_relay_port}"
+  [[ "$udp_control_relay_port" == "$udp_relay_port" ]] || die "iperf3 UDP requires matching TCP control and UDP relay ports, got tcp=${udp_control_relay_port} udp=${udp_relay_port}"
+
+  run_iperf_udp_client "$udp_relay_port" "$UDP_RATE" "$IPERF_DURATION" "$UDP_PACKET_SIZE" "$UDP_CLIENT_JSON" "$UDP_CLIENT_LOG"
+  log "udp $(assert_iperf_positive "$UDP_CLIENT_JSON" udp)"
+  if udp_loss=$(udp_lost_percent "$UDP_CLIENT_JSON"); then
+    [[ -n "$udp_loss" ]] && log "udp lost_percent=${udp_loss} (non-gating)"
+  fi
+  wait "$udp_server_pid"
+  delete_allocation "$udp_control_allocation_id"
+  delete_allocation "$udp_allocation_id"
+}
+
+run_one_shot_suite() {
+  local report
+  run_tcp_relay_smoke
+  run_udp_relay_smoke
+  report=$(emit_stdout_report "$TCP_CLIENT_JSON" "$UDP_CLIENT_JSON" "$UDP_RATE" "$UDP_PACKET_SIZE")
+  printf '%s\n' "$report" | tee "$ONE_SHOT_REPORT"
+}
+
+run_udp_direct_trial() {
+  local rate=$1
+  local packet_size=$2
+  local repetition=$3
+  local duration=$4
+  local output_prefix=$5
+  local target_port server_log client_json client_log server_pid
+
+  target_port=$(pick_free_port tcp)
+  server_log="${output_prefix}-server.log"
+  client_json="${output_prefix}-client.json"
+  client_log="${output_prefix}-client.log"
+
+  log "udp direct trial rate=${rate} packet_size=${packet_size} repetition=${repetition} target_port=${target_port}"
+  iperf3 -s -1 -B "$TARGET_HOST" -p "$target_port" >"$server_log" 2>&1 &
+  server_pid=$!
+  track_child "$server_pid"
+  wait_for_tcp_listener "$TARGET_HOST" "$target_port" "$IPERF_SERVER_READY_TIMEOUT_SEC" || die "udp direct iperf3 server did not become ready on ${TARGET_HOST}:${target_port}"
+
+  if ! run_iperf_udp_client "$target_port" "$rate" "$duration" "$packet_size" "$client_json" "$client_log"; then
+    wait "$server_pid" 2>/dev/null || true
+    return 1
+  fi
+
+  log "udp direct rate=${rate} packet_size=${packet_size} repetition=${repetition} $(assert_iperf_positive "$client_json" udp)"
+  if udp_loss=$(udp_lost_percent "$client_json"); then
+    [[ -n "$udp_loss" ]] && log "udp direct rate=${rate} packet_size=${packet_size} repetition=${repetition} lost_percent=${udp_loss}"
+  fi
+  wait "$server_pid"
+  append_udp_result "$UDP_MATRIX_RESULTS" direct "$rate" "$packet_size" "$repetition" "$duration" "$client_json" "$client_log" "$server_log"
+}
+
+run_udp_relay_trial() {
+  local rate=$1
+  local packet_size=$2
+  local repetition=$3
+  local duration=$4
+  local output_prefix=$5
+  local target_port server_log client_json client_log server_pid
+  local control_id control_port relay_id relay_port
+
+  target_port=$(pick_free_port tcp)
+  server_log="${output_prefix}-server.log"
+  client_json="${output_prefix}-client.json"
+  client_log="${output_prefix}-client.log"
+
+  log "udp relay trial rate=${rate} packet_size=${packet_size} repetition=${repetition} target_port=${target_port}"
+  iperf3 -s -1 -B "$TARGET_HOST" -p "$target_port" >"$server_log" 2>&1 &
+  server_pid=$!
+  track_child "$server_pid"
+  wait_for_tcp_listener "$TARGET_HOST" "$target_port" "$IPERF_SERVER_READY_TIMEOUT_SEC" || die "udp relay iperf3 server did not become ready on ${TARGET_HOST}:${target_port}"
+
+  create_allocation tcp "$target_port"
+  control_id=$CREATED_ALLOCATION_ID
+  control_port=$CREATED_RELAY_PORT
+  create_allocation udp "$target_port"
+  relay_id=$CREATED_ALLOCATION_ID
+  relay_port=$CREATED_RELAY_PORT
+  [[ "$control_port" == "$relay_port" ]] || die "iperf3 UDP requires matching TCP control and UDP relay ports, got tcp=${control_port} udp=${relay_port}"
+
+  if ! run_iperf_udp_client "$relay_port" "$rate" "$duration" "$packet_size" "$client_json" "$client_log"; then
+    delete_allocation "$control_id"
+    delete_allocation "$relay_id"
+    wait "$server_pid" 2>/dev/null || true
+    return 1
+  fi
+
+  log "udp relay rate=${rate} packet_size=${packet_size} repetition=${repetition} relay_port=${relay_port} $(assert_iperf_positive "$client_json" udp)"
+  if udp_loss=$(udp_lost_percent "$client_json"); then
+    [[ -n "$udp_loss" ]] && log "udp relay rate=${rate} packet_size=${packet_size} repetition=${repetition} lost_percent=${udp_loss}"
+  fi
+  wait "$server_pid"
+  delete_allocation "$control_id"
+  delete_allocation "$relay_id"
+  append_udp_result "$UDP_MATRIX_RESULTS" relay "$rate" "$packet_size" "$repetition" "$duration" "$client_json" "$client_log" "$server_log"
+}
+
+run_udp_matrix() {
+  local -a rates packet_sizes
+  local rate packet_size repetition duration matrix_dir output_prefix
+
+  split_csv rates "$UDP_SWEEP_RATES"
+  split_csv packet_sizes "$UDP_PACKET_SIZES"
+  duration=$UDP_MATRIX_DURATION
+  mkdir -p "${RUN_DIR}/udp-matrix"
+  : >"$UDP_MATRIX_RESULTS"
+
+  for rate in "${rates[@]}"; do
+    for packet_size in "${packet_sizes[@]}"; do
+      for ((repetition = 1; repetition <= IPERF_REPETITIONS; repetition++)); do
+        matrix_dir="${RUN_DIR}/udp-matrix/rate-${rate}/packet-${packet_size}/rep-${repetition}"
+        mkdir -p "$matrix_dir"
+        output_prefix="${matrix_dir}/direct"
+        run_udp_direct_trial "$rate" "$packet_size" "$repetition" "$duration" "$output_prefix"
+        output_prefix="${matrix_dir}/relay"
+        run_udp_relay_trial "$rate" "$packet_size" "$repetition" "$duration" "$output_prefix"
+      done
+    done
+  done
+
+  emit_matrix_report "$UDP_MATRIX_RESULTS" "$UDP_MATRIX_SUMMARY_TXT" "$UDP_MATRIX_SUMMARY_JSON" "$UDP_SWEEP_RATES" "$UDP_PACKET_SIZES" "$IPERF_REPETITIONS" "$duration"
 }
 
 cleanup() {
@@ -404,7 +910,9 @@ cleanup() {
     dump_logs
   else
     rm -f "$SQLITE_PATH"
-    rm -rf "$RUN_DIR"
+    if [[ "$IPERF_KEEP_RUN_DIR" != "1" ]]; then
+      rm -rf "$RUN_DIR"
+    fi
   fi
 
   if (( cleanup_failed != 0 && rc == 0 )); then
@@ -421,6 +929,8 @@ mkdir -p "$(dirname "$SQLITE_PATH")"
 require_cmd python3
 require_cmd iperf3
 [[ -x "$RELAYD_BIN" ]] || die "expected relayd build artifact at ${RELAYD_BIN}"
+validate_mode
+write_manifest
 
 log "starting relayd on ${HTTP_LISTEN} with port range ${PORT_RANGE}"
 AUTH_TOKEN="$AUTH_TOKEN" \
@@ -444,40 +954,19 @@ api_request "$unauth_status" "$unauth_body" GET /v1/ports bad-token
 [[ $(<"$unauth_status") == "401" ]] || die "bad token probe expected 401, got $(<"$unauth_status")"
 log "bad token probe returned 401"
 
-tcp_target_port=$(pick_free_port tcp)
-log "starting tcp iperf3 server on ${TARGET_HOST}:${tcp_target_port}"
-iperf3 -s -1 -B "$TARGET_HOST" -p "$tcp_target_port" >"$TCP_SERVER_LOG" 2>&1 &
-tcp_server_pid=$!
-track_child "$tcp_server_pid"
-create_allocation tcp "$tcp_target_port"
-tcp_allocation_id=$CREATED_ALLOCATION_ID
-tcp_relay_port=$CREATED_RELAY_PORT
-log "tcp allocation id=${tcp_allocation_id} relay_port=${tcp_relay_port}"
-iperf3 -c "$TARGET_HOST" -p "$tcp_relay_port" -t "$IPERF_DURATION" -J >"$TCP_CLIENT_JSON" 2>"$TCP_CLIENT_LOG"
-log "tcp $(assert_iperf_positive "$TCP_CLIENT_JSON" tcp)"
-wait "$tcp_server_pid"
-delete_allocation "$tcp_allocation_id"
+case "$IPERF_MODE" in
+  oneshot)
+    run_one_shot_suite
+    ;;
+  matrix)
+    run_udp_matrix
+    ;;
+  both)
+    run_one_shot_suite
+    run_udp_matrix
+    ;;
+esac
 
-udp_target_port=$(pick_free_port tcp)
-log "starting udp iperf3 server on ${TARGET_HOST}:${udp_target_port} (requires tcp control + udp data on the same relay port)"
-iperf3 -s -1 -B "$TARGET_HOST" -p "$udp_target_port" >"$UDP_SERVER_LOG" 2>&1 &
-udp_server_pid=$!
-track_child "$udp_server_pid"
-create_allocation tcp "$udp_target_port"
-udp_control_allocation_id=$CREATED_ALLOCATION_ID
-udp_control_relay_port=$CREATED_RELAY_PORT
-log "udp control allocation id=${udp_control_allocation_id} relay_port=${udp_control_relay_port}"
-create_allocation udp "$udp_target_port"
-udp_allocation_id=$CREATED_ALLOCATION_ID
-udp_relay_port=$CREATED_RELAY_PORT
-log "udp allocation id=${udp_allocation_id} relay_port=${udp_relay_port}"
-[[ "$udp_control_relay_port" == "$udp_relay_port" ]] || die "iperf3 UDP requires matching TCP control and UDP relay ports, got tcp=${udp_control_relay_port} udp=${udp_relay_port}"
-udp_metrics=$(iperf3 -c "$TARGET_HOST" -p "$udp_relay_port" -u -b "$UDP_RATE" -t "$IPERF_DURATION" -J >"$UDP_CLIENT_JSON" 2>"$UDP_CLIENT_LOG"; assert_iperf_positive "$UDP_CLIENT_JSON" udp)
-log "udp ${udp_metrics}"
-if udp_loss=$(udp_lost_percent "$UDP_CLIENT_JSON"); then
-  [[ -n "$udp_loss" ]] && log "udp lost_percent=${udp_loss} (non-gating)"
-fi
-wait "$udp_server_pid"
-
-emit_stdout_report "$TCP_CLIENT_JSON" "$UDP_CLIENT_JSON" "$UDP_RATE"
-log "iperf3 TCP+UDP e2e coverage passed"
+publish_artifacts
+log "artifacts available at ${LATEST_RUN_DIR}"
+log "iperf3 e2e harness completed (${IPERF_MODE})"

@@ -36,7 +36,11 @@ pub const App = struct {
             .http = undefined,
         };
 
-        app.runtime_manager = try runtime.RuntimeManager.init(allocator, &app.metrics, config.force_tcp_copy_fallback);
+        app.runtime_manager = try runtime.RuntimeManager.init(allocator, &app.metrics, .{
+            .force_tcp_copy_fallback = config.force_tcp_copy_fallback,
+            .udp_socket_recv_buffer_bytes = config.udp_socket_recv_buffer_bytes,
+            .udp_socket_send_buffer_bytes = config.udp_socket_send_buffer_bytes,
+        });
         errdefer app.runtime_manager.deinit();
         try app.runtime_manager.start();
 

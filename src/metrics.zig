@@ -16,6 +16,22 @@ pub const Counter = struct {
     }
 };
 
+pub const Gauge = struct {
+    value: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+
+    pub fn inc(self: *Gauge) void {
+        _ = self.value.fetchAdd(1, .monotonic);
+    }
+
+    pub fn dec(self: *Gauge) void {
+        _ = self.value.fetchSub(1, .monotonic);
+    }
+
+    pub fn load(self: *const Gauge) u64 {
+        return self.value.load(.monotonic);
+    }
+};
+
 pub const Metrics = struct {
     allocations_total: Counter = .{},
     runtime_apply_total: Counter = .{},
@@ -26,6 +42,16 @@ pub const Metrics = struct {
     tcp_copy_fallback_total: Counter = .{},
     udp_packets_in_total: Counter = .{},
     udp_packets_out_total: Counter = .{},
+    udp_bytes_in_total: Counter = .{},
+    udp_bytes_out_total: Counter = .{},
+    udp_recv_errors_total: Counter = .{},
+    udp_send_errors_total: Counter = .{},
+    udp_session_create_total: Counter = .{},
+    udp_session_expire_total: Counter = .{},
+    udp_batch_calls_total: Counter = .{},
+    udp_batch_messages_total: Counter = .{},
+    udp_drop_total: Counter = .{},
+    udp_active_sessions: Gauge = .{},
     restore_timeout_total: Counter = .{},
     http_non_loopback_bind_total: Counter = .{},
 };

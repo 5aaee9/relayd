@@ -12,6 +12,8 @@ Linux-first Zig port-forwarder with:
 - `PORT_RANGE` — default `10000-30000`
 - `AUTH_TOKEN` — required bearer token
 - `FORCE_TCP_COPY_FALLBACK` — optional `true/false`
+- `UDP_SOCKET_RCVBUF_BYTES` — optional UDP listener/upstream receive buffer size, default `8388608`
+- `UDP_SOCKET_SNDBUF_BYTES` — optional UDP listener/upstream send buffer size, default `8388608`
 - `RUNTIME_APPLY_TIMEOUT_MS` — optional, default `2000`
 - `RESTORE_SWEEP_TIMEOUT_MS` — optional, default `30000`
 - `SQLITE_PATH` — optional, default `relayd.sqlite3`
@@ -48,6 +50,24 @@ By default the harness runs relayd with `AUTH_TOKEN=test-token`, `HTTP_LISTEN=12
 ```bash
 HTTP_LISTEN=127.0.0.1:28080 PORT_RANGE=28100-28120 ./scripts/ci/e2e_iperf3.sh
 ```
+
+### Matrix mode
+The harness also supports repeated UDP benchmark sweeps for relay-vs-direct comparison:
+
+```bash
+IPERF_MODE=matrix \
+UDP_SWEEP_RATES=10G,25G \
+UDP_PACKET_SIZES=1472 \
+IPERF_REPETITIONS=3 \
+UDP_MATRIX_DURATION=2 \
+./scripts/ci/e2e_iperf3.sh
+```
+
+Useful knobs:
+- `UDP_RATE` / `UDP_PACKET_SIZE` for one-shot mode
+- `UDP_SWEEP_RATES`, `UDP_PACKET_SIZES`, `IPERF_REPETITIONS`, `UDP_MATRIX_DURATION` for matrix mode
+- `UDP_SOCKET_RCVBUF_BYTES`, `UDP_SOCKET_SNDBUF_BYTES` for relay UDP socket buffer tuning
+- artifacts are written under `.zig-cache/e2e/iperf3-latest`
 
 ## API
 ### Create
