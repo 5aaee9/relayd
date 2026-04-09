@@ -86,6 +86,17 @@ const TcpEchoServer = struct {
     }
 };
 
+const TcpHalfCloseServer = struct {
+    server: std.net.Server,
+    port: u16,
+    thread: std.Thread,
+
+    fn deinit(self: *TcpHalfCloseServer) void {
+        self.server.deinit();
+        self.thread.join();
+    }
+};
+
 const TcpForwardHarness = struct {
     path: []u8,
     repo: sqlite.Repository,
@@ -126,6 +137,29 @@ fn tcpEchoThread(fd: std.posix.fd_t) void {
     var buf: [4]u8 = undefined;
     const amt = std.posix.read(conn.stream.handle, &buf) catch return;
     if (amt > 0) _ = std.posix.write(conn.stream.handle, buf[0..amt]) catch {};
+}
+
+fn startTcpHalfCloseServer() !TcpHalfCloseServer {
+    const addr = try config.parseIpLiteral("127.0.0.1", 0);
+    const server = try addr.listen(.{ .reuse_address = true });
+    var bound: std.net.Address = undefined;
+    var len: std.posix.socklen_t = @sizeOf(std.net.Address);
+    try std.posix.getsockname(server.stream.handle, &bound.any, &len);
+    const port = bound.getPort();
+    const thread = try std.Thread.spawn(.{}, tcpHalfCloseThread, .{server.stream.handle});
+    return .{ .server = server, .port = port, .thread = thread };
+}
+
+fn tcpHalfCloseThread(fd: std.posix.fd_t) void {
+    var server = std.net.Server{ .listen_address = undefined, .stream = .{ .handle = fd } };
+    const conn = server.accept() catch return;
+    defer conn.stream.close();
+    var buf: [256]u8 = undefined;
+    while (true) {
+        const amt = std.posix.read(conn.stream.handle, &buf) catch return;
+        if (amt == 0) break;
+    }
+    _ = std.posix.write(conn.stream.handle, "ack") catch {};
 }
 
 fn startTcpForwardHarness(options: runtime.Options) !*TcpForwardHarness {
@@ -461,6 +495,65 @@ test "service forwards tcp traffic after target is configured" {
     try std.testing.expectEqual(@as(u64, 1), harness.metrics.tcp_copy_fallback_total.load());
 }
 
+test "tcp session-model forwards traffic and cleans up counters" {
+    var harness = try startTcpForwardHarness(.{
+        .tcp_session_model_enabled = true,
+    });
+    defer harness.deinit(std.testing.allocator);
+
+    const stream = try connectRelayStream(harness.alloc.port);
+    _ = try std.posix.write(stream.handle, "ping");
+    var buf: [4]u8 = undefined;
+    const amt = try std.posix.read(stream.handle, &buf);
+    try std.testing.expectEqual(@as(usize, 4), amt);
+    try std.testing.expectEqualStrings("ping", &buf);
+    stream.close();
+
+    try waitForCounterValue(&harness.metrics.tcp_session_create_total, 1, 500);
+    try waitForCounterValue(&harness.metrics.tcp_session_close_total, 1, 500);
+    try std.testing.expect(harness.metrics.tcp_session_event_total.load() > 0);
+    try std.testing.expectEqual(@as(u64, 0), harness.metrics.tcp_active_sessions.load());
+    try std.testing.expectEqual(@as(u64, 0), harness.metrics.tcp_splice_attempt_total.load());
+}
+
+test "tcp session-model propagates client half-close" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{
+        .tcp_session_model_enabled = true,
+    });
+    defer rt.deinit();
+    try rt.start();
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = 55120, .end = 55220 }, 2000);
+
+    var server = try startTcpHalfCloseServer();
+    defer server.deinit();
+
+    var alloc = try svc.createAllocation(model.Protocol.tcp, server.port);
+    defer alloc.deinit(std.testing.allocator);
+    var updated = try svc.setTarget(alloc.id, "127.0.0.1");
+    defer updated.deinit(std.testing.allocator);
+
+    const stream = try connectRelayStream(alloc.port);
+    defer closeIgnore(stream.handle);
+    _ = try std.posix.write(stream.handle, "ping");
+    try std.posix.shutdown(stream.handle, .send);
+    var buf: [8]u8 = undefined;
+    const amt = try std.posix.read(stream.handle, &buf);
+    try std.testing.expectEqualStrings("ack", buf[0..amt]);
+
+    try waitForCounterValue(&metrics.tcp_session_create_total, 1, 500);
+    try waitForCounterValue(&metrics.tcp_session_close_total, 1, 500);
+    try std.testing.expectEqual(@as(u64, 0), metrics.tcp_active_sessions.load());
+}
+
 test "tcp forced-copy override wins over splice-enabled mode" {
     var harness = try startTcpForwardHarness(.{
         .tcp_splice_enabled = true,
@@ -595,6 +688,39 @@ test "runtime deinit does not hang with active tcp session" {
     defer closeIgnore(stream.handle);
 
     rt.deinit();
+}
+
+test "runtime deinit does not hang with active tcp session in session-model mode" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{
+        .tcp_session_model_enabled = true,
+    });
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = 55320, .end = 55420 }, 2000);
+
+    try rt.start();
+    var echo = try startTcpEchoServer();
+    defer echo.deinit();
+
+    var alloc = try svc.createAllocation(model.Protocol.tcp, echo.port);
+    defer alloc.deinit(std.testing.allocator);
+    var updated = try svc.setTarget(alloc.id, "127.0.0.1");
+    defer updated.deinit(std.testing.allocator);
+
+    const stream = try connectRelayStream(alloc.port);
+    defer closeIgnore(stream.handle);
+    try waitForCounterValue(&metrics.tcp_session_create_total, 1, 500);
+
+    rt.deinit();
+    try std.testing.expectEqual(@as(u64, 0), metrics.tcp_active_sessions.load());
+    try std.testing.expect(metrics.tcp_session_close_total.load() >= 1);
 }
 
 test "service forwards udp traffic after target is configured" {

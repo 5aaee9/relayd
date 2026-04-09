@@ -6,6 +6,7 @@ HTTP_LISTEN="${HTTP_LISTEN:-127.0.0.1:18080}"
 PORT_RANGE="${PORT_RANGE:-18100-18120}"
 SQLITE_PATH="${SQLITE_PATH:-.zig-cache/e2e/relayd-$$.sqlite3}"
 TARGET_HOST="${TARGET_HOST:-127.0.0.1}"
+TCP_SESSION_MODEL_ENABLED="${TCP_SESSION_MODEL_ENABLED:-0}"
 TCP_SPLICE_ENABLED="${TCP_SPLICE_ENABLED:-0}"
 FORCE_TCP_COPY_FALLBACK="${FORCE_TCP_COPY_FALLBACK:-0}"
 UDP_RATE="${UDP_RATE:-100G}"
@@ -17,6 +18,7 @@ UDP_PACKET_SIZES="${UDP_PACKET_SIZES:-256,1200,1472}"
 IPERF_REPETITIONS="${IPERF_REPETITIONS:-3}"
 UDP_MATRIX_DURATION="${UDP_MATRIX_DURATION:-$IPERF_DURATION}"
 TCP_DIRECT_VS_RELAY="${TCP_DIRECT_VS_RELAY:-1}"
+TCP_COMPARE_MODE="${TCP_COMPARE_MODE:-session-model}"
 TCP_BENCH_DURATION="${TCP_BENCH_DURATION:-$IPERF_DURATION}"
 TCP_BENCH_REPETITIONS="${TCP_BENCH_REPETITIONS:-$IPERF_REPETITIONS}"
 TCP_STREAMS="${TCP_STREAMS:-1}"
@@ -25,6 +27,10 @@ IPERF_SERVER_READY_TIMEOUT_SEC="${IPERF_SERVER_READY_TIMEOUT_SEC:-5}"
 READINESS_TIMEOUT_SEC="${READINESS_TIMEOUT_SEC:-30}"
 ACTIVE_TIMEOUT_SEC="${ACTIVE_TIMEOUT_SEC:-30}"
 RELAYD_BIN="zig-out/bin/relayd"
+IPERF3_BIN="${IPERF3_BIN:-iperf3}"
+if [[ "$IPERF3_BIN" == "iperf3" ]] && ! command -v iperf3 >/dev/null 2>&1 && [[ -x ".zig-cache/tools/iperf-3.20/build/bin/iperf3" ]]; then
+  IPERF3_BIN=".zig-cache/tools/iperf-3.20/build/bin/iperf3"
+fi
 
 if [[ "$HTTP_LISTEN" == :* ]]; then
   API_HTTP_LISTEN="127.0.0.1${HTTP_LISTEN}"
@@ -44,6 +50,11 @@ TCP_COPY_VS_SPLICE_RESULTS="${RUN_DIR}/tcp-copy-vs-splice-streams-${TCP_STREAMS}
 TCP_COPY_VS_SPLICE_SUMMARY_TXT="${RUN_DIR}/tcp-copy-vs-splice-streams-${TCP_STREAMS}-summary.txt"
 TCP_COPY_VS_SPLICE_SUMMARY_JSON="${RUN_DIR}/tcp-copy-vs-splice-streams-${TCP_STREAMS}-summary.json"
 TCP_COPY_VS_SPLICE_OVERALL_SUMMARY="${RUN_DIR}/tcp-copy-vs-splice-overall-summary.txt"
+TCP_SESSION_MODEL_DIR="${RUN_DIR}/tcp-session-model/streams-${TCP_STREAMS}"
+TCP_SESSION_MODEL_RESULTS="${RUN_DIR}/tcp-session-model-streams-${TCP_STREAMS}-results.ndjson"
+TCP_SESSION_MODEL_SUMMARY_TXT="${RUN_DIR}/tcp-session-model-streams-${TCP_STREAMS}-summary.txt"
+TCP_SESSION_MODEL_SUMMARY_JSON="${RUN_DIR}/tcp-session-model-streams-${TCP_STREAMS}-summary.json"
+TCP_SESSION_MODEL_OVERALL_SUMMARY="${RUN_DIR}/tcp-session-model-overall-summary.txt"
 TCP_DIRECT_JSON="${RUN_DIR}/tcp-direct-client.json"
 TCP_DIRECT_LOG="${RUN_DIR}/tcp-direct-client.log"
 TCP_DIRECT_SERVER_LOG="${RUN_DIR}/tcp-direct-server.log"
@@ -53,6 +64,12 @@ TCP_COPY_SERVER_LOG="${RUN_DIR}/tcp-copy-server.log"
 TCP_SPLICE_JSON="${RUN_DIR}/tcp-splice-client.json"
 TCP_SPLICE_LOG="${RUN_DIR}/tcp-splice-client.log"
 TCP_SPLICE_SERVER_LOG="${RUN_DIR}/tcp-splice-server.log"
+TCP_THREADED_JSON="${RUN_DIR}/tcp-threaded-client.json"
+TCP_THREADED_LOG="${RUN_DIR}/tcp-threaded-client.log"
+TCP_THREADED_SERVER_LOG="${RUN_DIR}/tcp-threaded-server.log"
+TCP_SESSION_MODEL_JSON="${RUN_DIR}/tcp-session-model-client.json"
+TCP_SESSION_MODEL_LOG="${RUN_DIR}/tcp-session-model-client.log"
+TCP_SESSION_MODEL_SERVER_LOG="${RUN_DIR}/tcp-session-model-server.log"
 UDP_SERVER_LOG="${RUN_DIR}/iperf3-udp-server.log"
 UDP_CLIENT_JSON="${RUN_DIR}/iperf3-udp-client.json"
 UDP_CLIENT_LOG="${RUN_DIR}/iperf3-udp-client.log"
@@ -81,6 +98,10 @@ die() {
 }
 
 require_cmd() {
+  if [[ "$1" == */* ]]; then
+    [[ -x "$1" ]] || die "required command not found: $1"
+    return
+  fi
   command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
 
@@ -104,6 +125,10 @@ validate_mode() {
     oneshot|matrix|both) ;;
     *) die "IPERF_MODE must be one of: oneshot, matrix, both (got ${IPERF_MODE})" ;;
   esac
+  case "$TCP_COMPARE_MODE" in
+    session-model|copy-vs-splice) ;;
+    *) die "TCP_COMPARE_MODE must be one of: session-model, copy-vs-splice (got ${TCP_COMPARE_MODE})" ;;
+  esac
 }
 
 dump_file() {
@@ -122,12 +147,18 @@ dump_logs() {
   dump_file tcp_client_json "$TCP_CLIENT_JSON"
   dump_file tcp_copy_vs_splice_summary "$TCP_COPY_VS_SPLICE_SUMMARY_TXT"
   dump_file tcp_copy_vs_splice_overall "$TCP_COPY_VS_SPLICE_OVERALL_SUMMARY"
+  dump_file tcp_session_model_summary "$TCP_SESSION_MODEL_SUMMARY_TXT"
+  dump_file tcp_session_model_overall "$TCP_SESSION_MODEL_OVERALL_SUMMARY"
   dump_file tcp_direct_client "$TCP_DIRECT_LOG"
   dump_file tcp_direct_client_json "$TCP_DIRECT_JSON"
   dump_file tcp_copy_client "$TCP_COPY_LOG"
   dump_file tcp_copy_client_json "$TCP_COPY_JSON"
   dump_file tcp_splice_client "$TCP_SPLICE_LOG"
   dump_file tcp_splice_client_json "$TCP_SPLICE_JSON"
+  dump_file tcp_threaded_client "$TCP_THREADED_LOG"
+  dump_file tcp_threaded_client_json "$TCP_THREADED_JSON"
+  dump_file tcp_session_model_client "$TCP_SESSION_MODEL_LOG"
+  dump_file tcp_session_model_client_json "$TCP_SESSION_MODEL_JSON"
   dump_file udp_server "$UDP_SERVER_LOG"
   dump_file udp_client "$UDP_CLIENT_LOG"
   dump_file udp_client_json "$UDP_CLIENT_JSON"
@@ -411,6 +442,7 @@ start_relayd() {
   local tcp_splice_enabled=$1
   local force_tcp_copy_fallback=$2
   local mode_label=$3
+  local tcp_session_model_enabled=${4:-0}
   local sqlite_path="${RUN_DIR}/relayd-${mode_label}.sqlite3"
 
   stop_relayd
@@ -419,14 +451,15 @@ start_relayd() {
   : >"${RUN_DIR}/readiness.body"
   : >"${RUN_DIR}/unauth.status"
   : >"${RUN_DIR}/unauth.body"
-  printf '\n=== relayd start mode=%s tcp_splice_enabled=%s force_tcp_copy_fallback=%s ===\n' \
-    "$mode_label" "$tcp_splice_enabled" "$force_tcp_copy_fallback" >>"$RELAYD_LOG"
+  printf '\n=== relayd start mode=%s tcp_session_model_enabled=%s tcp_splice_enabled=%s force_tcp_copy_fallback=%s ===\n' \
+    "$mode_label" "$tcp_session_model_enabled" "$tcp_splice_enabled" "$force_tcp_copy_fallback" >>"$RELAYD_LOG"
 
   log "starting relayd mode=${mode_label} on ${HTTP_LISTEN} with port range ${PORT_RANGE}"
   AUTH_TOKEN="$AUTH_TOKEN" \
   HTTP_LISTEN="$HTTP_LISTEN" \
   PORT_RANGE="$PORT_RANGE" \
   SQLITE_PATH="$sqlite_path" \
+  TCP_SESSION_MODEL_ENABLED="$tcp_session_model_enabled" \
   TCP_SPLICE_ENABLED="$tcp_splice_enabled" \
   FORCE_TCP_COPY_FALLBACK="$force_tcp_copy_fallback" \
   "$RELAYD_BIN" >>"$RELAYD_LOG" 2>&1 &
@@ -662,6 +695,10 @@ record = {
     'tcp_splice_fallback_forced_delta': delta('tcp_splice_fallback_forced_total'),
     'tcp_splice_fallback_unsupported_delta': delta('tcp_splice_fallback_unsupported_total'),
     'tcp_splice_fallback_runtime_error_delta': delta('tcp_splice_fallback_runtime_error_total'),
+    'tcp_session_create_delta': delta('tcp_session_create_total'),
+    'tcp_session_close_delta': delta('tcp_session_close_total'),
+    'tcp_session_event_delta': delta('tcp_session_event_total'),
+    'tcp_active_sessions_after': int(after_metrics.get('tcp_active_sessions', 0)),
 }
 with open(results_file, 'a', encoding='utf-8') as handle:
     handle.write(json.dumps(record, sort_keys=True))
@@ -878,6 +915,214 @@ print(overall_path.read_text(encoding="utf-8"), end="")
 PY
 }
 
+emit_tcp_session_model_summary() {
+  local results_file=$1
+  local summary_txt=$2
+  local summary_json=$3
+  local direct_json=$4
+  local direct_log=$5
+  local direct_server_log=$6
+  local threaded_json=$7
+  local threaded_log=$8
+  local threaded_server_log=$9
+  local session_model_json=${10}
+  local session_model_log=${11}
+  local session_model_server_log=${12}
+  local legacy_tcp_json=${13}
+  local legacy_tcp_log=${14}
+  local legacy_tcp_server_log=${15}
+  python3 - "$results_file" "$summary_txt" "$summary_json" "$direct_json" "$direct_log" "$direct_server_log" "$threaded_json" "$threaded_log" "$threaded_server_log" "$session_model_json" "$session_model_log" "$session_model_server_log" "$legacy_tcp_json" "$legacy_tcp_log" "$legacy_tcp_server_log" <<'PY'
+import json
+import pathlib
+import shutil
+import statistics
+import sys
+
+results_path = pathlib.Path(sys.argv[1])
+summary_path = pathlib.Path(sys.argv[2])
+summary_json_path = pathlib.Path(sys.argv[3])
+direct_json_out = pathlib.Path(sys.argv[4])
+direct_log_out = pathlib.Path(sys.argv[5])
+direct_server_log_out = pathlib.Path(sys.argv[6])
+threaded_json_out = pathlib.Path(sys.argv[7])
+threaded_log_out = pathlib.Path(sys.argv[8])
+threaded_server_log_out = pathlib.Path(sys.argv[9])
+session_json_out = pathlib.Path(sys.argv[10])
+session_log_out = pathlib.Path(sys.argv[11])
+session_server_log_out = pathlib.Path(sys.argv[12])
+legacy_tcp_json_out = pathlib.Path(sys.argv[13])
+legacy_tcp_log_out = pathlib.Path(sys.argv[14])
+legacy_tcp_server_log_out = pathlib.Path(sys.argv[15])
+records = [json.loads(line) for line in results_path.read_text(encoding='utf-8').splitlines() if line.strip()]
+if not records:
+    raise SystemExit("no TCP session-model records found")
+
+UNITS_BPS = ['bps', 'kbps', 'mbps', 'gbps']
+
+def format_decimal(value, units):
+    value = float(value)
+    unit_index = 0
+    while value >= 1000.0 and unit_index < len(units) - 1:
+        value /= 1000.0
+        unit_index += 1
+    return f"{value:.2f} {units[unit_index]}"
+
+def summarize(items):
+    throughputs = [item['bits_per_second'] for item in items]
+    median_bps = statistics.median(throughputs)
+    best_bps = max(throughputs)
+    representative = min(
+        items,
+        key=lambda item: (abs(item['bits_per_second'] - median_bps), item['repetition']),
+    )
+    return {
+        'samples': len(items),
+        'median_bps': median_bps,
+        'best_bps': best_bps,
+        'duration_sec': items[0]['duration_sec'],
+        'streams': items[0]['streams'],
+        'representative': representative,
+        'session_creates': sum(item.get('tcp_session_create_delta', 0) for item in items),
+        'session_closes': sum(item.get('tcp_session_close_delta', 0) for item in items),
+        'session_events': sum(item.get('tcp_session_event_delta', 0) for item in items),
+        'max_active_after': max(item.get('tcp_active_sessions_after', 0) for item in items),
+    }
+
+def copy_record_artifacts(record, json_out, log_out, server_log_out):
+    base = results_path.parent
+    shutil.copy2(base / record['json_file'], json_out)
+    shutil.copy2(base / record['client_log'], log_out)
+    shutil.copy2(base / record['server_log'], server_log_out)
+
+grouped = {}
+for record in records:
+    grouped.setdefault(record['path'], []).append(record)
+
+direct_records = sorted(grouped.get('direct', []), key=lambda item: item['repetition'])
+threaded_records = sorted(grouped.get('threaded', []), key=lambda item: item['repetition'])
+session_records = sorted(grouped.get('session-model', []), key=lambda item: item['repetition'])
+if not direct_records or not threaded_records or not session_records:
+    raise SystemExit("expected direct, threaded, and session-model TCP records")
+
+direct = summarize(direct_records)
+threaded = summarize(threaded_records)
+session = summarize(session_records)
+copy_record_artifacts(direct['representative'], direct_json_out, direct_log_out, direct_server_log_out)
+copy_record_artifacts(threaded['representative'], threaded_json_out, threaded_log_out, threaded_server_log_out)
+copy_record_artifacts(session['representative'], session_json_out, session_log_out, session_server_log_out)
+shutil.copy2(session_json_out, legacy_tcp_json_out)
+shutil.copy2(session_log_out, legacy_tcp_log_out)
+shutil.copy2(session_server_log_out, legacy_tcp_server_log_out)
+
+new_vs_old_ratio = session['median_bps'] / threaded['median_bps'] if threaded['median_bps'] else None
+direct_vs_new_ratio = direct['median_bps'] / session['median_bps'] if session['median_bps'] else None
+threshold = 1.15 if direct['streams'] == 1 else 1.05
+decision = 'tcp session-model change did not clear the next gate in current runtime architecture'
+if (
+    new_vs_old_ratio is not None
+    and new_vs_old_ratio >= threshold
+    and session['max_active_after'] == 0
+    and session['session_creates'] > 0
+    and session['session_closes'] >= session['session_creates']
+):
+    decision = 'tcp session-model change is justified in current runtime architecture'
+
+summary_payload = {
+    'streams': direct['streams'],
+    'repetitions': direct['samples'],
+    'duration_sec': direct['duration_sec'],
+    'threshold': threshold,
+    'decision': decision,
+    'direct_median_bps': direct['median_bps'],
+    'direct_best_bps': direct['best_bps'],
+    'threaded_median_bps': threaded['median_bps'],
+    'threaded_best_bps': threaded['best_bps'],
+    'session_model_median_bps': session['median_bps'],
+    'session_model_best_bps': session['best_bps'],
+    'new_vs_old_ratio': new_vs_old_ratio,
+    'direct_vs_new_ratio': direct_vs_new_ratio,
+    'session_creates': session['session_creates'],
+    'session_closes': session['session_closes'],
+    'session_events': session['session_events'],
+    'max_active_after': session['max_active_after'],
+}
+summary_json_path.write_text(json.dumps(summary_payload, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+
+ratio_text = 'n/a' if new_vs_old_ratio is None else f"{new_vs_old_ratio:.2f}x"
+direct_ratio_text = 'n/a' if direct_vs_new_ratio is None else f"{direct_vs_new_ratio:.2f}x"
+lines = [
+    '=== relayd tcp session-model summary ===',
+    f"repetitions: {direct['samples']}",
+    f"duration:    {direct['duration_sec']:g}s",
+    f"streams:     {direct['streams']}",
+    f"decision threshold: new/old >= {threshold:.2f}x",
+    '',
+    f"direct throughput: {format_decimal(direct['median_bps'], UNITS_BPS)} median / {format_decimal(direct['best_bps'], UNITS_BPS)} best",
+    f"threaded throughput:      {format_decimal(threaded['median_bps'], UNITS_BPS)} median / {format_decimal(threaded['best_bps'], UNITS_BPS)} best",
+    f"session-model throughput: {format_decimal(session['median_bps'], UNITS_BPS)} median / {format_decimal(session['best_bps'], UNITS_BPS)} best",
+    f"new/old ratio: {ratio_text}",
+    f"direct/new ratio: {direct_ratio_text}",
+    f"session-model creates/closes/events: {session['session_creates']}/{session['session_closes']}/{session['session_events']}",
+    f"session-model active-after note: max active sessions after run = {session['max_active_after']}",
+    f"direct artifact: {direct['representative']['json_file']} | {direct['representative']['client_log']}",
+    f"threaded artifact:      {threaded['representative']['json_file']} | {threaded['representative']['client_log']}",
+    f"session-model artifact: {session['representative']['json_file']} | {session['representative']['client_log']}",
+    decision,
+]
+summary_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+print(summary_path.read_text(encoding='utf-8'), end='')
+PY
+}
+
+refresh_tcp_session_model_overall_summary() {
+  local latest_dir=$1
+  python3 - "$latest_dir" <<'PY'
+import json
+import pathlib
+import sys
+
+latest_dir = pathlib.Path(sys.argv[1])
+summary_paths = sorted(latest_dir.glob("tcp-session-model-streams-*-summary.json"))
+overall_path = latest_dir / "tcp-session-model-overall-summary.txt"
+if not summary_paths:
+    overall_path.write_text("=== relayd tcp session-model overall summary ===\nno stream summaries available\n", encoding="utf-8")
+    print(overall_path.read_text(encoding="utf-8"), end="")
+    raise SystemExit(0)
+
+UNITS_BPS = ['bps', 'kbps', 'mbps', 'gbps']
+
+def format_decimal(value, units):
+    value = float(value)
+    unit_index = 0
+    while value >= 1000.0 and unit_index < len(units) - 1:
+        value /= 1000.0
+        unit_index += 1
+    return f"{value:.2f} {units[unit_index]}"
+
+summaries = [json.loads(path.read_text(encoding="utf-8")) for path in summary_paths]
+lines = [
+    "=== relayd tcp session-model overall summary ===",
+]
+for item in summaries:
+    ratio = item.get("new_vs_old_ratio")
+    ratio_text = "n/a" if ratio is None else f"{ratio:.2f}x"
+    lines.append(
+        f"streams={item['streams']}: threaded {format_decimal(item['threaded_median_bps'], UNITS_BPS)}, "
+        f"session-model {format_decimal(item['session_model_median_bps'], UNITS_BPS)}, "
+        f"new/old {ratio_text}, active_after={item['max_active_after']}, "
+        f"creates/closes/events={item['session_creates']}/{item['session_closes']}/{item['session_events']} -> {item['decision']}"
+    )
+overall_decision = (
+    "tcp session-model change is justified in current runtime architecture"
+    if all(item['decision'] == "tcp session-model change is justified in current runtime architecture" for item in summaries)
+    else "tcp session-model change did not clear the next gate in current runtime architecture"
+)
+lines.extend(["", overall_decision])
+overall_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+print(overall_path.read_text(encoding="utf-8"), end="")
+PY
+}
+
 emit_matrix_report() {
   local results_file=$1
   local summary_txt=$2
@@ -1038,8 +1283,10 @@ IPERF_DURATION=${IPERF_DURATION}
 UDP_MATRIX_DURATION=${UDP_MATRIX_DURATION}
 UDP_RATE=${UDP_RATE}
 UDP_PACKET_SIZE=${UDP_PACKET_SIZE}
+TCP_SESSION_MODEL_ENABLED=${TCP_SESSION_MODEL_ENABLED}
 TCP_SPLICE_ENABLED=${TCP_SPLICE_ENABLED}
 FORCE_TCP_COPY_FALLBACK=${FORCE_TCP_COPY_FALLBACK}
+TCP_COMPARE_MODE=${TCP_COMPARE_MODE}
 UDP_SWEEP_RATES=${UDP_SWEEP_RATES}
 UDP_PACKET_SIZES=${UDP_PACKET_SIZES}
 IPERF_REPETITIONS=${IPERF_REPETITIONS}
@@ -1066,7 +1313,7 @@ run_iperf_udp_client() {
     args+=(-l "$packet_size")
   fi
 
-  iperf3 "${args[@]}" >"$output_json" 2>"$output_log"
+  "$IPERF3_BIN" "${args[@]}" >"$output_json" 2>"$output_log"
 }
 
 run_iperf_tcp_client() {
@@ -1078,13 +1325,20 @@ run_iperf_tcp_client() {
   local -a args
 
   args=(-c "$TARGET_HOST" -p "$target_port" -t "$duration" -P "$streams" -J)
-  iperf3 "${args[@]}" >"$output_json" 2>"$output_log"
+  "$IPERF3_BIN" "${args[@]}" >"$output_json" 2>"$output_log"
+}
+
+current_tcp_results_file() {
+  case "$TCP_COMPARE_MODE" in
+    copy-vs-splice) printf '%s\n' "$TCP_COPY_VS_SPLICE_RESULTS" ;;
+    session-model) printf '%s\n' "$TCP_SESSION_MODEL_RESULTS" ;;
+  esac
 }
 
 run_tcp_relay_smoke() {
   tcp_target_port=$(pick_free_port tcp)
   log "starting tcp iperf3 server on ${TARGET_HOST}:${tcp_target_port}"
-  iperf3 -s -1 -B "$TARGET_HOST" -p "$tcp_target_port" >"$TCP_SERVER_LOG" 2>&1 &
+  "$IPERF3_BIN" -s -1 -B "$TARGET_HOST" -p "$tcp_target_port" >"$TCP_SERVER_LOG" 2>&1 &
   tcp_server_pid=$!
   track_child "$tcp_server_pid"
   wait_for_tcp_listener "$TARGET_HOST" "$tcp_target_port" "$IPERF_SERVER_READY_TIMEOUT_SEC" || die "tcp iperf3 server did not become ready on ${TARGET_HOST}:${tcp_target_port}"
@@ -1103,7 +1357,7 @@ run_tcp_relay_smoke() {
 run_udp_relay_smoke() {
   udp_target_port=$(pick_free_port tcp)
   log "starting udp iperf3 server on ${TARGET_HOST}:${udp_target_port} (requires tcp control + udp data on the same relay port)"
-  iperf3 -s -1 -B "$TARGET_HOST" -p "$udp_target_port" >"$UDP_SERVER_LOG" 2>&1 &
+  "$IPERF3_BIN" -s -1 -B "$TARGET_HOST" -p "$udp_target_port" >"$UDP_SERVER_LOG" 2>&1 &
   udp_server_pid=$!
   track_child "$udp_server_pid"
   wait_for_tcp_listener "$TARGET_HOST" "$udp_target_port" "$IPERF_SERVER_READY_TIMEOUT_SEC" || die "udp iperf3 server did not become ready on ${TARGET_HOST}:${udp_target_port}"
@@ -1132,13 +1386,16 @@ run_udp_relay_smoke() {
 run_one_shot_suite() {
   local report
   if [[ "$TCP_DIRECT_VS_RELAY" == "1" ]]; then
-    run_tcp_copy_vs_splice_suite
+    case "$TCP_COMPARE_MODE" in
+      copy-vs-splice) run_tcp_copy_vs_splice_suite ;;
+      session-model) run_tcp_session_model_suite ;;
+    esac
   else
-    start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" tcp-relay-smoke
+    start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" tcp-relay-smoke "$TCP_SESSION_MODEL_ENABLED"
     run_tcp_relay_smoke
     stop_relayd
   fi
-  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-relay-smoke
+  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-relay-smoke "$TCP_SESSION_MODEL_ENABLED"
   run_udp_relay_smoke
   stop_relayd
   report=$(emit_stdout_report "$TCP_CLIENT_JSON" "$UDP_CLIENT_JSON" "$UDP_RATE" "$UDP_PACKET_SIZE")
@@ -1158,7 +1415,7 @@ run_tcp_direct_trial() {
   client_log="${output_prefix}-client.log"
 
   log "tcp direct trial repetition=${repetition} streams=${streams} target_port=${target_port}"
-  iperf3 -s -1 -B "$TARGET_HOST" -p "$target_port" >"$server_log" 2>&1 &
+  "$IPERF3_BIN" -s -1 -B "$TARGET_HOST" -p "$target_port" >"$server_log" 2>&1 &
   server_pid=$!
   track_child "$server_pid"
   wait_for_tcp_listener "$TARGET_HOST" "$target_port" "$IPERF_SERVER_READY_TIMEOUT_SEC" || die "tcp direct iperf3 server did not become ready on ${TARGET_HOST}:${target_port}"
@@ -1172,7 +1429,7 @@ EOF_METRICS
   cat >"${output_prefix}-metrics-after.json" <<'EOF_METRICS'
 {}
 EOF_METRICS
-  append_tcp_result "$TCP_COPY_VS_SPLICE_RESULTS" direct "$repetition" "$duration" "$streams" "$client_json" "$client_log" "$server_log" "${output_prefix}-metrics-before.json" "${output_prefix}-metrics-after.json"
+  append_tcp_result "$(current_tcp_results_file)" direct "$repetition" "$duration" "$streams" "$client_json" "$client_log" "$server_log" "${output_prefix}-metrics-before.json" "${output_prefix}-metrics-after.json"
 }
 
 run_tcp_relay_trial() {
@@ -1193,7 +1450,7 @@ run_tcp_relay_trial() {
   after_metrics="${output_prefix}-metrics-after.json"
 
   log "tcp ${path_label} trial repetition=${repetition} streams=${streams} target_port=${target_port}"
-  iperf3 -s -1 -B "$TARGET_HOST" -p "$target_port" >"$server_log" 2>&1 &
+  "$IPERF3_BIN" -s -1 -B "$TARGET_HOST" -p "$target_port" >"$server_log" 2>&1 &
   server_pid=$!
   track_child "$server_pid"
   wait_for_tcp_listener "$TARGET_HOST" "$target_port" "$IPERF_SERVER_READY_TIMEOUT_SEC" || die "tcp ${path_label} iperf3 server did not become ready on ${TARGET_HOST}:${target_port}"
@@ -1209,7 +1466,7 @@ run_tcp_relay_trial() {
   sleep 0.1
   capture_metrics_snapshot "$after_metrics"
   delete_allocation "$allocation_id"
-  append_tcp_result "$TCP_COPY_VS_SPLICE_RESULTS" "$path_label" "$repetition" "$duration" "$streams" "$client_json" "$client_log" "$server_log" "$before_metrics" "$after_metrics"
+  append_tcp_result "$(current_tcp_results_file)" "$path_label" "$repetition" "$duration" "$streams" "$client_json" "$client_log" "$server_log" "$before_metrics" "$after_metrics"
 }
 
 run_tcp_copy_vs_splice_suite() {
@@ -1225,14 +1482,14 @@ run_tcp_copy_vs_splice_suite() {
     run_tcp_direct_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix"
   done
 
-  start_relayd 0 1 tcp-copy
+  start_relayd 0 1 tcp-copy 0
   for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
     trial_dir="${TCP_COPY_VS_SPLICE_DIR}/rep-${repetition}"
     output_prefix="${trial_dir}/copy"
     run_tcp_relay_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix" copy
   done
 
-  start_relayd 1 0 tcp-splice
+  start_relayd 1 0 tcp-splice 0
   for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
     trial_dir="${TCP_COPY_VS_SPLICE_DIR}/rep-${repetition}"
     output_prefix="${trial_dir}/splice"
@@ -1258,6 +1515,52 @@ run_tcp_copy_vs_splice_suite() {
     "$TCP_SERVER_LOG"
 }
 
+run_tcp_session_model_suite() {
+  local repetition trial_dir output_prefix
+
+  mkdir -p "$TCP_SESSION_MODEL_DIR"
+  : >"$TCP_SESSION_MODEL_RESULTS"
+
+  for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
+    trial_dir="${TCP_SESSION_MODEL_DIR}/rep-${repetition}"
+    mkdir -p "$trial_dir"
+    output_prefix="${trial_dir}/direct"
+    run_tcp_direct_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix"
+  done
+
+  start_relayd 0 0 tcp-threaded 0
+  for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
+    trial_dir="${TCP_SESSION_MODEL_DIR}/rep-${repetition}"
+    output_prefix="${trial_dir}/threaded"
+    run_tcp_relay_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix" threaded
+  done
+
+  start_relayd 0 0 tcp-session-model 1
+  for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
+    trial_dir="${TCP_SESSION_MODEL_DIR}/rep-${repetition}"
+    output_prefix="${trial_dir}/session-model"
+    run_tcp_relay_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix" session-model
+  done
+  stop_relayd
+
+  emit_tcp_session_model_summary \
+    "$TCP_SESSION_MODEL_RESULTS" \
+    "$TCP_SESSION_MODEL_SUMMARY_TXT" \
+    "$TCP_SESSION_MODEL_SUMMARY_JSON" \
+    "$TCP_DIRECT_JSON" \
+    "$TCP_DIRECT_LOG" \
+    "$TCP_DIRECT_SERVER_LOG" \
+    "$TCP_THREADED_JSON" \
+    "$TCP_THREADED_LOG" \
+    "$TCP_THREADED_SERVER_LOG" \
+    "$TCP_SESSION_MODEL_JSON" \
+    "$TCP_SESSION_MODEL_LOG" \
+    "$TCP_SESSION_MODEL_SERVER_LOG" \
+    "$TCP_CLIENT_JSON" \
+    "$TCP_CLIENT_LOG" \
+    "$TCP_SERVER_LOG"
+}
+
 run_udp_direct_trial() {
   local rate=$1
   local packet_size=$2
@@ -1272,7 +1575,7 @@ run_udp_direct_trial() {
   client_log="${output_prefix}-client.log"
 
   log "udp direct trial rate=${rate} packet_size=${packet_size} repetition=${repetition} target_port=${target_port}"
-  iperf3 -s -1 -B "$TARGET_HOST" -p "$target_port" >"$server_log" 2>&1 &
+  "$IPERF3_BIN" -s -1 -B "$TARGET_HOST" -p "$target_port" >"$server_log" 2>&1 &
   server_pid=$!
   track_child "$server_pid"
   wait_for_tcp_listener "$TARGET_HOST" "$target_port" "$IPERF_SERVER_READY_TIMEOUT_SEC" || die "udp direct iperf3 server did not become ready on ${TARGET_HOST}:${target_port}"
@@ -1305,7 +1608,7 @@ run_udp_relay_trial() {
   client_log="${output_prefix}-client.log"
 
   log "udp relay trial rate=${rate} packet_size=${packet_size} repetition=${repetition} target_port=${target_port}"
-  iperf3 -s -1 -B "$TARGET_HOST" -p "$target_port" >"$server_log" 2>&1 &
+  "$IPERF3_BIN" -s -1 -B "$TARGET_HOST" -p "$target_port" >"$server_log" 2>&1 &
   server_pid=$!
   track_child "$server_pid"
   wait_for_tcp_listener "$TARGET_HOST" "$target_port" "$IPERF_SERVER_READY_TIMEOUT_SEC" || die "udp relay iperf3 server did not become ready on ${TARGET_HOST}:${target_port}"
@@ -1344,7 +1647,7 @@ run_udp_matrix() {
   duration=$UDP_MATRIX_DURATION
   mkdir -p "${RUN_DIR}/udp-matrix"
   : >"$UDP_MATRIX_RESULTS"
-  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-matrix
+  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-matrix "$TCP_SESSION_MODEL_ENABLED"
 
   for rate in "${rates[@]}"; do
     for packet_size in "${packet_sizes[@]}"; do
@@ -1420,7 +1723,7 @@ mkdir -p "$ARTIFACT_DIR" "$RUN_DIR"
 mkdir -p "$(dirname "$SQLITE_PATH")"
 
 require_cmd python3
-require_cmd iperf3
+require_cmd "$IPERF3_BIN"
 [[ -x "$RELAYD_BIN" ]] || die "expected relayd build artifact at ${RELAYD_BIN}"
 validate_mode
 write_manifest
@@ -1439,6 +1742,13 @@ case "$IPERF_MODE" in
 esac
 
 publish_artifacts
-refresh_tcp_copy_vs_splice_overall_summary "$LATEST_RUN_DIR" >"$TCP_COPY_VS_SPLICE_OVERALL_SUMMARY"
+case "$TCP_COMPARE_MODE" in
+  copy-vs-splice)
+    refresh_tcp_copy_vs_splice_overall_summary "$LATEST_RUN_DIR" >"$TCP_COPY_VS_SPLICE_OVERALL_SUMMARY"
+    ;;
+  session-model)
+    refresh_tcp_session_model_overall_summary "$LATEST_RUN_DIR" >"$TCP_SESSION_MODEL_OVERALL_SUMMARY"
+    ;;
+esac
 log "artifacts available at ${LATEST_RUN_DIR}"
 log "iperf3 e2e harness completed (${IPERF_MODE})"

@@ -197,6 +197,9 @@ test "http metrics endpoint exposes tcp splice counters" {
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_splice_attempt_total\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_splice_success_total\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_splice_hard_failure_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_session_create_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_session_close_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_active_sessions\":") != null);
 }
 
 test "http start failure does not deadlock cleanup" {

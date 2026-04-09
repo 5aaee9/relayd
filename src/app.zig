@@ -37,6 +37,7 @@ pub const App = struct {
         };
 
         app.runtime_manager = try runtime.RuntimeManager.init(allocator, &app.metrics, .{
+            .tcp_session_model_enabled = config.tcp_session_model_enabled,
             .tcp_splice_enabled = config.tcp_splice_enabled,
             .force_tcp_copy_fallback = config.force_tcp_copy_fallback,
             .udp_socket_recv_buffer_bytes = config.udp_socket_recv_buffer_bytes,
