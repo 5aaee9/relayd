@@ -199,6 +199,21 @@ test "http metrics endpoint exposes tcp splice counters" {
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_splice_hard_failure_total\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_session_create_total\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_session_close_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_session_worker_dispatch_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_session_worker0_dispatch_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_session_worker1_dispatch_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_accept_handoff_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_accept_handoff_worker0_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_accept_handoff_worker1_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_accept_handoff_worker2_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_accept_handoff_worker3_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_listener_accept_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_listener_accept_worker0_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_listener_accept_worker1_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_listener_accept_worker2_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_listener_accept_worker3_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_upstream_connect_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_upstream_connect_fail_total\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_active_sessions\":") != null);
 }
 

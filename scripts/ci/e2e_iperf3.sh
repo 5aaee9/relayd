@@ -7,6 +7,9 @@ PORT_RANGE="${PORT_RANGE:-18100-18120}"
 SQLITE_PATH="${SQLITE_PATH:-.zig-cache/e2e/relayd-$$.sqlite3}"
 TARGET_HOST="${TARGET_HOST:-127.0.0.1}"
 TCP_SESSION_MODEL_ENABLED="${TCP_SESSION_MODEL_ENABLED:-0}"
+TCP_SESSION_MODEL_WORKERS="${TCP_SESSION_MODEL_WORKERS:-0}"
+TCP_SESSION_MODEL_ACCEPT_BALANCED="${TCP_SESSION_MODEL_ACCEPT_BALANCED:-0}"
+TCP_SESSION_MODEL_SHARDED_ACCEPT="${TCP_SESSION_MODEL_SHARDED_ACCEPT:-0}"
 TCP_SPLICE_ENABLED="${TCP_SPLICE_ENABLED:-0}"
 FORCE_TCP_COPY_FALLBACK="${FORCE_TCP_COPY_FALLBACK:-0}"
 UDP_RATE="${UDP_RATE:-100G}"
@@ -18,7 +21,7 @@ UDP_PACKET_SIZES="${UDP_PACKET_SIZES:-256,1200,1472}"
 IPERF_REPETITIONS="${IPERF_REPETITIONS:-3}"
 UDP_MATRIX_DURATION="${UDP_MATRIX_DURATION:-$IPERF_DURATION}"
 TCP_DIRECT_VS_RELAY="${TCP_DIRECT_VS_RELAY:-1}"
-TCP_COMPARE_MODE="${TCP_COMPARE_MODE:-session-model}"
+TCP_COMPARE_MODE="${TCP_COMPARE_MODE:-accept-balanced}"
 TCP_BENCH_DURATION="${TCP_BENCH_DURATION:-$IPERF_DURATION}"
 TCP_BENCH_REPETITIONS="${TCP_BENCH_REPETITIONS:-$IPERF_REPETITIONS}"
 TCP_STREAMS="${TCP_STREAMS:-1}"
@@ -55,6 +58,21 @@ TCP_SESSION_MODEL_RESULTS="${RUN_DIR}/tcp-session-model-streams-${TCP_STREAMS}-r
 TCP_SESSION_MODEL_SUMMARY_TXT="${RUN_DIR}/tcp-session-model-streams-${TCP_STREAMS}-summary.txt"
 TCP_SESSION_MODEL_SUMMARY_JSON="${RUN_DIR}/tcp-session-model-streams-${TCP_STREAMS}-summary.json"
 TCP_SESSION_MODEL_OVERALL_SUMMARY="${RUN_DIR}/tcp-session-model-overall-summary.txt"
+TCP_WORKERIZED_SESSION_DIR="${RUN_DIR}/tcp-workerized-session/streams-${TCP_STREAMS}"
+TCP_WORKERIZED_SESSION_RESULTS="${RUN_DIR}/tcp-workerized-session-streams-${TCP_STREAMS}-results.ndjson"
+TCP_WORKERIZED_SESSION_SUMMARY_TXT="${RUN_DIR}/tcp-workerized-session-streams-${TCP_STREAMS}-summary.txt"
+TCP_WORKERIZED_SESSION_SUMMARY_JSON="${RUN_DIR}/tcp-workerized-session-streams-${TCP_STREAMS}-summary.json"
+TCP_WORKERIZED_SESSION_OVERALL_SUMMARY="${RUN_DIR}/tcp-workerized-session-overall-summary.txt"
+TCP_SHARDED_WORKER_DIR="${RUN_DIR}/tcp-sharded-worker/streams-${TCP_STREAMS}"
+TCP_SHARDED_WORKER_RESULTS="${RUN_DIR}/tcp-sharded-worker-streams-${TCP_STREAMS}-results.ndjson"
+TCP_SHARDED_WORKER_SUMMARY_TXT="${RUN_DIR}/tcp-sharded-worker-streams-${TCP_STREAMS}-summary.txt"
+TCP_SHARDED_WORKER_SUMMARY_JSON="${RUN_DIR}/tcp-sharded-worker-streams-${TCP_STREAMS}-summary.json"
+TCP_SHARDED_WORKER_OVERALL_SUMMARY="${RUN_DIR}/tcp-sharded-worker-overall-summary.txt"
+TCP_ACCEPT_BALANCED_DIR="${RUN_DIR}/tcp-accept-balanced/streams-${TCP_STREAMS}"
+TCP_ACCEPT_BALANCED_RESULTS="${RUN_DIR}/tcp-accept-balanced-streams-${TCP_STREAMS}-results.ndjson"
+TCP_ACCEPT_BALANCED_SUMMARY_TXT="${RUN_DIR}/tcp-accept-balanced-streams-${TCP_STREAMS}-summary.txt"
+TCP_ACCEPT_BALANCED_SUMMARY_JSON="${RUN_DIR}/tcp-accept-balanced-streams-${TCP_STREAMS}-summary.json"
+TCP_ACCEPT_BALANCED_OVERALL_SUMMARY="${RUN_DIR}/tcp-accept-balanced-overall-summary.txt"
 TCP_DIRECT_JSON="${RUN_DIR}/tcp-direct-client.json"
 TCP_DIRECT_LOG="${RUN_DIR}/tcp-direct-client.log"
 TCP_DIRECT_SERVER_LOG="${RUN_DIR}/tcp-direct-server.log"
@@ -70,6 +88,15 @@ TCP_THREADED_SERVER_LOG="${RUN_DIR}/tcp-threaded-server.log"
 TCP_SESSION_MODEL_JSON="${RUN_DIR}/tcp-session-model-client.json"
 TCP_SESSION_MODEL_LOG="${RUN_DIR}/tcp-session-model-client.log"
 TCP_SESSION_MODEL_SERVER_LOG="${RUN_DIR}/tcp-session-model-server.log"
+TCP_WORKERIZED_SESSION_JSON="${RUN_DIR}/tcp-workerized-session-client.json"
+TCP_WORKERIZED_SESSION_LOG="${RUN_DIR}/tcp-workerized-session-client.log"
+TCP_WORKERIZED_SESSION_SERVER_LOG="${RUN_DIR}/tcp-workerized-session-server.log"
+TCP_SHARDED_WORKER_JSON="${RUN_DIR}/tcp-sharded-worker-client.json"
+TCP_SHARDED_WORKER_LOG="${RUN_DIR}/tcp-sharded-worker-client.log"
+TCP_SHARDED_WORKER_SERVER_LOG="${RUN_DIR}/tcp-sharded-worker-server.log"
+TCP_ACCEPT_BALANCED_JSON="${RUN_DIR}/tcp-accept-balanced-client.json"
+TCP_ACCEPT_BALANCED_LOG="${RUN_DIR}/tcp-accept-balanced-client.log"
+TCP_ACCEPT_BALANCED_SERVER_LOG="${RUN_DIR}/tcp-accept-balanced-server.log"
 UDP_SERVER_LOG="${RUN_DIR}/iperf3-udp-server.log"
 UDP_CLIENT_JSON="${RUN_DIR}/iperf3-udp-client.json"
 UDP_CLIENT_LOG="${RUN_DIR}/iperf3-udp-client.log"
@@ -126,8 +153,8 @@ validate_mode() {
     *) die "IPERF_MODE must be one of: oneshot, matrix, both (got ${IPERF_MODE})" ;;
   esac
   case "$TCP_COMPARE_MODE" in
-    session-model|copy-vs-splice) ;;
-    *) die "TCP_COMPARE_MODE must be one of: session-model, copy-vs-splice (got ${TCP_COMPARE_MODE})" ;;
+    accept-balanced|sharded-worker|workerized-session|session-model|copy-vs-splice) ;;
+    *) die "TCP_COMPARE_MODE must be one of: accept-balanced, sharded-worker, workerized-session, session-model, copy-vs-splice (got ${TCP_COMPARE_MODE})" ;;
   esac
 }
 
@@ -149,6 +176,12 @@ dump_logs() {
   dump_file tcp_copy_vs_splice_overall "$TCP_COPY_VS_SPLICE_OVERALL_SUMMARY"
   dump_file tcp_session_model_summary "$TCP_SESSION_MODEL_SUMMARY_TXT"
   dump_file tcp_session_model_overall "$TCP_SESSION_MODEL_OVERALL_SUMMARY"
+  dump_file tcp_workerized_session_summary "$TCP_WORKERIZED_SESSION_SUMMARY_TXT"
+  dump_file tcp_workerized_session_overall "$TCP_WORKERIZED_SESSION_OVERALL_SUMMARY"
+  dump_file tcp_sharded_worker_summary "$TCP_SHARDED_WORKER_SUMMARY_TXT"
+  dump_file tcp_sharded_worker_overall "$TCP_SHARDED_WORKER_OVERALL_SUMMARY"
+  dump_file tcp_accept_balanced_summary "$TCP_ACCEPT_BALANCED_SUMMARY_TXT"
+  dump_file tcp_accept_balanced_overall "$TCP_ACCEPT_BALANCED_OVERALL_SUMMARY"
   dump_file tcp_direct_client "$TCP_DIRECT_LOG"
   dump_file tcp_direct_client_json "$TCP_DIRECT_JSON"
   dump_file tcp_copy_client "$TCP_COPY_LOG"
@@ -159,6 +192,12 @@ dump_logs() {
   dump_file tcp_threaded_client_json "$TCP_THREADED_JSON"
   dump_file tcp_session_model_client "$TCP_SESSION_MODEL_LOG"
   dump_file tcp_session_model_client_json "$TCP_SESSION_MODEL_JSON"
+  dump_file tcp_workerized_session_client "$TCP_WORKERIZED_SESSION_LOG"
+  dump_file tcp_workerized_session_client_json "$TCP_WORKERIZED_SESSION_JSON"
+  dump_file tcp_sharded_worker_client "$TCP_SHARDED_WORKER_LOG"
+  dump_file tcp_sharded_worker_client_json "$TCP_SHARDED_WORKER_JSON"
+  dump_file tcp_accept_balanced_client "$TCP_ACCEPT_BALANCED_LOG"
+  dump_file tcp_accept_balanced_client_json "$TCP_ACCEPT_BALANCED_JSON"
   dump_file udp_server "$UDP_SERVER_LOG"
   dump_file udp_client "$UDP_CLIENT_LOG"
   dump_file udp_client_json "$UDP_CLIENT_JSON"
@@ -443,6 +482,9 @@ start_relayd() {
   local force_tcp_copy_fallback=$2
   local mode_label=$3
   local tcp_session_model_enabled=${4:-0}
+  local tcp_session_model_workers=${5:-0}
+  local tcp_session_model_sharded_accept=${6:-0}
+  local tcp_session_model_accept_balanced=${7:-0}
   local sqlite_path="${RUN_DIR}/relayd-${mode_label}.sqlite3"
 
   stop_relayd
@@ -451,8 +493,8 @@ start_relayd() {
   : >"${RUN_DIR}/readiness.body"
   : >"${RUN_DIR}/unauth.status"
   : >"${RUN_DIR}/unauth.body"
-  printf '\n=== relayd start mode=%s tcp_session_model_enabled=%s tcp_splice_enabled=%s force_tcp_copy_fallback=%s ===\n' \
-    "$mode_label" "$tcp_session_model_enabled" "$tcp_splice_enabled" "$force_tcp_copy_fallback" >>"$RELAYD_LOG"
+  printf '\n=== relayd start mode=%s tcp_session_model_enabled=%s tcp_session_model_workers=%s tcp_session_model_sharded_accept=%s tcp_session_model_accept_balanced=%s tcp_splice_enabled=%s force_tcp_copy_fallback=%s ===\n' \
+    "$mode_label" "$tcp_session_model_enabled" "$tcp_session_model_workers" "$tcp_session_model_sharded_accept" "$tcp_session_model_accept_balanced" "$tcp_splice_enabled" "$force_tcp_copy_fallback" >>"$RELAYD_LOG"
 
   log "starting relayd mode=${mode_label} on ${HTTP_LISTEN} with port range ${PORT_RANGE}"
   AUTH_TOKEN="$AUTH_TOKEN" \
@@ -460,6 +502,9 @@ start_relayd() {
   PORT_RANGE="$PORT_RANGE" \
   SQLITE_PATH="$sqlite_path" \
   TCP_SESSION_MODEL_ENABLED="$tcp_session_model_enabled" \
+  TCP_SESSION_MODEL_WORKERS="$tcp_session_model_workers" \
+  TCP_SESSION_MODEL_SHARDED_ACCEPT="$tcp_session_model_sharded_accept" \
+  TCP_SESSION_MODEL_ACCEPT_BALANCED="$tcp_session_model_accept_balanced" \
   TCP_SPLICE_ENABLED="$tcp_splice_enabled" \
   FORCE_TCP_COPY_FALLBACK="$force_tcp_copy_fallback" \
   "$RELAYD_BIN" >>"$RELAYD_LOG" 2>&1 &
@@ -698,6 +743,21 @@ record = {
     'tcp_session_create_delta': delta('tcp_session_create_total'),
     'tcp_session_close_delta': delta('tcp_session_close_total'),
     'tcp_session_event_delta': delta('tcp_session_event_total'),
+    'tcp_session_worker_dispatch_delta': delta('tcp_session_worker_dispatch_total'),
+    'tcp_session_worker0_dispatch_delta': delta('tcp_session_worker0_dispatch_total'),
+    'tcp_session_worker1_dispatch_delta': delta('tcp_session_worker1_dispatch_total'),
+    'tcp_accept_handoff_delta': delta('tcp_accept_handoff_total'),
+    'tcp_accept_handoff_worker0_delta': delta('tcp_accept_handoff_worker0_total'),
+    'tcp_accept_handoff_worker1_delta': delta('tcp_accept_handoff_worker1_total'),
+    'tcp_accept_handoff_worker2_delta': delta('tcp_accept_handoff_worker2_total'),
+    'tcp_accept_handoff_worker3_delta': delta('tcp_accept_handoff_worker3_total'),
+    'tcp_listener_accept_delta': delta('tcp_listener_accept_total'),
+    'tcp_listener_accept_worker0_delta': delta('tcp_listener_accept_worker0_total'),
+    'tcp_listener_accept_worker1_delta': delta('tcp_listener_accept_worker1_total'),
+    'tcp_listener_accept_worker2_delta': delta('tcp_listener_accept_worker2_total'),
+    'tcp_listener_accept_worker3_delta': delta('tcp_listener_accept_worker3_total'),
+    'tcp_upstream_connect_delta': delta('tcp_upstream_connect_total'),
+    'tcp_upstream_connect_fail_delta': delta('tcp_upstream_connect_fail_total'),
     'tcp_active_sessions_after': int(after_metrics.get('tcp_active_sessions', 0)),
 }
 with open(results_file, 'a', encoding='utf-8') as handle:
@@ -1123,6 +1183,629 @@ print(overall_path.read_text(encoding="utf-8"), end="")
 PY
 }
 
+emit_tcp_workerized_session_summary() {
+  local results_file=$1
+  local summary_txt=$2
+  local summary_json=$3
+  local direct_json=$4
+  local direct_log=$5
+  local direct_server_log=$6
+  local threaded_json=$7
+  local threaded_log=$8
+  local threaded_server_log=$9
+  local session_json=${10}
+  local session_log=${11}
+  local session_server_log=${12}
+  local workerized_json=${13}
+  local workerized_log=${14}
+  local workerized_server_log=${15}
+  local legacy_tcp_json=${16}
+  local legacy_tcp_log=${17}
+  local legacy_tcp_server_log=${18}
+  python3 - "$results_file" "$summary_txt" "$summary_json" "$direct_json" "$direct_log" "$direct_server_log" "$threaded_json" "$threaded_log" "$threaded_server_log" "$session_json" "$session_log" "$session_server_log" "$workerized_json" "$workerized_log" "$workerized_server_log" "$legacy_tcp_json" "$legacy_tcp_log" "$legacy_tcp_server_log" <<'PY'
+import json
+import pathlib
+import shutil
+import statistics
+import sys
+
+results_path = pathlib.Path(sys.argv[1])
+summary_path = pathlib.Path(sys.argv[2])
+summary_json_path = pathlib.Path(sys.argv[3])
+direct_json_out = pathlib.Path(sys.argv[4]); direct_log_out = pathlib.Path(sys.argv[5]); direct_server_log_out = pathlib.Path(sys.argv[6])
+threaded_json_out = pathlib.Path(sys.argv[7]); threaded_log_out = pathlib.Path(sys.argv[8]); threaded_server_log_out = pathlib.Path(sys.argv[9])
+session_json_out = pathlib.Path(sys.argv[10]); session_log_out = pathlib.Path(sys.argv[11]); session_server_log_out = pathlib.Path(sys.argv[12])
+workerized_json_out = pathlib.Path(sys.argv[13]); workerized_log_out = pathlib.Path(sys.argv[14]); workerized_server_log_out = pathlib.Path(sys.argv[15])
+legacy_tcp_json_out = pathlib.Path(sys.argv[16]); legacy_tcp_log_out = pathlib.Path(sys.argv[17]); legacy_tcp_server_log_out = pathlib.Path(sys.argv[18])
+records = [json.loads(line) for line in results_path.read_text(encoding='utf-8').splitlines() if line.strip()]
+if not records:
+    raise SystemExit("no TCP workerized-session records found")
+
+UNITS_BPS = ['bps', 'kbps', 'mbps', 'gbps']
+def format_decimal(value, units):
+    value = float(value)
+    unit_index = 0
+    while value >= 1000.0 and unit_index < len(units) - 1:
+        value /= 1000.0
+        unit_index += 1
+    return f"{value:.2f} {units[unit_index]}"
+
+def summarize(items):
+    throughputs = [item['bits_per_second'] for item in items]
+    median_bps = statistics.median(throughputs)
+    best_bps = max(throughputs)
+    representative = min(items, key=lambda item: (abs(item['bits_per_second'] - median_bps), item['repetition']))
+    return {
+        'samples': len(items),
+        'median_bps': median_bps,
+        'best_bps': best_bps,
+        'duration_sec': items[0]['duration_sec'],
+        'streams': items[0]['streams'],
+        'representative': representative,
+        'session_creates': sum(item.get('tcp_session_create_delta', 0) for item in items),
+        'session_closes': sum(item.get('tcp_session_close_delta', 0) for item in items),
+        'session_events': sum(item.get('tcp_session_event_delta', 0) for item in items),
+        'worker_dispatches': sum(item.get('tcp_session_worker_dispatch_delta', 0) for item in items),
+        'worker0_dispatches': sum(item.get('tcp_session_worker0_dispatch_delta', 0) for item in items),
+        'worker1_dispatches': sum(item.get('tcp_session_worker1_dispatch_delta', 0) for item in items),
+        'max_active_after': max(item.get('tcp_active_sessions_after', 0) for item in items),
+    }
+
+def copy_record_artifacts(record, json_out, log_out, server_log_out):
+    base = results_path.parent
+    shutil.copy2(base / record['json_file'], json_out)
+    shutil.copy2(base / record['client_log'], log_out)
+    shutil.copy2(base / record['server_log'], server_log_out)
+
+grouped = {}
+for record in records:
+    grouped.setdefault(record['path'], []).append(record)
+direct = summarize(sorted(grouped.get('direct', []), key=lambda item: item['repetition']))
+threaded = summarize(sorted(grouped.get('threaded', []), key=lambda item: item['repetition']))
+session = summarize(sorted(grouped.get('session-model', []), key=lambda item: item['repetition']))
+workerized = summarize(sorted(grouped.get('workerized-session', []), key=lambda item: item['repetition']))
+if any(item['samples'] == 0 for item in (direct, threaded, session, workerized)):
+    raise SystemExit("expected direct, threaded, session-model, and workerized-session records")
+
+copy_record_artifacts(direct['representative'], direct_json_out, direct_log_out, direct_server_log_out)
+copy_record_artifacts(threaded['representative'], threaded_json_out, threaded_log_out, threaded_server_log_out)
+copy_record_artifacts(session['representative'], session_json_out, session_log_out, session_server_log_out)
+copy_record_artifacts(workerized['representative'], workerized_json_out, workerized_log_out, workerized_server_log_out)
+shutil.copy2(workerized_json_out, legacy_tcp_json_out)
+shutil.copy2(workerized_log_out, legacy_tcp_log_out)
+shutil.copy2(workerized_server_log_out, legacy_tcp_server_log_out)
+
+workerized_vs_session = workerized['median_bps'] / session['median_bps'] if session['median_bps'] else None
+workerized_vs_threaded = workerized['median_bps'] / threaded['median_bps'] if threaded['median_bps'] else None
+direct_vs_workerized = direct['median_bps'] / workerized['median_bps'] if workerized['median_bps'] else None
+streams = direct['streams']
+decision = 'workerized tcp session-model did not clear the next gate in current runtime architecture'
+if (
+    workerized['max_active_after'] == 0
+    and workerized['session_creates'] > 0
+    and workerized['session_closes'] >= workerized['session_creates']
+    and workerized['worker0_dispatches'] > 0
+    and workerized['worker1_dispatches'] > 0
+    and workerized_vs_session is not None
+    and workerized_vs_threaded is not None
+    and ((streams == 1 and workerized_vs_session >= 0.95) or (streams != 1 and workerized_vs_session >= 1.25 and workerized_vs_threaded >= 1.05))
+):
+    decision = 'workerized tcp session-model is justified in current runtime architecture'
+
+summary_payload = {
+    'streams': streams,
+    'repetitions': direct['samples'],
+    'duration_sec': direct['duration_sec'],
+    'decision': decision,
+    'direct_median_bps': direct['median_bps'],
+    'threaded_median_bps': threaded['median_bps'],
+    'session_model_median_bps': session['median_bps'],
+    'workerized_median_bps': workerized['median_bps'],
+    'workerized_vs_session_ratio': workerized_vs_session,
+    'workerized_vs_threaded_ratio': workerized_vs_threaded,
+    'direct_vs_workerized_ratio': direct_vs_workerized,
+    'workerized_session_creates': workerized['session_creates'],
+    'workerized_session_closes': workerized['session_closes'],
+    'workerized_session_events': workerized['session_events'],
+    'workerized_worker_dispatches': workerized['worker_dispatches'],
+    'workerized_worker0_dispatches': workerized['worker0_dispatches'],
+    'workerized_worker1_dispatches': workerized['worker1_dispatches'],
+    'workerized_max_active_after': workerized['max_active_after'],
+}
+summary_json_path.write_text(json.dumps(summary_payload, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+
+def fmt_ratio(value):
+    return 'n/a' if value is None else f"{value:.2f}x"
+
+lines = [
+    '=== relayd tcp workerized session summary ===',
+    f"repetitions: {direct['samples']}",
+    f"duration:    {direct['duration_sec']:g}s",
+    f"streams:     {streams}",
+    '',
+    f"direct throughput:                {format_decimal(direct['median_bps'], UNITS_BPS)} median / {format_decimal(direct['best_bps'], UNITS_BPS)} best",
+    f"threaded throughput:              {format_decimal(threaded['median_bps'], UNITS_BPS)} median / {format_decimal(threaded['best_bps'], UNITS_BPS)} best",
+    f"single-thread session throughput: {format_decimal(session['median_bps'], UNITS_BPS)} median / {format_decimal(session['best_bps'], UNITS_BPS)} best",
+    f"workerized throughput:            {format_decimal(workerized['median_bps'], UNITS_BPS)} median / {format_decimal(workerized['best_bps'], UNITS_BPS)} best",
+    f"workerized/session ratio: {fmt_ratio(workerized_vs_session)}",
+    f"workerized/threaded ratio: {fmt_ratio(workerized_vs_threaded)}",
+    f"direct/workerized ratio: {fmt_ratio(direct_vs_workerized)}",
+    f"workerized dispatch note: total={workerized['worker_dispatches']} worker0={workerized['worker0_dispatches']} worker1={workerized['worker1_dispatches']}",
+    f"workerized active-after note: max active sessions after run = {workerized['max_active_after']}",
+    f"direct artifact:     {direct['representative']['json_file']} | {direct['representative']['client_log']}",
+    f"threaded artifact:   {threaded['representative']['json_file']} | {threaded['representative']['client_log']}",
+    f"session artifact:    {session['representative']['json_file']} | {session['representative']['client_log']}",
+    f"workerized artifact: {workerized['representative']['json_file']} | {workerized['representative']['client_log']}",
+    decision,
+]
+summary_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+print(summary_path.read_text(encoding='utf-8'), end='')
+PY
+}
+
+refresh_tcp_workerized_session_overall_summary() {
+  local latest_dir=$1
+  python3 - "$latest_dir" <<'PY'
+import json
+import pathlib
+import sys
+
+latest_dir = pathlib.Path(sys.argv[1])
+summary_paths = sorted(latest_dir.glob("tcp-workerized-session-streams-*-summary.json"))
+overall_path = latest_dir / "tcp-workerized-session-overall-summary.txt"
+if not summary_paths:
+    overall_path.write_text("=== relayd tcp workerized session overall summary ===\nno stream summaries available\n", encoding="utf-8")
+    print(overall_path.read_text(encoding="utf-8"), end="")
+    raise SystemExit(0)
+
+UNITS_BPS = ['bps', 'kbps', 'mbps', 'gbps']
+def format_decimal(value, units):
+    value = float(value)
+    unit_index = 0
+    while value >= 1000.0 and unit_index < len(units) - 1:
+        value /= 1000.0
+        unit_index += 1
+    return f"{value:.2f} {units[unit_index]}"
+
+summaries = [json.loads(path.read_text(encoding='utf-8')) for path in summary_paths]
+lines = ["=== relayd tcp workerized session overall summary ==="]
+for item in summaries:
+    lines.append(
+        f"streams={item['streams']}: threaded {format_decimal(item['threaded_median_bps'], UNITS_BPS)}, "
+        f"single-thread {format_decimal(item['session_model_median_bps'], UNITS_BPS)}, "
+        f"workerized {format_decimal(item['workerized_median_bps'], UNITS_BPS)}, "
+        f"w/session={('n/a' if item['workerized_vs_session_ratio'] is None else f'{item['workerized_vs_session_ratio']:.2f}x')}, "
+        f"w/threaded={('n/a' if item['workerized_vs_threaded_ratio'] is None else f'{item['workerized_vs_threaded_ratio']:.2f}x')} "
+        f"dispatch={item['workerized_worker0_dispatches']}/{item['workerized_worker1_dispatches']} "
+        f"active_after={item['workerized_max_active_after']} -> {item['decision']}"
+    )
+overall_decision = (
+    'workerized tcp session-model is justified in current runtime architecture'
+    if all(item['decision'] == 'workerized tcp session-model is justified in current runtime architecture' for item in summaries)
+    else 'workerized tcp session-model did not clear the next gate in current runtime architecture'
+)
+lines.extend(['', overall_decision])
+overall_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+print(overall_path.read_text(encoding='utf-8'), end='')
+PY
+}
+
+emit_tcp_sharded_worker_summary() {
+  local results_file=$1
+  local summary_txt=$2
+  local summary_json=$3
+  local direct_json=$4
+  local direct_log=$5
+  local direct_server_log=$6
+  local threaded_json=$7
+  local threaded_log=$8
+  local threaded_server_log=$9
+  local session_json=${10}
+  local session_log=${11}
+  local session_server_log=${12}
+  local workerized_json=${13}
+  local workerized_log=${14}
+  local workerized_server_log=${15}
+  local sharded_json=${16}
+  local sharded_log=${17}
+  local sharded_server_log=${18}
+  local legacy_tcp_json=${19}
+  local legacy_tcp_log=${20}
+  local legacy_tcp_server_log=${21}
+  python3 - "$results_file" "$summary_txt" "$summary_json" "$direct_json" "$direct_log" "$direct_server_log" "$threaded_json" "$threaded_log" "$threaded_server_log" "$session_json" "$session_log" "$session_server_log" "$workerized_json" "$workerized_log" "$workerized_server_log" "$sharded_json" "$sharded_log" "$sharded_server_log" "$legacy_tcp_json" "$legacy_tcp_log" "$legacy_tcp_server_log" <<'PY'
+import json
+import pathlib
+import shutil
+import statistics
+import sys
+
+results_path = pathlib.Path(sys.argv[1]); summary_path = pathlib.Path(sys.argv[2]); summary_json_path = pathlib.Path(sys.argv[3])
+direct_json_out = pathlib.Path(sys.argv[4]); direct_log_out = pathlib.Path(sys.argv[5]); direct_server_log_out = pathlib.Path(sys.argv[6])
+threaded_json_out = pathlib.Path(sys.argv[7]); threaded_log_out = pathlib.Path(sys.argv[8]); threaded_server_log_out = pathlib.Path(sys.argv[9])
+session_json_out = pathlib.Path(sys.argv[10]); session_log_out = pathlib.Path(sys.argv[11]); session_server_log_out = pathlib.Path(sys.argv[12])
+workerized_json_out = pathlib.Path(sys.argv[13]); workerized_log_out = pathlib.Path(sys.argv[14]); workerized_server_log_out = pathlib.Path(sys.argv[15])
+sharded_json_out = pathlib.Path(sys.argv[16]); sharded_log_out = pathlib.Path(sys.argv[17]); sharded_server_log_out = pathlib.Path(sys.argv[18])
+legacy_tcp_json_out = pathlib.Path(sys.argv[19]); legacy_tcp_log_out = pathlib.Path(sys.argv[20]); legacy_tcp_server_log_out = pathlib.Path(sys.argv[21])
+records = [json.loads(line) for line in results_path.read_text(encoding='utf-8').splitlines() if line.strip()]
+if not records:
+    raise SystemExit("no TCP sharded-worker records found")
+
+UNITS_BPS = ['bps', 'kbps', 'mbps', 'gbps']
+def format_decimal(value, units):
+    value = float(value); unit_index = 0
+    while value >= 1000.0 and unit_index < len(units) - 1:
+        value /= 1000.0; unit_index += 1
+    return f"{value:.2f} {units[unit_index]}"
+
+def summarize(items):
+    throughputs = [item['bits_per_second'] for item in items]
+    median_bps = statistics.median(throughputs)
+    best_bps = max(throughputs)
+    representative = min(items, key=lambda item: (abs(item['bits_per_second'] - median_bps), item['repetition']))
+    return {
+        'samples': len(items),
+        'median_bps': median_bps,
+        'best_bps': best_bps,
+        'duration_sec': items[0]['duration_sec'],
+        'streams': items[0]['streams'],
+        'representative': representative,
+        'session_creates': sum(item.get('tcp_session_create_delta', 0) for item in items),
+        'session_closes': sum(item.get('tcp_session_close_delta', 0) for item in items),
+        'listener_accepts': sum(item.get('tcp_listener_accept_delta', 0) for item in items),
+        'accept_w0': sum(item.get('tcp_listener_accept_worker0_delta', 0) for item in items),
+        'accept_w1': sum(item.get('tcp_listener_accept_worker1_delta', 0) for item in items),
+        'accept_w2': sum(item.get('tcp_listener_accept_worker2_delta', 0) for item in items),
+        'accept_w3': sum(item.get('tcp_listener_accept_worker3_delta', 0) for item in items),
+        'connects': sum(item.get('tcp_upstream_connect_delta', 0) for item in items),
+        'connect_fails': sum(item.get('tcp_upstream_connect_fail_delta', 0) for item in items),
+        'max_active_after': max(item.get('tcp_active_sessions_after', 0) for item in items),
+    }
+
+def copy_record_artifacts(record, json_out, log_out, server_log_out):
+    base = results_path.parent
+    shutil.copy2(base / record['json_file'], json_out)
+    shutil.copy2(base / record['client_log'], log_out)
+    shutil.copy2(base / record['server_log'], server_log_out)
+
+grouped = {}
+for record in records:
+    grouped.setdefault(record['path'], []).append(record)
+
+direct = summarize(sorted(grouped.get('direct', []), key=lambda item: item['repetition']))
+threaded = summarize(sorted(grouped.get('threaded', []), key=lambda item: item['repetition']))
+session = summarize(sorted(grouped.get('session-model', []), key=lambda item: item['repetition']))
+workerized = summarize(sorted(grouped.get('workerized-session', []), key=lambda item: item['repetition']))
+sharded = summarize(sorted(grouped.get('sharded-worker', []), key=lambda item: item['repetition']))
+if any(item['samples'] == 0 for item in (direct, threaded, session, workerized, sharded)):
+    raise SystemExit("expected direct, threaded, session-model, workerized-session, and sharded-worker records")
+
+copy_record_artifacts(direct['representative'], direct_json_out, direct_log_out, direct_server_log_out)
+copy_record_artifacts(threaded['representative'], threaded_json_out, threaded_log_out, threaded_server_log_out)
+copy_record_artifacts(session['representative'], session_json_out, session_log_out, session_server_log_out)
+copy_record_artifacts(workerized['representative'], workerized_json_out, workerized_log_out, workerized_server_log_out)
+copy_record_artifacts(sharded['representative'], sharded_json_out, sharded_log_out, sharded_server_log_out)
+shutil.copy2(sharded_json_out, legacy_tcp_json_out)
+shutil.copy2(sharded_log_out, legacy_tcp_log_out)
+shutil.copy2(sharded_server_log_out, legacy_tcp_server_log_out)
+
+sharded_vs_workerized = sharded['median_bps'] / workerized['median_bps'] if workerized['median_bps'] else None
+sharded_vs_threaded = sharded['median_bps'] / threaded['median_bps'] if threaded['median_bps'] else None
+sharded_vs_session = sharded['median_bps'] / session['median_bps'] if session['median_bps'] else None
+direct_vs_sharded = direct['median_bps'] / sharded['median_bps'] if sharded['median_bps'] else None
+streams = direct['streams']
+decision = 'sharded-worker tcp model did not clear the next gate in current runtime architecture'
+if (
+    sharded['max_active_after'] == 0 and sharded['connect_fails'] == 0
+    and sharded['accept_w0'] > 0 and sharded['accept_w1'] > 0 and sharded['accept_w2'] > 0 and sharded['accept_w3'] > 0
+    and sharded_vs_workerized is not None and sharded_vs_threaded is not None and sharded_vs_session is not None
+    and ((streams == 1 and sharded_vs_workerized >= 0.95) or (streams != 1 and sharded_vs_workerized >= 1.25 and sharded_vs_threaded >= 0.95))
+):
+    decision = 'sharded-worker tcp model is justified in current runtime architecture'
+
+summary_payload = {
+    'streams': streams,
+    'repetitions': direct['samples'],
+    'duration_sec': direct['duration_sec'],
+    'decision': decision,
+    'direct_median_bps': direct['median_bps'],
+    'threaded_median_bps': threaded['median_bps'],
+    'session_model_median_bps': session['median_bps'],
+    'workerized_median_bps': workerized['median_bps'],
+    'sharded_median_bps': sharded['median_bps'],
+    'sharded_vs_workerized_ratio': sharded_vs_workerized,
+    'sharded_vs_threaded_ratio': sharded_vs_threaded,
+    'sharded_vs_session_ratio': sharded_vs_session,
+    'direct_vs_sharded_ratio': direct_vs_sharded,
+    'sharded_listener_accept_total': sharded['listener_accepts'],
+    'sharded_accept_w0': sharded['accept_w0'],
+    'sharded_accept_w1': sharded['accept_w1'],
+    'sharded_accept_w2': sharded['accept_w2'],
+    'sharded_accept_w3': sharded['accept_w3'],
+    'sharded_connect_total': sharded['connects'],
+    'sharded_connect_fail_total': sharded['connect_fails'],
+    'sharded_max_active_after': sharded['max_active_after'],
+}
+summary_json_path.write_text(json.dumps(summary_payload, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+
+def fmt_ratio(value):
+    return 'n/a' if value is None else f"{value:.2f}x"
+
+lines = [
+    '=== relayd tcp sharded worker summary ===',
+    f"repetitions: {direct['samples']}",
+    f"duration:    {direct['duration_sec']:g}s",
+    f"streams:     {streams}",
+    '',
+    f"direct throughput:                 {format_decimal(direct['median_bps'], UNITS_BPS)} median / {format_decimal(direct['best_bps'], UNITS_BPS)} best",
+    f"threaded throughput:               {format_decimal(threaded['median_bps'], UNITS_BPS)} median / {format_decimal(threaded['best_bps'], UNITS_BPS)} best",
+    f"single-thread session throughput:  {format_decimal(session['median_bps'], UNITS_BPS)} median / {format_decimal(session['best_bps'], UNITS_BPS)} best",
+    f"workerized throughput:             {format_decimal(workerized['median_bps'], UNITS_BPS)} median / {format_decimal(workerized['best_bps'], UNITS_BPS)} best",
+    f"sharded-worker throughput:         {format_decimal(sharded['median_bps'], UNITS_BPS)} median / {format_decimal(sharded['best_bps'], UNITS_BPS)} best",
+    f"sharded/workerized ratio: {fmt_ratio(sharded_vs_workerized)}",
+    f"sharded/threaded ratio: {fmt_ratio(sharded_vs_threaded)}",
+    f"sharded/session ratio: {fmt_ratio(sharded_vs_session)}",
+    f"direct/sharded ratio: {fmt_ratio(direct_vs_sharded)}",
+    f"sharded accept note: total={sharded['listener_accepts']} w0={sharded['accept_w0']} w1={sharded['accept_w1']} w2={sharded['accept_w2']} w3={sharded['accept_w3']}",
+    f"sharded connect note: total={sharded['connects']} fail={sharded['connect_fails']}",
+    f"sharded active-after note: max active sessions after run = {sharded['max_active_after']}",
+    f"direct artifact:     {direct['representative']['json_file']} | {direct['representative']['client_log']}",
+    f"threaded artifact:   {threaded['representative']['json_file']} | {threaded['representative']['client_log']}",
+    f"session artifact:    {session['representative']['json_file']} | {session['representative']['client_log']}",
+    f"workerized artifact: {workerized['representative']['json_file']} | {workerized['representative']['client_log']}",
+    f"sharded artifact:    {sharded['representative']['json_file']} | {sharded['representative']['client_log']}",
+    decision,
+]
+summary_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+print(summary_path.read_text(encoding='utf-8'), end='')
+PY
+}
+
+refresh_tcp_sharded_worker_overall_summary() {
+  local latest_dir=$1
+  python3 - "$latest_dir" <<'PY'
+import json
+import pathlib
+import sys
+
+latest_dir = pathlib.Path(sys.argv[1])
+summary_paths = sorted(latest_dir.glob("tcp-sharded-worker-streams-*-summary.json"))
+overall_path = latest_dir / "tcp-sharded-worker-overall-summary.txt"
+if not summary_paths:
+    overall_path.write_text("=== relayd tcp sharded worker overall summary ===\nno stream summaries available\n", encoding="utf-8")
+    print(overall_path.read_text(encoding="utf-8"), end="")
+    raise SystemExit(0)
+
+UNITS_BPS = ['bps', 'kbps', 'mbps', 'gbps']
+def format_decimal(value, units):
+    value = float(value); unit_index = 0
+    while value >= 1000.0 and unit_index < len(units) - 1:
+        value /= 1000.0; unit_index += 1
+    return f"{value:.2f} {units[unit_index]}"
+
+summaries = [json.loads(path.read_text(encoding='utf-8')) for path in summary_paths]
+lines = ["=== relayd tcp sharded worker overall summary ==="]
+for item in summaries:
+    lines.append(
+        f"streams={item['streams']}: threaded {format_decimal(item['threaded_median_bps'], UNITS_BPS)}, "
+        f"single-thread {format_decimal(item['session_model_median_bps'], UNITS_BPS)}, "
+        f"workerized {format_decimal(item['workerized_median_bps'], UNITS_BPS)}, "
+        f"sharded {format_decimal(item['sharded_median_bps'], UNITS_BPS)}, "
+        f"s/w={('n/a' if item['sharded_vs_workerized_ratio'] is None else f'{item['sharded_vs_workerized_ratio']:.2f}x')}, "
+        f"s/t={('n/a' if item['sharded_vs_threaded_ratio'] is None else f'{item['sharded_vs_threaded_ratio']:.2f}x')} "
+        f"accept={item['sharded_accept_w0']}/{item['sharded_accept_w1']}/{item['sharded_accept_w2']}/{item['sharded_accept_w3']} "
+        f"active_after={item['sharded_max_active_after']} -> {item['decision']}"
+    )
+overall_decision = (
+    'sharded-worker tcp model is justified in current runtime architecture'
+    if all(item['decision'] == 'sharded-worker tcp model is justified in current runtime architecture' for item in summaries)
+    else 'sharded-worker tcp model did not clear the next gate in current runtime architecture'
+)
+lines.extend(['', overall_decision])
+overall_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+print(overall_path.read_text(encoding='utf-8'), end='')
+PY
+}
+
+emit_tcp_accept_balanced_summary() {
+  local results_file=$1
+  local summary_txt=$2
+  local summary_json=$3
+  local direct_json=$4
+  local direct_log=$5
+  local direct_server_log=$6
+  local threaded_json=$7
+  local threaded_log=$8
+  local threaded_server_log=$9
+  local session_json=${10}
+  local session_log=${11}
+  local session_server_log=${12}
+  local workerized_json=${13}
+  local workerized_log=${14}
+  local workerized_server_log=${15}
+  local sharded_json=${16}
+  local sharded_log=${17}
+  local sharded_server_log=${18}
+  local accept_json=${19}
+  local accept_log=${20}
+  local accept_server_log=${21}
+  local legacy_tcp_json=${22}
+  local legacy_tcp_log=${23}
+  local legacy_tcp_server_log=${24}
+  python3 - "$results_file" "$summary_txt" "$summary_json" "$direct_json" "$direct_log" "$direct_server_log" "$threaded_json" "$threaded_log" "$threaded_server_log" "$session_json" "$session_log" "$session_server_log" "$workerized_json" "$workerized_log" "$workerized_server_log" "$sharded_json" "$sharded_log" "$sharded_server_log" "$accept_json" "$accept_log" "$accept_server_log" "$legacy_tcp_json" "$legacy_tcp_log" "$legacy_tcp_server_log" <<'PY'
+import json, pathlib, shutil, statistics, sys
+
+results_path = pathlib.Path(sys.argv[1]); summary_path = pathlib.Path(sys.argv[2]); summary_json_path = pathlib.Path(sys.argv[3])
+paths = [pathlib.Path(arg) for arg in sys.argv[4:25]]
+records = [json.loads(line) for line in results_path.read_text(encoding='utf-8').splitlines() if line.strip()]
+if not records:
+    raise SystemExit("no TCP accept-balanced records found")
+
+UNITS_BPS = ['bps', 'kbps', 'mbps', 'gbps']
+def fmt(value):
+    value = float(value); i = 0
+    while value >= 1000.0 and i < len(UNITS_BPS) - 1:
+        value /= 1000.0; i += 1
+    return f"{value:.2f} {UNITS_BPS[i]}"
+
+def summarize(items):
+    bps = [item['bits_per_second'] for item in items]
+    median_bps = statistics.median(bps)
+    best_bps = max(bps)
+    representative = min(items, key=lambda item: (abs(item['bits_per_second'] - median_bps), item['repetition']))
+    return {
+        'samples': len(items),
+        'median_bps': median_bps,
+        'best_bps': best_bps,
+        'duration_sec': items[0]['duration_sec'],
+        'streams': items[0]['streams'],
+        'representative': representative,
+        'handoff_total': sum(item.get('tcp_accept_handoff_delta', 0) for item in items),
+        'handoff_w0': sum(item.get('tcp_accept_handoff_worker0_delta', 0) for item in items),
+        'handoff_w1': sum(item.get('tcp_accept_handoff_worker1_delta', 0) for item in items),
+        'handoff_w2': sum(item.get('tcp_accept_handoff_worker2_delta', 0) for item in items),
+        'handoff_w3': sum(item.get('tcp_accept_handoff_worker3_delta', 0) for item in items),
+        'accept_total': sum(item.get('tcp_listener_accept_delta', 0) for item in items),
+        'accept_w0': sum(item.get('tcp_listener_accept_worker0_delta', 0) for item in items),
+        'accept_w1': sum(item.get('tcp_listener_accept_worker1_delta', 0) for item in items),
+        'accept_w2': sum(item.get('tcp_listener_accept_worker2_delta', 0) for item in items),
+        'accept_w3': sum(item.get('tcp_listener_accept_worker3_delta', 0) for item in items),
+        'connect_fail_total': sum(item.get('tcp_upstream_connect_fail_delta', 0) for item in items),
+        'max_active_after': max(item.get('tcp_active_sessions_after', 0) for item in items),
+    }
+
+def copy_record(record, json_out, log_out, server_log_out):
+    base = results_path.parent
+    shutil.copy2(base / record['json_file'], json_out)
+    shutil.copy2(base / record['client_log'], log_out)
+    shutil.copy2(base / record['server_log'], server_log_out)
+
+grouped = {}
+for record in records:
+    grouped.setdefault(record['path'], []).append(record)
+
+direct = summarize(sorted(grouped.get('direct', []), key=lambda item: item['repetition']))
+threaded = summarize(sorted(grouped.get('threaded', []), key=lambda item: item['repetition']))
+session = summarize(sorted(grouped.get('session-model', []), key=lambda item: item['repetition']))
+workerized = summarize(sorted(grouped.get('workerized-session', []), key=lambda item: item['repetition']))
+sharded = summarize(sorted(grouped.get('sharded-worker', []), key=lambda item: item['repetition']))
+accept_bal = summarize(sorted(grouped.get('accept-balanced', []), key=lambda item: item['repetition']))
+if any(item['samples'] == 0 for item in (direct, threaded, session, workerized, sharded, accept_bal)):
+    raise SystemExit("expected direct, threaded, session-model, workerized-session, sharded-worker, and accept-balanced records")
+
+copy_record(direct['representative'], paths[0], paths[1], paths[2])
+copy_record(threaded['representative'], paths[3], paths[4], paths[5])
+copy_record(session['representative'], paths[6], paths[7], paths[8])
+copy_record(workerized['representative'], paths[9], paths[10], paths[11])
+copy_record(sharded['representative'], paths[12], paths[13], paths[14])
+copy_record(accept_bal['representative'], paths[15], paths[16], paths[17])
+shutil.copy2(paths[15], paths[18]); shutil.copy2(paths[16], paths[19]); shutil.copy2(paths[17], paths[20])
+
+ab_vs_sharded = accept_bal['median_bps'] / sharded['median_bps'] if sharded['median_bps'] else None
+ab_vs_threaded = accept_bal['median_bps'] / threaded['median_bps'] if threaded['median_bps'] else None
+ab_vs_workerized = accept_bal['median_bps'] / workerized['median_bps'] if workerized['median_bps'] else None
+streams = direct['streams']
+decision = 'accept-balanced tcp model did not clear the next gate in current runtime architecture'
+if (
+    accept_bal['max_active_after'] == 0 and accept_bal['connect_fail_total'] == 0
+    and accept_bal['handoff_w0'] > 0 and accept_bal['handoff_w1'] > 0 and accept_bal['handoff_w2'] > 0 and accept_bal['handoff_w3'] > 0
+    and ab_vs_sharded is not None and ab_vs_threaded is not None
+    and ((streams == 1 and ab_vs_sharded >= 0.95) or (streams != 1 and ab_vs_sharded >= 1.10 and ab_vs_threaded >= 0.85))
+):
+    decision = 'accept-balanced tcp model is justified in current runtime architecture'
+
+summary = {
+    'streams': streams,
+    'repetitions': direct['samples'],
+    'duration_sec': direct['duration_sec'],
+    'decision': decision,
+    'direct_median_bps': direct['median_bps'],
+    'threaded_median_bps': threaded['median_bps'],
+    'session_model_median_bps': session['median_bps'],
+    'workerized_median_bps': workerized['median_bps'],
+    'sharded_median_bps': sharded['median_bps'],
+    'accept_balanced_median_bps': accept_bal['median_bps'],
+    'accept_balanced_vs_sharded_ratio': ab_vs_sharded,
+    'accept_balanced_vs_threaded_ratio': ab_vs_threaded,
+    'accept_balanced_vs_workerized_ratio': ab_vs_workerized,
+    'accept_balanced_handoff_total': accept_bal['handoff_total'],
+    'accept_balanced_handoff_w0': accept_bal['handoff_w0'],
+    'accept_balanced_handoff_w1': accept_bal['handoff_w1'],
+    'accept_balanced_handoff_w2': accept_bal['handoff_w2'],
+    'accept_balanced_handoff_w3': accept_bal['handoff_w3'],
+    'accept_balanced_max_active_after': accept_bal['max_active_after'],
+    'accept_balanced_connect_fail_total': accept_bal['connect_fail_total'],
+}
+summary_json_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+
+def ratio_text(v): return 'n/a' if v is None else f"{v:.2f}x"
+lines = [
+    '=== relayd tcp accept-balanced summary ===',
+    f"repetitions: {direct['samples']}",
+    f"duration:    {direct['duration_sec']:g}s",
+    f"streams:     {streams}",
+    '',
+    f"direct throughput:                 {fmt(direct['median_bps'])} median / {fmt(direct['best_bps'])} best",
+    f"threaded throughput:               {fmt(threaded['median_bps'])} median / {fmt(threaded['best_bps'])} best",
+    f"single-thread session throughput:  {fmt(session['median_bps'])} median / {fmt(session['best_bps'])} best",
+    f"workerized throughput:             {fmt(workerized['median_bps'])} median / {fmt(workerized['best_bps'])} best",
+    f"sharded throughput:                {fmt(sharded['median_bps'])} median / {fmt(sharded['best_bps'])} best",
+    f"accept-balanced throughput:        {fmt(accept_bal['median_bps'])} median / {fmt(accept_bal['best_bps'])} best",
+    f"accept-balanced/sharded ratio: {ratio_text(ab_vs_sharded)}",
+    f"accept-balanced/threaded ratio: {ratio_text(ab_vs_threaded)}",
+    f"accept-balanced/workerized ratio: {ratio_text(ab_vs_workerized)}",
+    f"v4 sharded accept note: total={sharded['accept_total']} w0={sharded['accept_w0']} w1={sharded['accept_w1']} w2={sharded['accept_w2']} w3={sharded['accept_w3']}",
+    f"v5 handoff note: total={accept_bal['handoff_total']} w0={accept_bal['handoff_w0']} w1={accept_bal['handoff_w1']} w2={accept_bal['handoff_w2']} w3={accept_bal['handoff_w3']}",
+    f"accept-balanced active-after note: max active sessions after run = {accept_bal['max_active_after']}",
+    decision,
+]
+summary_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+print(summary_path.read_text(encoding='utf-8'), end='')
+PY
+}
+
+refresh_tcp_accept_balanced_overall_summary() {
+  local latest_dir=$1
+  python3 - "$latest_dir" <<'PY'
+import json, pathlib, sys
+
+latest_dir = pathlib.Path(sys.argv[1])
+summary_paths = sorted(latest_dir.glob("tcp-accept-balanced-streams-*-summary.json"))
+overall_path = latest_dir / "tcp-accept-balanced-overall-summary.txt"
+if not summary_paths:
+    overall_path.write_text("=== relayd tcp accept-balanced overall summary ===\nno stream summaries available\n", encoding='utf-8')
+    print(overall_path.read_text(encoding='utf-8'), end='')
+    raise SystemExit(0)
+
+UNITS = ['bps','kbps','mbps','gbps']
+def fmt(v):
+    v=float(v);i=0
+    while v>=1000.0 and i<len(UNITS)-1:
+        v/=1000.0;i+=1
+    return f"{v:.2f} {UNITS[i]}"
+
+summaries=[json.loads(p.read_text(encoding='utf-8')) for p in summary_paths]
+lines=["=== relayd tcp accept-balanced overall summary ==="]
+for item in summaries:
+    lines.append(
+        f"streams={item['streams']}: threaded {fmt(item['threaded_median_bps'])}, "
+        f"workerized {fmt(item['workerized_median_bps'])}, sharded {fmt(item['sharded_median_bps'])}, "
+        f"accept-balanced {fmt(item['accept_balanced_median_bps'])}, "
+        f"ab/sharded={('n/a' if item['accept_balanced_vs_sharded_ratio'] is None else f'{item['accept_balanced_vs_sharded_ratio']:.2f}x')}, "
+        f"ab/threaded={('n/a' if item['accept_balanced_vs_threaded_ratio'] is None else f'{item['accept_balanced_vs_threaded_ratio']:.2f}x')} "
+        f"handoff={item['accept_balanced_handoff_w0']}/{item['accept_balanced_handoff_w1']}/{item['accept_balanced_handoff_w2']}/{item['accept_balanced_handoff_w3']} "
+        f"active_after={item['accept_balanced_max_active_after']} -> {item['decision']}"
+    )
+overall_decision = (
+    'accept-balanced tcp model is justified in current runtime architecture'
+    if all(item['decision'] == 'accept-balanced tcp model is justified in current runtime architecture' for item in summaries)
+    else 'accept-balanced tcp model did not clear the next gate in current runtime architecture'
+)
+lines.extend(['', overall_decision])
+overall_path.write_text('\n'.join(lines)+'\n', encoding='utf-8')
+print(overall_path.read_text(encoding='utf-8'), end='')
+PY
+}
+
 emit_matrix_report() {
   local results_file=$1
   local summary_txt=$2
@@ -1284,6 +1967,9 @@ UDP_MATRIX_DURATION=${UDP_MATRIX_DURATION}
 UDP_RATE=${UDP_RATE}
 UDP_PACKET_SIZE=${UDP_PACKET_SIZE}
 TCP_SESSION_MODEL_ENABLED=${TCP_SESSION_MODEL_ENABLED}
+TCP_SESSION_MODEL_WORKERS=${TCP_SESSION_MODEL_WORKERS}
+TCP_SESSION_MODEL_ACCEPT_BALANCED=${TCP_SESSION_MODEL_ACCEPT_BALANCED}
+TCP_SESSION_MODEL_SHARDED_ACCEPT=${TCP_SESSION_MODEL_SHARDED_ACCEPT}
 TCP_SPLICE_ENABLED=${TCP_SPLICE_ENABLED}
 FORCE_TCP_COPY_FALLBACK=${FORCE_TCP_COPY_FALLBACK}
 TCP_COMPARE_MODE=${TCP_COMPARE_MODE}
@@ -1330,8 +2016,11 @@ run_iperf_tcp_client() {
 
 current_tcp_results_file() {
   case "$TCP_COMPARE_MODE" in
+    accept-balanced) printf '%s\n' "$TCP_ACCEPT_BALANCED_RESULTS" ;;
     copy-vs-splice) printf '%s\n' "$TCP_COPY_VS_SPLICE_RESULTS" ;;
     session-model) printf '%s\n' "$TCP_SESSION_MODEL_RESULTS" ;;
+    workerized-session) printf '%s\n' "$TCP_WORKERIZED_SESSION_RESULTS" ;;
+    sharded-worker) printf '%s\n' "$TCP_SHARDED_WORKER_RESULTS" ;;
   esac
 }
 
@@ -1387,15 +2076,18 @@ run_one_shot_suite() {
   local report
   if [[ "$TCP_DIRECT_VS_RELAY" == "1" ]]; then
     case "$TCP_COMPARE_MODE" in
+      accept-balanced) run_tcp_accept_balanced_suite ;;
+      sharded-worker) run_tcp_sharded_worker_suite ;;
       copy-vs-splice) run_tcp_copy_vs_splice_suite ;;
       session-model) run_tcp_session_model_suite ;;
+      workerized-session) run_tcp_workerized_session_suite ;;
     esac
   else
-    start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" tcp-relay-smoke "$TCP_SESSION_MODEL_ENABLED"
+    start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" tcp-relay-smoke "$TCP_SESSION_MODEL_ENABLED" "$TCP_SESSION_MODEL_WORKERS" "$TCP_SESSION_MODEL_SHARDED_ACCEPT" "$TCP_SESSION_MODEL_ACCEPT_BALANCED"
     run_tcp_relay_smoke
     stop_relayd
   fi
-  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-relay-smoke "$TCP_SESSION_MODEL_ENABLED"
+  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-relay-smoke "$TCP_SESSION_MODEL_ENABLED" "$TCP_SESSION_MODEL_WORKERS" "$TCP_SESSION_MODEL_SHARDED_ACCEPT" "$TCP_SESSION_MODEL_ACCEPT_BALANCED"
   run_udp_relay_smoke
   stop_relayd
   report=$(emit_stdout_report "$TCP_CLIENT_JSON" "$UDP_CLIENT_JSON" "$UDP_RATE" "$UDP_PACKET_SIZE")
@@ -1482,14 +2174,14 @@ run_tcp_copy_vs_splice_suite() {
     run_tcp_direct_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix"
   done
 
-  start_relayd 0 1 tcp-copy 0
+  start_relayd 0 1 tcp-copy 0 0 0 0
   for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
     trial_dir="${TCP_COPY_VS_SPLICE_DIR}/rep-${repetition}"
     output_prefix="${trial_dir}/copy"
     run_tcp_relay_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix" copy
   done
 
-  start_relayd 1 0 tcp-splice 0
+  start_relayd 1 0 tcp-splice 0 0 0 0
   for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
     trial_dir="${TCP_COPY_VS_SPLICE_DIR}/rep-${repetition}"
     output_prefix="${trial_dir}/splice"
@@ -1528,14 +2220,14 @@ run_tcp_session_model_suite() {
     run_tcp_direct_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix"
   done
 
-  start_relayd 0 0 tcp-threaded 0
+  start_relayd 0 0 tcp-threaded 0 0 0 0
   for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
     trial_dir="${TCP_SESSION_MODEL_DIR}/rep-${repetition}"
     output_prefix="${trial_dir}/threaded"
     run_tcp_relay_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix" threaded
   done
 
-  start_relayd 0 0 tcp-session-model 1
+  start_relayd 0 0 tcp-session-model 1 0 0 0
   for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
     trial_dir="${TCP_SESSION_MODEL_DIR}/rep-${repetition}"
     output_prefix="${trial_dir}/session-model"
@@ -1556,6 +2248,204 @@ run_tcp_session_model_suite() {
     "$TCP_SESSION_MODEL_JSON" \
     "$TCP_SESSION_MODEL_LOG" \
     "$TCP_SESSION_MODEL_SERVER_LOG" \
+    "$TCP_CLIENT_JSON" \
+    "$TCP_CLIENT_LOG" \
+    "$TCP_SERVER_LOG"
+}
+
+run_tcp_workerized_session_suite() {
+  local repetition trial_dir output_prefix
+
+  mkdir -p "$TCP_WORKERIZED_SESSION_DIR"
+  : >"$TCP_WORKERIZED_SESSION_RESULTS"
+
+  for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
+    trial_dir="${TCP_WORKERIZED_SESSION_DIR}/rep-${repetition}"
+    mkdir -p "$trial_dir"
+    output_prefix="${trial_dir}/direct"
+    run_tcp_direct_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix"
+  done
+
+  start_relayd 0 0 tcp-threaded 0 0 0 0
+  for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
+    trial_dir="${TCP_WORKERIZED_SESSION_DIR}/rep-${repetition}"
+    output_prefix="${trial_dir}/threaded"
+    run_tcp_relay_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix" threaded
+  done
+
+  start_relayd 0 0 tcp-session-model 1 0 0 0
+  for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
+    trial_dir="${TCP_WORKERIZED_SESSION_DIR}/rep-${repetition}"
+    output_prefix="${trial_dir}/session-model"
+    run_tcp_relay_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix" session-model
+  done
+
+  start_relayd 0 0 tcp-workerized-session 1 2 0 0
+  for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
+    trial_dir="${TCP_WORKERIZED_SESSION_DIR}/rep-${repetition}"
+    output_prefix="${trial_dir}/workerized-session"
+    run_tcp_relay_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix" workerized-session
+  done
+  stop_relayd
+
+  emit_tcp_workerized_session_summary \
+    "$TCP_WORKERIZED_SESSION_RESULTS" \
+    "$TCP_WORKERIZED_SESSION_SUMMARY_TXT" \
+    "$TCP_WORKERIZED_SESSION_SUMMARY_JSON" \
+    "$TCP_DIRECT_JSON" \
+    "$TCP_DIRECT_LOG" \
+    "$TCP_DIRECT_SERVER_LOG" \
+    "$TCP_THREADED_JSON" \
+    "$TCP_THREADED_LOG" \
+    "$TCP_THREADED_SERVER_LOG" \
+    "$TCP_SESSION_MODEL_JSON" \
+    "$TCP_SESSION_MODEL_LOG" \
+    "$TCP_SESSION_MODEL_SERVER_LOG" \
+    "$TCP_WORKERIZED_SESSION_JSON" \
+    "$TCP_WORKERIZED_SESSION_LOG" \
+    "$TCP_WORKERIZED_SESSION_SERVER_LOG" \
+    "$TCP_CLIENT_JSON" \
+    "$TCP_CLIENT_LOG" \
+    "$TCP_SERVER_LOG"
+}
+
+run_tcp_sharded_worker_suite() {
+  local repetition trial_dir output_prefix
+
+  mkdir -p "$TCP_SHARDED_WORKER_DIR"
+  : >"$TCP_SHARDED_WORKER_RESULTS"
+
+  for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
+    trial_dir="${TCP_SHARDED_WORKER_DIR}/rep-${repetition}"
+    mkdir -p "$trial_dir"
+    output_prefix="${trial_dir}/direct"
+    run_tcp_direct_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix"
+  done
+
+  start_relayd 0 0 tcp-threaded 0 0 0 0
+  for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
+    trial_dir="${TCP_SHARDED_WORKER_DIR}/rep-${repetition}"
+    output_prefix="${trial_dir}/threaded"
+    run_tcp_relay_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix" threaded
+  done
+
+  start_relayd 0 0 tcp-session-model 1 0 0 0
+  for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
+    trial_dir="${TCP_SHARDED_WORKER_DIR}/rep-${repetition}"
+    output_prefix="${trial_dir}/session-model"
+    run_tcp_relay_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix" session-model
+  done
+
+  start_relayd 0 0 tcp-workerized-session 1 2 0 0
+  for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
+    trial_dir="${TCP_SHARDED_WORKER_DIR}/rep-${repetition}"
+    output_prefix="${trial_dir}/workerized-session"
+    run_tcp_relay_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix" workerized-session
+  done
+
+  start_relayd 0 0 tcp-sharded-worker 1 4 1 0
+  for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
+    trial_dir="${TCP_SHARDED_WORKER_DIR}/rep-${repetition}"
+    output_prefix="${trial_dir}/sharded-worker"
+    run_tcp_relay_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix" sharded-worker
+  done
+  stop_relayd
+
+  emit_tcp_sharded_worker_summary \
+    "$TCP_SHARDED_WORKER_RESULTS" \
+    "$TCP_SHARDED_WORKER_SUMMARY_TXT" \
+    "$TCP_SHARDED_WORKER_SUMMARY_JSON" \
+    "$TCP_DIRECT_JSON" \
+    "$TCP_DIRECT_LOG" \
+    "$TCP_DIRECT_SERVER_LOG" \
+    "$TCP_THREADED_JSON" \
+    "$TCP_THREADED_LOG" \
+    "$TCP_THREADED_SERVER_LOG" \
+    "$TCP_SESSION_MODEL_JSON" \
+    "$TCP_SESSION_MODEL_LOG" \
+    "$TCP_SESSION_MODEL_SERVER_LOG" \
+    "$TCP_WORKERIZED_SESSION_JSON" \
+    "$TCP_WORKERIZED_SESSION_LOG" \
+    "$TCP_WORKERIZED_SESSION_SERVER_LOG" \
+    "$TCP_SHARDED_WORKER_JSON" \
+    "$TCP_SHARDED_WORKER_LOG" \
+    "$TCP_SHARDED_WORKER_SERVER_LOG" \
+    "$TCP_CLIENT_JSON" \
+    "$TCP_CLIENT_LOG" \
+    "$TCP_SERVER_LOG"
+}
+
+run_tcp_accept_balanced_suite() {
+  local repetition trial_dir output_prefix
+
+  mkdir -p "$TCP_ACCEPT_BALANCED_DIR"
+  : >"$TCP_ACCEPT_BALANCED_RESULTS"
+
+  for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
+    trial_dir="${TCP_ACCEPT_BALANCED_DIR}/rep-${repetition}"
+    mkdir -p "$trial_dir"
+    output_prefix="${trial_dir}/direct"
+    run_tcp_direct_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix"
+  done
+
+  start_relayd 0 0 tcp-threaded 0 0 0 0
+  for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
+    trial_dir="${TCP_ACCEPT_BALANCED_DIR}/rep-${repetition}"
+    output_prefix="${trial_dir}/threaded"
+    run_tcp_relay_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix" threaded
+  done
+
+  start_relayd 0 0 tcp-session-model 1 0 0 0
+  for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
+    trial_dir="${TCP_ACCEPT_BALANCED_DIR}/rep-${repetition}"
+    output_prefix="${trial_dir}/session-model"
+    run_tcp_relay_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix" session-model
+  done
+
+  start_relayd 0 0 tcp-workerized-session 1 2 0 0
+  for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
+    trial_dir="${TCP_ACCEPT_BALANCED_DIR}/rep-${repetition}"
+    output_prefix="${trial_dir}/workerized-session"
+    run_tcp_relay_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix" workerized-session
+  done
+
+  start_relayd 0 0 tcp-sharded-worker 1 4 1 0
+  for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
+    trial_dir="${TCP_ACCEPT_BALANCED_DIR}/rep-${repetition}"
+    output_prefix="${trial_dir}/sharded-worker"
+    run_tcp_relay_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix" sharded-worker
+  done
+
+  start_relayd 0 0 tcp-accept-balanced 1 4 0 1
+  for ((repetition = 1; repetition <= TCP_BENCH_REPETITIONS; repetition++)); do
+    trial_dir="${TCP_ACCEPT_BALANCED_DIR}/rep-${repetition}"
+    output_prefix="${trial_dir}/accept-balanced"
+    run_tcp_relay_trial "$repetition" "$TCP_BENCH_DURATION" "$TCP_STREAMS" "$output_prefix" accept-balanced
+  done
+  stop_relayd
+
+  emit_tcp_accept_balanced_summary \
+    "$TCP_ACCEPT_BALANCED_RESULTS" \
+    "$TCP_ACCEPT_BALANCED_SUMMARY_TXT" \
+    "$TCP_ACCEPT_BALANCED_SUMMARY_JSON" \
+    "$TCP_DIRECT_JSON" \
+    "$TCP_DIRECT_LOG" \
+    "$TCP_DIRECT_SERVER_LOG" \
+    "$TCP_THREADED_JSON" \
+    "$TCP_THREADED_LOG" \
+    "$TCP_THREADED_SERVER_LOG" \
+    "$TCP_SESSION_MODEL_JSON" \
+    "$TCP_SESSION_MODEL_LOG" \
+    "$TCP_SESSION_MODEL_SERVER_LOG" \
+    "$TCP_WORKERIZED_SESSION_JSON" \
+    "$TCP_WORKERIZED_SESSION_LOG" \
+    "$TCP_WORKERIZED_SESSION_SERVER_LOG" \
+    "$TCP_SHARDED_WORKER_JSON" \
+    "$TCP_SHARDED_WORKER_LOG" \
+    "$TCP_SHARDED_WORKER_SERVER_LOG" \
+    "$TCP_ACCEPT_BALANCED_JSON" \
+    "$TCP_ACCEPT_BALANCED_LOG" \
+    "$TCP_ACCEPT_BALANCED_SERVER_LOG" \
     "$TCP_CLIENT_JSON" \
     "$TCP_CLIENT_LOG" \
     "$TCP_SERVER_LOG"
@@ -1647,7 +2537,7 @@ run_udp_matrix() {
   duration=$UDP_MATRIX_DURATION
   mkdir -p "${RUN_DIR}/udp-matrix"
   : >"$UDP_MATRIX_RESULTS"
-  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-matrix "$TCP_SESSION_MODEL_ENABLED"
+  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-matrix "$TCP_SESSION_MODEL_ENABLED" "$TCP_SESSION_MODEL_WORKERS" "$TCP_SESSION_MODEL_SHARDED_ACCEPT" "$TCP_SESSION_MODEL_ACCEPT_BALANCED"
 
   for rate in "${rates[@]}"; do
     for packet_size in "${packet_sizes[@]}"; do
@@ -1743,11 +2633,20 @@ esac
 
 publish_artifacts
 case "$TCP_COMPARE_MODE" in
+  accept-balanced)
+    refresh_tcp_accept_balanced_overall_summary "$LATEST_RUN_DIR" >"$TCP_ACCEPT_BALANCED_OVERALL_SUMMARY"
+    ;;
+  sharded-worker)
+    refresh_tcp_sharded_worker_overall_summary "$LATEST_RUN_DIR" >"$TCP_SHARDED_WORKER_OVERALL_SUMMARY"
+    ;;
   copy-vs-splice)
     refresh_tcp_copy_vs_splice_overall_summary "$LATEST_RUN_DIR" >"$TCP_COPY_VS_SPLICE_OVERALL_SUMMARY"
     ;;
   session-model)
     refresh_tcp_session_model_overall_summary "$LATEST_RUN_DIR" >"$TCP_SESSION_MODEL_OVERALL_SUMMARY"
+    ;;
+  workerized-session)
+    refresh_tcp_workerized_session_overall_summary "$LATEST_RUN_DIR" >"$TCP_WORKERIZED_SESSION_OVERALL_SUMMARY"
     ;;
 esac
 log "artifacts available at ${LATEST_RUN_DIR}"

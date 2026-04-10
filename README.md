@@ -12,6 +12,9 @@ Linux-first Zig port-forwarder with:
 - `PORT_RANGE` — default `10000-30000`
 - `AUTH_TOKEN` — required bearer token
 - `TCP_SESSION_MODEL_ENABLED` — optional `true/false`, default `false`
+- `TCP_SESSION_MODEL_WORKERS` — optional worker count for workerized TCP session-model mode, default `0`
+- `TCP_SESSION_MODEL_ACCEPT_BALANCED` — optional `true/false`, default `false`
+- `TCP_SESSION_MODEL_SHARDED_ACCEPT` — optional `true/false`, default `false`
 - `TCP_SPLICE_ENABLED` — optional `true/false`, default `false`
 - `FORCE_TCP_COPY_FALLBACK` — optional `true/false`
 - `UDP_SOCKET_RCVBUF_BYTES` — optional UDP listener/upstream receive buffer size, default `8388608`
@@ -69,16 +72,31 @@ Useful knobs:
 - `UDP_RATE` / `UDP_PACKET_SIZE` for one-shot mode
 - `TCP_DIRECT_VS_RELAY`, `TCP_COMPARE_MODE`, `TCP_BENCH_DURATION`, `TCP_BENCH_REPETITIONS`, `TCP_STREAMS` for the one-shot TCP comparison suites
 - `TCP_SESSION_MODEL_ENABLED` enables the runtime-owned TCP session-model path
+- `TCP_SESSION_MODEL_WORKERS=2` enables the workerized TCP session-model lane used by `TCP_COMPARE_MODE=workerized-session`
+- `TCP_SESSION_MODEL_WORKERS=4 TCP_SESSION_MODEL_SHARDED_ACCEPT=1` enables the sharded-worker lane used by `TCP_COMPARE_MODE=sharded-worker`
+- `TCP_SESSION_MODEL_WORKERS=4 TCP_SESSION_MODEL_ACCEPT_BALANCED=1` enables the accept-balanced lane used by `TCP_COMPARE_MODE=accept-balanced`
 - `TCP_SPLICE_ENABLED` enables the relay splice path; `FORCE_TCP_COPY_FALLBACK=1` overrides it and keeps relay TCP on copy
 - `UDP_SWEEP_RATES`, `UDP_PACKET_SIZES`, `IPERF_REPETITIONS`, `UDP_MATRIX_DURATION` for matrix mode
 - `UDP_SOCKET_RCVBUF_BYTES`, `UDP_SOCKET_SNDBUF_BYTES` for relay UDP socket buffer tuning
 - artifacts are written under `.zig-cache/e2e/iperf3-latest`, including:
+  - `tcp-accept-balanced-streams-1-summary.txt`
+  - `tcp-accept-balanced-streams-4-summary.txt`
+  - `tcp-accept-balanced-overall-summary.txt`
+  - `tcp-sharded-worker-streams-1-summary.txt`
+  - `tcp-sharded-worker-streams-4-summary.txt`
+  - `tcp-sharded-worker-overall-summary.txt`
+  - `tcp-workerized-session-streams-1-summary.txt`
+  - `tcp-workerized-session-streams-4-summary.txt`
+  - `tcp-workerized-session-overall-summary.txt`
   - `tcp-session-model-streams-1-summary.txt`
   - `tcp-session-model-streams-4-summary.txt`
   - `tcp-session-model-overall-summary.txt`
   - `tcp-copy-vs-splice-streams-1-summary.txt`
   - `tcp-copy-vs-splice-streams-4-summary.txt`
   - `tcp-copy-vs-splice-overall-summary.txt`
+  - representative direct/threaded/session-model/workerized/sharded-worker/accept-balanced TCP JSON/log outputs under `tcp-accept-balanced/streams-*`
+  - representative direct/threaded/session-model/workerized/sharded-worker TCP JSON/log outputs under `tcp-sharded-worker/streams-*`
+  - representative direct/threaded/session-model/workerized-session TCP JSON/log outputs under `tcp-workerized-session/streams-*`
   - representative direct/threaded/session-model TCP JSON/log outputs under `tcp-session-model/streams-*`
   - representative direct/copy/splice TCP JSON/log outputs under `tcp-copy-vs-splice/streams-*`
 

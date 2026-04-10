@@ -86,6 +86,17 @@ const TcpEchoServer = struct {
     }
 };
 
+const TcpMultiEchoServer = struct {
+    server: std.net.Server,
+    port: u16,
+    thread: std.Thread,
+
+    fn deinit(self: *TcpMultiEchoServer) void {
+        self.server.deinit();
+        self.thread.join();
+    }
+};
+
 const TcpHalfCloseServer = struct {
     server: std.net.Server,
     port: u16,
@@ -137,6 +148,29 @@ fn tcpEchoThread(fd: std.posix.fd_t) void {
     var buf: [4]u8 = undefined;
     const amt = std.posix.read(conn.stream.handle, &buf) catch return;
     if (amt > 0) _ = std.posix.write(conn.stream.handle, buf[0..amt]) catch {};
+}
+
+fn startTcpMultiEchoServer(expected_connections: usize) !TcpMultiEchoServer {
+    const addr = try config.parseIpLiteral("127.0.0.1", 0);
+    const server = try addr.listen(.{ .reuse_address = true });
+    var bound: std.net.Address = undefined;
+    var len: std.posix.socklen_t = @sizeOf(std.net.Address);
+    try std.posix.getsockname(server.stream.handle, &bound.any, &len);
+    const port = bound.getPort();
+    const thread = try std.Thread.spawn(.{}, tcpMultiEchoThread, .{ server.stream.handle, expected_connections });
+    return .{ .server = server, .port = port, .thread = thread };
+}
+
+fn tcpMultiEchoThread(fd: std.posix.fd_t, expected_connections: usize) void {
+    var server = std.net.Server{ .listen_address = undefined, .stream = .{ .handle = fd } };
+    var handled: usize = 0;
+    while (handled < expected_connections) : (handled += 1) {
+        const conn = server.accept() catch return;
+        defer conn.stream.close();
+        var buf: [4]u8 = undefined;
+        const amt = std.posix.read(conn.stream.handle, &buf) catch return;
+        if (amt > 0) _ = std.posix.write(conn.stream.handle, buf[0..amt]) catch {};
+    }
 }
 
 fn startTcpHalfCloseServer() !TcpHalfCloseServer {
@@ -554,6 +588,208 @@ test "tcp session-model propagates client half-close" {
     try std.testing.expectEqual(@as(u64, 0), metrics.tcp_active_sessions.load());
 }
 
+test "tcp workerized session-model forwards traffic and cleans up counters" {
+    var harness = try startTcpForwardHarness(.{
+        .tcp_session_model_enabled = true,
+        .tcp_session_model_workers = 2,
+    });
+    defer harness.deinit(std.testing.allocator);
+
+    const stream = try connectRelayStream(harness.alloc.port);
+    _ = try std.posix.write(stream.handle, "ping");
+    var buf: [4]u8 = undefined;
+    const amt = try std.posix.read(stream.handle, &buf);
+    try std.testing.expectEqual(@as(usize, 4), amt);
+    try std.testing.expectEqualStrings("ping", &buf);
+    stream.close();
+
+    try waitForCounterValue(&harness.metrics.tcp_session_create_total, 1, 500);
+    try waitForCounterValue(&harness.metrics.tcp_session_close_total, 1, 500);
+    try std.testing.expect(harness.metrics.tcp_session_worker_dispatch_total.load() >= 1);
+    try std.testing.expectEqual(@as(u64, 0), harness.metrics.tcp_active_sessions.load());
+}
+
+test "tcp workerized session-model distributes sessions across workers" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{
+        .tcp_session_model_enabled = true,
+        .tcp_session_model_workers = 2,
+    });
+    defer rt.deinit();
+    try rt.start();
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = 55000, .end = 55100 }, 2000);
+
+    var echo = try startTcpMultiEchoServer(2);
+    defer echo.deinit();
+
+    var alloc = try svc.createAllocation(model.Protocol.tcp, echo.port);
+    defer alloc.deinit(std.testing.allocator);
+    var updated = try svc.setTarget(alloc.id, "127.0.0.1");
+    defer updated.deinit(std.testing.allocator);
+
+    var stream_a = try connectRelayStream(alloc.port);
+    var stream_b = try connectRelayStream(alloc.port);
+    _ = try std.posix.write(stream_a.handle, "ping");
+    _ = try std.posix.write(stream_b.handle, "ping");
+    var buf: [4]u8 = undefined;
+    _ = try std.posix.read(stream_a.handle, &buf);
+    _ = try std.posix.read(stream_b.handle, &buf);
+    stream_a.close();
+    stream_b.close();
+
+    try waitForCounterValue(&metrics.tcp_session_close_total, 2, 500);
+    try std.testing.expect(metrics.tcp_session_worker0_dispatch_total.load() > 0);
+    try std.testing.expect(metrics.tcp_session_worker1_dispatch_total.load() > 0);
+}
+
+test "tcp sharded-worker forwards traffic and cleans up counters" {
+    var harness = try startTcpForwardHarness(.{
+        .tcp_session_model_enabled = true,
+        .tcp_session_model_workers = 4,
+        .tcp_session_model_sharded_accept = true,
+    });
+    defer harness.deinit(std.testing.allocator);
+
+    const stream = try connectRelayStream(harness.alloc.port);
+    _ = try std.posix.write(stream.handle, "ping");
+    var buf: [4]u8 = undefined;
+    const amt = try std.posix.read(stream.handle, &buf);
+    try std.testing.expectEqual(@as(usize, 4), amt);
+    try std.testing.expectEqualStrings("ping", &buf);
+    stream.close();
+
+    try waitForCounterValue(&harness.metrics.tcp_session_create_total, 1, 500);
+    try waitForCounterValue(&harness.metrics.tcp_session_close_total, 1, 500);
+    try std.testing.expect(harness.metrics.tcp_listener_accept_total.load() >= 1);
+    try std.testing.expect(harness.metrics.tcp_upstream_connect_total.load() >= 1);
+    try std.testing.expectEqual(@as(u64, 0), harness.metrics.tcp_active_sessions.load());
+}
+
+test "tcp sharded-worker accept counters cover all workers" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{
+        .tcp_session_model_enabled = true,
+        .tcp_session_model_workers = 4,
+        .tcp_session_model_sharded_accept = true,
+    });
+    defer rt.deinit();
+    try rt.start();
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = 55000, .end = 55100 }, 2000);
+
+    var echo = try startTcpMultiEchoServer(16);
+    defer echo.deinit();
+
+    var alloc = try svc.createAllocation(model.Protocol.tcp, echo.port);
+    defer alloc.deinit(std.testing.allocator);
+    var updated = try svc.setTarget(alloc.id, "127.0.0.1");
+    defer updated.deinit(std.testing.allocator);
+
+    var idx: usize = 0;
+    while (idx < 16) : (idx += 1) {
+        var stream = try connectRelayStream(alloc.port);
+        _ = try std.posix.write(stream.handle, "ping");
+        var buf: [4]u8 = undefined;
+        _ = try std.posix.read(stream.handle, &buf);
+        stream.close();
+    }
+
+    try waitForCounterValue(&metrics.tcp_session_close_total, 16, 1_000);
+    const accept_hits = [_]u64{
+        metrics.tcp_listener_accept_worker0_total.load(),
+        metrics.tcp_listener_accept_worker1_total.load(),
+        metrics.tcp_listener_accept_worker2_total.load(),
+        metrics.tcp_listener_accept_worker3_total.load(),
+    };
+    var nonzero_workers: usize = 0;
+    for (accept_hits) |value| {
+        if (value > 0) nonzero_workers += 1;
+    }
+    try std.testing.expect(metrics.tcp_listener_accept_total.load() >= 16);
+    try std.testing.expect(nonzero_workers >= 2);
+}
+
+test "tcp accept-balanced forwards traffic and cleans up counters" {
+    var harness = try startTcpForwardHarness(.{
+        .tcp_session_model_enabled = true,
+        .tcp_session_model_workers = 4,
+        .tcp_session_model_accept_balanced = true,
+    });
+    defer harness.deinit(std.testing.allocator);
+
+    const stream = try connectRelayStream(harness.alloc.port);
+    _ = try std.posix.write(stream.handle, "ping");
+    var buf: [4]u8 = undefined;
+    const amt = try std.posix.read(stream.handle, &buf);
+    try std.testing.expectEqual(@as(usize, 4), amt);
+    try std.testing.expectEqualStrings("ping", &buf);
+    stream.close();
+
+    try waitForCounterValue(&harness.metrics.tcp_session_create_total, 1, 500);
+    try waitForCounterValue(&harness.metrics.tcp_session_close_total, 1, 500);
+    try std.testing.expect(harness.metrics.tcp_accept_handoff_total.load() >= 1);
+    try std.testing.expect(harness.metrics.tcp_upstream_connect_total.load() >= 1);
+    try std.testing.expectEqual(@as(u64, 0), harness.metrics.tcp_active_sessions.load());
+}
+
+test "tcp accept-balanced handoff counters cover all workers" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{
+        .tcp_session_model_enabled = true,
+        .tcp_session_model_workers = 4,
+        .tcp_session_model_accept_balanced = true,
+    });
+    defer rt.deinit();
+    try rt.start();
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = 55000, .end = 55100 }, 2000);
+
+    var echo = try startTcpMultiEchoServer(16);
+    defer echo.deinit();
+
+    var alloc = try svc.createAllocation(model.Protocol.tcp, echo.port);
+    defer alloc.deinit(std.testing.allocator);
+    var updated = try svc.setTarget(alloc.id, "127.0.0.1");
+    defer updated.deinit(std.testing.allocator);
+
+    var idx: usize = 0;
+    while (idx < 16) : (idx += 1) {
+        var stream = try connectRelayStream(alloc.port);
+        _ = try std.posix.write(stream.handle, "ping");
+        var buf: [4]u8 = undefined;
+        _ = try std.posix.read(stream.handle, &buf);
+        stream.close();
+    }
+
+    try waitForCounterValue(&metrics.tcp_session_close_total, 16, 1_000);
+    try std.testing.expect(metrics.tcp_accept_handoff_worker0_total.load() > 0);
+    try std.testing.expect(metrics.tcp_accept_handoff_worker1_total.load() > 0);
+    try std.testing.expect(metrics.tcp_accept_handoff_worker2_total.load() > 0);
+    try std.testing.expect(metrics.tcp_accept_handoff_worker3_total.load() > 0);
+}
+
 test "tcp forced-copy override wins over splice-enabled mode" {
     var harness = try startTcpForwardHarness(.{
         .tcp_splice_enabled = true,
@@ -704,6 +940,110 @@ test "runtime deinit does not hang with active tcp session in session-model mode
         .tcp_session_model_enabled = true,
     });
     var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = 55320, .end = 55420 }, 2000);
+
+    try rt.start();
+    var echo = try startTcpEchoServer();
+    defer echo.deinit();
+
+    var alloc = try svc.createAllocation(model.Protocol.tcp, echo.port);
+    defer alloc.deinit(std.testing.allocator);
+    var updated = try svc.setTarget(alloc.id, "127.0.0.1");
+    defer updated.deinit(std.testing.allocator);
+
+    const stream = try connectRelayStream(alloc.port);
+    defer closeIgnore(stream.handle);
+    try waitForCounterValue(&metrics.tcp_session_create_total, 1, 500);
+
+    rt.deinit();
+    try std.testing.expectEqual(@as(u64, 0), metrics.tcp_active_sessions.load());
+    try std.testing.expect(metrics.tcp_session_close_total.load() >= 1);
+}
+
+test "runtime deinit does not hang with active tcp session in workerized session-model mode" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{
+        .tcp_session_model_enabled = true,
+        .tcp_session_model_workers = 2,
+    });
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = 55440, .end = 55540 }, 2000);
+
+    try rt.start();
+    var echo = try startTcpEchoServer();
+    defer echo.deinit();
+
+    var alloc = try svc.createAllocation(model.Protocol.tcp, echo.port);
+    defer alloc.deinit(std.testing.allocator);
+    var updated = try svc.setTarget(alloc.id, "127.0.0.1");
+    defer updated.deinit(std.testing.allocator);
+
+    const stream = try connectRelayStream(alloc.port);
+    defer closeIgnore(stream.handle);
+    try waitForCounterValue(&metrics.tcp_session_create_total, 1, 500);
+
+    rt.deinit();
+    try std.testing.expectEqual(@as(u64, 0), metrics.tcp_active_sessions.load());
+    try std.testing.expect(metrics.tcp_session_close_total.load() >= 1);
+}
+
+test "runtime deinit does not hang with active tcp session in sharded-worker mode" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{
+        .tcp_session_model_enabled = true,
+        .tcp_session_model_workers = 4,
+        .tcp_session_model_sharded_accept = true,
+    });
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = 55560, .end = 55660 }, 2000);
+
+    try rt.start();
+    var echo = try startTcpEchoServer();
+    defer echo.deinit();
+
+    var alloc = try svc.createAllocation(model.Protocol.tcp, echo.port);
+    defer alloc.deinit(std.testing.allocator);
+    var updated = try svc.setTarget(alloc.id, "127.0.0.1");
+    defer updated.deinit(std.testing.allocator);
+
+    const stream = try connectRelayStream(alloc.port);
+    defer closeIgnore(stream.handle);
+    try waitForCounterValue(&metrics.tcp_session_create_total, 1, 500);
+
+    rt.deinit();
+    try std.testing.expectEqual(@as(u64, 0), metrics.tcp_active_sessions.load());
+    try std.testing.expect(metrics.tcp_session_close_total.load() >= 1);
+}
+
+test "runtime deinit does not hang with active tcp session in accept-balanced mode" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{
+        .tcp_session_model_enabled = true,
+        .tcp_session_model_workers = 4,
+        .tcp_session_model_accept_balanced = true,
+    });
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = 55680, .end = 55780 }, 2000);
 
     try rt.start();
     var echo = try startTcpEchoServer();

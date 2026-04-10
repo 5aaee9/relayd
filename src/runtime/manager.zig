@@ -21,6 +21,9 @@ pub const ObservedState = struct {
 
 pub const Options = struct {
     tcp_session_model_enabled: bool = false,
+    tcp_session_model_workers: u32 = 0,
+    tcp_session_model_accept_balanced: bool = false,
+    tcp_session_model_sharded_accept: bool = false,
     tcp_splice_enabled: bool = false,
     force_tcp_copy_fallback: bool = false,
     tcp_splice_test_mode: TcpSpliceTestMode = .off,
@@ -39,6 +42,9 @@ pub const RuntimeManager = struct {
     allocator: std.mem.Allocator,
     metrics: *Metrics,
     tcp_session_model_enabled: bool,
+    tcp_session_model_workers: u32,
+    tcp_session_model_accept_balanced: bool,
+    tcp_session_model_sharded_accept: bool,
     tcp_splice_enabled: bool,
     force_tcp_copy_fallback: bool,
     tcp_splice_test_mode: TcpSpliceTestMode,
@@ -56,13 +62,27 @@ pub const RuntimeManager = struct {
     tcp_sessions: std.ArrayList(*TcpSessionCtx),
     tcp_runtime_sessions: std.ArrayList(*TcpRuntimeSession),
     tcp_runtime_session_fds: std.AutoHashMap(posix.fd_t, *TcpRuntimeSession),
+    tcp_session_workers: []TcpSessionWorker,
+    next_tcp_session_worker: usize,
 
     pub fn init(allocator: std.mem.Allocator, metrics: *Metrics, options: Options) !RuntimeManager {
         const epoll_fd = try posix.epoll_create1(0);
+        const worker_count: u32 = if (options.tcp_session_model_enabled and options.tcp_session_model_workers > 1) @min(options.tcp_session_model_workers, 4) else 0;
+        const tcp_session_workers = if (worker_count > 0)
+            try initTcpSessionWorkers(allocator, metrics, worker_count)
+        else
+            try allocator.alloc(TcpSessionWorker, 0);
+        errdefer {
+            deinitTcpSessionWorkers(allocator, tcp_session_workers);
+            posix.close(epoll_fd);
+        }
         return .{
             .allocator = allocator,
             .metrics = metrics,
             .tcp_session_model_enabled = options.tcp_session_model_enabled,
+            .tcp_session_model_workers = worker_count,
+            .tcp_session_model_accept_balanced = options.tcp_session_model_accept_balanced,
+            .tcp_session_model_sharded_accept = options.tcp_session_model_sharded_accept,
             .tcp_splice_enabled = options.tcp_splice_enabled,
             .force_tcp_copy_fallback = options.force_tcp_copy_fallback,
             .tcp_splice_test_mode = options.tcp_splice_test_mode,
@@ -80,10 +100,14 @@ pub const RuntimeManager = struct {
             .tcp_sessions = .{},
             .tcp_runtime_sessions = .{},
             .tcp_runtime_session_fds = std.AutoHashMap(posix.fd_t, *TcpRuntimeSession).init(allocator),
+            .tcp_session_workers = tcp_session_workers,
+            .next_tcp_session_worker = 0,
         };
     }
 
     pub fn start(self: *RuntimeManager) !void {
+        try self.startTcpSessionWorkers();
+        errdefer self.stopTcpSessionWorkers();
         self.thread = try std.Thread.spawn(.{}, threadMain, .{self});
     }
 
@@ -91,6 +115,26 @@ pub const RuntimeManager = struct {
         self.setStop();
         if (self.thread) |thread| thread.join();
         self.thread = null;
+        self.stopTcpSessionWorkers();
+    }
+
+    fn startTcpSessionWorkers(self: *RuntimeManager) !void {
+        for (self.tcp_session_workers) |*worker| {
+            worker.thread = try std.Thread.spawn(.{}, tcpSessionWorkerThread, .{worker});
+        }
+    }
+
+    fn stopTcpSessionWorkers(self: *RuntimeManager) void {
+        for (self.tcp_session_workers) |*worker| {
+            worker.stop_flag.store(true, .monotonic);
+            wakeTcpSessionWorker(worker);
+        }
+        for (self.tcp_session_workers) |*worker| {
+            if (worker.thread) |thread| {
+                thread.join();
+                worker.thread = null;
+            }
+        }
     }
 
     pub fn deinit(self: *RuntimeManager) void {
@@ -110,12 +154,23 @@ pub const RuntimeManager = struct {
         self.shutdownTcpRuntimeSessions();
         self.tcp_runtime_sessions.deinit(self.allocator);
         self.tcp_runtime_session_fds.deinit();
+        deinitTcpSessionWorkers(self.allocator, self.tcp_session_workers);
         posix.close(self.epoll_fd);
     }
 
     pub fn create(self: *RuntimeManager, allocation: model.Allocation, timeout_ms: u32) !void {
         _ = timeout_ms;
         const entry = try self.createEntry(allocation);
+        if (self.useShardedTcpListeners(entry)) {
+            self.bindShardedTcpListeners(entry) catch {
+                destroyEntry(self.allocator, entry);
+                self.metrics.bind_fail_total.inc();
+                return error.RuntimeCreateFailed;
+            };
+            try self.addToRegistry(entry);
+            self.metrics.allocations_total.inc();
+            return;
+        }
         if (self.bindEntry(entry)) |fd| {
             entry.fd = fd;
             try self.addToRegistry(entry);
@@ -131,6 +186,21 @@ pub const RuntimeManager = struct {
     pub fn restore(self: *RuntimeManager, allocation: model.Allocation, timeout_ms: u32) !void {
         _ = timeout_ms;
         const entry = try self.createEntry(allocation);
+        if (self.useShardedTcpListeners(entry)) {
+            if (self.bindShardedTcpListeners(entry)) |_| {
+                try self.addToRegistry(entry);
+                self.metrics.allocations_total.inc();
+                return;
+            } else |err| {
+                entry.status = .degraded_bind_failed;
+                entry.error_kind = .bind_failed;
+                entry.last_error = dupErr(self.allocator, @errorName(err)) catch null;
+                try self.addToRegistry(entry);
+                self.metrics.bind_fail_total.inc();
+                self.metrics.restore_failures_total.inc();
+                return;
+            }
+        }
         if (self.bindEntry(entry)) |fd| {
             entry.fd = fd;
             try self.addToRegistry(entry);
@@ -168,7 +238,7 @@ pub const RuntimeManager = struct {
             return;
         }
 
-        if (entry.fd == null) {
+        if (entry.fd == null and entry.tcp_worker_listener_fds == null) {
             entry.status = .degraded_apply_failed;
             entry.error_kind = .apply_failed;
             setLastError(self.allocator, entry, "listener unavailable") catch {};
@@ -183,6 +253,10 @@ pub const RuntimeManager = struct {
         clearLastError(self.allocator, entry);
         closeUdpSessions(self.allocator, entry);
         self.metrics.runtime_apply_total.inc();
+    }
+
+    fn useShardedTcpListeners(self: *RuntimeManager, entry: *const ListenerEntry) bool {
+        return entry.protocol == .tcp and self.tcp_session_model_enabled and self.tcp_session_model_workers > 1 and self.tcp_session_model_sharded_accept;
     }
 
     pub fn delete(self: *RuntimeManager, id: []const u8, timeout_ms: u32) !void {
@@ -359,6 +433,7 @@ pub const RuntimeManager = struct {
             .error_kind = null,
             .last_error = null,
             .fd = null,
+            .tcp_worker_listener_fds = null,
             .mutex = .{},
             .udp_sessions = std.AutoHashMap(ClientKey, *UdpSession).init(self.allocator),
             .udp_cached_key = null,
@@ -379,9 +454,39 @@ pub const RuntimeManager = struct {
 
     fn bindEntry(self: *RuntimeManager, entry: *ListenerEntry) !posix.fd_t {
         return switch (entry.protocol) {
-            .tcp => try bindTcpListener(entry.port, self.epoll_fd),
+            .tcp => try bindTcpListener(entry.port, self.epoll_fd, false),
             .udp => try bindUdpSocket(entry.port, self.epoll_fd, self.udp_socket_recv_buffer_bytes, self.udp_socket_send_buffer_bytes),
         };
+    }
+
+    fn bindShardedTcpListeners(self: *RuntimeManager, entry: *ListenerEntry) !void {
+        std.debug.assert(self.tcp_session_workers.len > 0);
+        const fds = try self.allocator.alloc(posix.fd_t, self.tcp_session_workers.len);
+        errdefer self.allocator.free(fds);
+        @memset(fds, -1);
+        var idx: usize = 0;
+        errdefer {
+            for (fds, 0..) |fd, worker_idx| {
+                if (fd >= 0) {
+                    if (worker_idx < self.tcp_session_workers.len) {
+                        _ = self.tcp_session_workers[worker_idx].listener_fds.remove(fd);
+                    }
+                    closeIgnoreBadFd(fd);
+                }
+            }
+        }
+        while (idx < self.tcp_session_workers.len) : (idx += 1) {
+            const worker = &self.tcp_session_workers[idx];
+            const fd = try bindTcpListener(entry.port, worker.epoll_fd, true);
+            fds[idx] = fd;
+            worker.mutex.lock();
+            worker.listener_fds.put(fd, entry) catch |err| {
+                worker.mutex.unlock();
+                return err;
+            };
+            worker.mutex.unlock();
+        }
+        entry.tcp_worker_listener_fds = fds;
     }
 
     fn closeEntryFd(self: *RuntimeManager, entry: *ListenerEntry) void {
@@ -389,6 +494,24 @@ pub const RuntimeManager = struct {
             _ = self.listener_fds.remove(fd);
             closeIgnoreBadFd(fd);
             entry.fd = null;
+        }
+        self.closeEntryWorkerListenerFds(entry);
+    }
+
+    fn closeEntryWorkerListenerFds(self: *RuntimeManager, entry: *ListenerEntry) void {
+        const fds = entry.tcp_worker_listener_fds orelse return;
+        defer {
+            self.allocator.free(fds);
+            entry.tcp_worker_listener_fds = null;
+        }
+        for (fds, 0..) |fd, idx| {
+            if (fd < 0) continue;
+            if (idx < self.tcp_session_workers.len) {
+                self.tcp_session_workers[idx].mutex.lock();
+                _ = self.tcp_session_workers[idx].listener_fds.remove(fd);
+                self.tcp_session_workers[idx].mutex.unlock();
+            }
+            closeIgnoreBadFd(fd);
         }
     }
 
@@ -405,34 +528,7 @@ pub const RuntimeManager = struct {
             self.removeTcpRuntimeSession(session);
             return;
         }
-        self.updateTcpRuntimeSessionInterest(session);
-    }
-
-    fn updateTcpRuntimeSessionInterest(self: *RuntimeManager, session: *TcpRuntimeSession) void {
-        var client_events: u32 = std.os.linux.EPOLL.ERR | std.os.linux.EPOLL.RDHUP | std.os.linux.EPOLL.HUP;
-        if (!session.client_read_closed and session.client_to_upstream.writableLen() > 0) {
-            client_events |= std.os.linux.EPOLL.IN;
-        }
-        if (session.upstream_to_client.readableLen() > 0) {
-            client_events |= std.os.linux.EPOLL.OUT;
-        }
-
-        var upstream_events: u32 = std.os.linux.EPOLL.ERR | std.os.linux.EPOLL.RDHUP | std.os.linux.EPOLL.HUP;
-        if (!session.upstream_connected) {
-            upstream_events |= std.os.linux.EPOLL.OUT;
-        } else {
-            if (!session.upstream_read_closed and session.upstream_to_client.writableLen() > 0) {
-                upstream_events |= std.os.linux.EPOLL.IN;
-            }
-            if (session.client_to_upstream.readableLen() > 0) {
-                upstream_events |= std.os.linux.EPOLL.OUT;
-            }
-        }
-
-        var client_event = std.os.linux.epoll_event{ .events = client_events, .data = .{ .fd = session.client_fd } };
-        posix.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_MOD, session.client_fd, &client_event) catch {};
-        var upstream_event = std.os.linux.epoll_event{ .events = upstream_events, .data = .{ .fd = session.upstream_fd } };
-        posix.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_MOD, session.upstream_fd, &upstream_event) catch {};
+        updateTcpRuntimeSessionInterest(self.epoll_fd, session);
     }
 
     fn removeTcpRuntimeSession(self: *RuntimeManager, session: *TcpRuntimeSession) void {
@@ -470,6 +566,374 @@ pub const RuntimeManager = struct {
     }
 };
 
+fn updateTcpRuntimeSessionInterest(epoll_fd: posix.fd_t, session: *TcpRuntimeSession) void {
+    var client_events: u32 = std.os.linux.EPOLL.ERR | std.os.linux.EPOLL.RDHUP | std.os.linux.EPOLL.HUP;
+    if (!session.client_read_closed and session.client_to_upstream.writableLen() > 0) {
+        client_events |= std.os.linux.EPOLL.IN;
+    }
+    if (session.upstream_to_client.readableLen() > 0) {
+        client_events |= std.os.linux.EPOLL.OUT;
+    }
+
+    var upstream_events: u32 = std.os.linux.EPOLL.ERR | std.os.linux.EPOLL.RDHUP | std.os.linux.EPOLL.HUP;
+    if (!session.upstream_connected) {
+        upstream_events |= std.os.linux.EPOLL.OUT;
+    } else {
+        if (!session.upstream_read_closed and session.upstream_to_client.writableLen() > 0) {
+            upstream_events |= std.os.linux.EPOLL.IN;
+        }
+        if (session.client_to_upstream.readableLen() > 0) {
+            upstream_events |= std.os.linux.EPOLL.OUT;
+        }
+    }
+
+    var client_event = std.os.linux.epoll_event{ .events = client_events, .data = .{ .fd = session.client_fd } };
+    posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_MOD, session.client_fd, &client_event) catch {};
+    var upstream_event = std.os.linux.epoll_event{ .events = upstream_events, .data = .{ .fd = session.upstream_fd } };
+    posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_MOD, session.upstream_fd, &upstream_event) catch {};
+}
+
+fn dispatchTcpRuntimeSessionToWorker(manager: *RuntimeManager, session: *TcpRuntimeSession) !void {
+    std.debug.assert(manager.tcp_session_workers.len > 0);
+    const worker_index = manager.next_tcp_session_worker % manager.tcp_session_workers.len;
+    manager.next_tcp_session_worker = (worker_index + 1) % manager.tcp_session_workers.len;
+    var worker = &manager.tcp_session_workers[worker_index];
+    worker.mutex.lock();
+    defer worker.mutex.unlock();
+    try worker.pending_sessions.append(worker.allocator, session);
+    manager.metrics.tcp_session_worker_dispatch_total.inc();
+    switch (worker_index) {
+        0 => manager.metrics.tcp_session_worker0_dispatch_total.inc(),
+        1 => manager.metrics.tcp_session_worker1_dispatch_total.inc(),
+        else => {},
+    }
+    wakeTcpSessionWorker(worker);
+}
+
+fn dispatchAcceptedTcpSessionToWorker(manager: *RuntimeManager, entry: *ListenerEntry, client_fd: posix.fd_t) !void {
+    std.debug.assert(manager.tcp_session_workers.len > 0);
+    const host = try manager.allocator.dupe(u8, entry.effective_host.?);
+    errdefer manager.allocator.free(host);
+
+    const worker_index = manager.next_tcp_session_worker % manager.tcp_session_workers.len;
+    manager.next_tcp_session_worker = (worker_index + 1) % manager.tcp_session_workers.len;
+    var worker = &manager.tcp_session_workers[worker_index];
+    worker.mutex.lock();
+    defer worker.mutex.unlock();
+    try worker.pending_accepts.append(worker.allocator, .{
+        .client_fd = client_fd,
+        .host = host,
+        .port = entry.effective_target_port.?,
+    });
+    manager.metrics.tcp_accept_handoff_total.inc();
+    switch (worker_index) {
+        0 => manager.metrics.tcp_accept_handoff_worker0_total.inc(),
+        1 => manager.metrics.tcp_accept_handoff_worker1_total.inc(),
+        2 => manager.metrics.tcp_accept_handoff_worker2_total.inc(),
+        3 => manager.metrics.tcp_accept_handoff_worker3_total.inc(),
+        else => {},
+    }
+    wakeTcpSessionWorker(worker);
+}
+
+fn wakeTcpSessionWorker(worker: *TcpSessionWorker) void {
+    const one = [_]u8{1};
+    _ = posix.write(worker.wake_write_fd, &one) catch {};
+}
+
+fn drainTcpSessionWorkerWakePipe(worker: *TcpSessionWorker) void {
+    var buffer: [64]u8 = undefined;
+    while (true) {
+        const amt = posix.read(worker.wake_read_fd, &buffer) catch |err| switch (err) {
+            error.WouldBlock => return,
+            else => return,
+        };
+        if (amt == 0) return;
+    }
+}
+
+fn tcpSessionWorkerThread(worker: *TcpSessionWorker) void {
+    var wake_event = std.os.linux.epoll_event{ .events = std.os.linux.EPOLL.IN, .data = .{ .fd = worker.wake_read_fd } };
+    posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, worker.wake_read_fd, &wake_event) catch return;
+    var events: [64]std.os.linux.epoll_event = undefined;
+    while (!worker.stop_flag.load(.monotonic)) {
+        attachPendingAcceptedTcpSessions(worker);
+        attachPendingTcpRuntimeSessions(worker);
+        const count = posix.epoll_wait(worker.epoll_fd, events[0..], 100);
+        for (events[0..count]) |event| {
+            const fd: posix.fd_t = @intCast(event.data.fd);
+            if (fd == worker.wake_read_fd) {
+                drainTcpSessionWorkerWakePipe(worker);
+                attachPendingAcceptedTcpSessions(worker);
+                attachPendingTcpRuntimeSessions(worker);
+                continue;
+            }
+            worker.mutex.lock();
+            const maybe_entry = worker.listener_fds.get(fd);
+            worker.mutex.unlock();
+            if (maybe_entry) |entry| {
+                handleTcpWorkerAccept(worker, entry, fd);
+                continue;
+            }
+            if (worker.session_fds.get(fd)) |session| {
+                worker.metrics.tcp_session_event_total.inc();
+                if (fd == session.upstream_fd and !session.upstream_connected) {
+                    finishTcpRuntimeConnect(session) catch {
+                        removeTcpRuntimeSessionFromWorker(worker, session);
+                        continue;
+                    };
+                }
+                driveTcpRuntimeSession(session);
+                if (shouldCloseTcpRuntimeSession(session)) {
+                    removeTcpRuntimeSessionFromWorker(worker, session);
+                    continue;
+                }
+                updateTcpRuntimeSessionInterest(worker.epoll_fd, session);
+            }
+        }
+    }
+    attachPendingAcceptedTcpSessions(worker);
+    attachPendingTcpRuntimeSessions(worker);
+    shutdownTcpRuntimeSessionsInWorker(worker);
+    posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_DEL, worker.wake_read_fd, null) catch {};
+}
+
+fn attachPendingAcceptedTcpSessions(worker: *TcpSessionWorker) void {
+    worker.mutex.lock();
+    defer worker.mutex.unlock();
+    while (worker.pending_accepts.items.len > 0) {
+        const pending = worker.pending_accepts.swapRemove(worker.pending_accepts.items.len - 1);
+        startTcpAcceptedRuntimeSessionOnWorker(worker, pending) catch {
+            closeIgnoreBadFd(pending.client_fd);
+            worker.allocator.free(pending.host);
+            continue;
+        };
+    }
+}
+
+fn attachPendingTcpRuntimeSessions(worker: *TcpSessionWorker) void {
+    worker.mutex.lock();
+    defer worker.mutex.unlock();
+    while (worker.pending_sessions.items.len > 0) {
+        const session = worker.pending_sessions.swapRemove(worker.pending_sessions.items.len - 1);
+        worker.sessions.append(worker.allocator, session) catch {
+            closeIgnoreBadFd(session.client_fd);
+            closeIgnoreBadFd(session.upstream_fd);
+            worker.metrics.tcp_active_sessions.dec();
+            worker.metrics.tcp_session_close_total.inc();
+            worker.allocator.destroy(session);
+            continue;
+        };
+        worker.session_fds.put(session.client_fd, session) catch {
+            _ = worker.sessions.pop();
+            closeIgnoreBadFd(session.client_fd);
+            closeIgnoreBadFd(session.upstream_fd);
+            worker.metrics.tcp_active_sessions.dec();
+            worker.metrics.tcp_session_close_total.inc();
+            worker.allocator.destroy(session);
+            continue;
+        };
+        worker.session_fds.put(session.upstream_fd, session) catch {
+            _ = worker.session_fds.remove(session.client_fd);
+            _ = worker.sessions.pop();
+            closeIgnoreBadFd(session.client_fd);
+            closeIgnoreBadFd(session.upstream_fd);
+            worker.metrics.tcp_active_sessions.dec();
+            worker.metrics.tcp_session_close_total.inc();
+            worker.allocator.destroy(session);
+            continue;
+        };
+        var client_event = std.os.linux.epoll_event{ .events = 0, .data = .{ .fd = session.client_fd } };
+        posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, session.client_fd, &client_event) catch {
+            removeTcpRuntimeSessionFromWorker(worker, session);
+            continue;
+        };
+        var upstream_event = std.os.linux.epoll_event{ .events = 0, .data = .{ .fd = session.upstream_fd } };
+        posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, session.upstream_fd, &upstream_event) catch {
+            removeTcpRuntimeSessionFromWorker(worker, session);
+            continue;
+        };
+        updateTcpRuntimeSessionInterest(worker.epoll_fd, session);
+    }
+}
+
+fn removeTcpRuntimeSessionFromWorker(worker: *TcpSessionWorker, session: *TcpRuntimeSession) void {
+    _ = worker.session_fds.remove(session.client_fd);
+    _ = worker.session_fds.remove(session.upstream_fd);
+    posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_DEL, session.client_fd, null) catch {};
+    posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_DEL, session.upstream_fd, null) catch {};
+    closeIgnoreBadFd(session.client_fd);
+    closeIgnoreBadFd(session.upstream_fd);
+    var idx: usize = 0;
+    while (idx < worker.sessions.items.len) : (idx += 1) {
+        if (worker.sessions.items[idx] == session) {
+            _ = worker.sessions.swapRemove(idx);
+            break;
+        }
+    }
+    worker.metrics.tcp_active_sessions.dec();
+    worker.metrics.tcp_session_close_total.inc();
+    worker.allocator.destroy(session);
+}
+
+fn shutdownTcpRuntimeSessionsInWorker(worker: *TcpSessionWorker) void {
+    while (worker.sessions.items.len > 0) {
+        const session = worker.sessions.pop() orelse break;
+        _ = worker.session_fds.remove(session.client_fd);
+        _ = worker.session_fds.remove(session.upstream_fd);
+        closeIgnoreBadFd(session.client_fd);
+        closeIgnoreBadFd(session.upstream_fd);
+        worker.metrics.tcp_active_sessions.dec();
+        worker.metrics.tcp_session_close_total.inc();
+        worker.allocator.destroy(session);
+    }
+    while (worker.pending_sessions.items.len > 0) {
+        const session = worker.pending_sessions.pop() orelse break;
+        closeIgnoreBadFd(session.client_fd);
+        closeIgnoreBadFd(session.upstream_fd);
+        worker.metrics.tcp_active_sessions.dec();
+        worker.metrics.tcp_session_close_total.inc();
+        worker.allocator.destroy(session);
+    }
+}
+
+fn handleTcpWorkerAccept(worker: *TcpSessionWorker, entry: *ListenerEntry, listen_fd: posix.fd_t) void {
+    while (true) {
+        var addr: net.Address = undefined;
+        var len: posix.socklen_t = @sizeOf(net.Address);
+        const conn_fd = posix.accept(listen_fd, &addr.any, &len, posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK) catch |err| switch (err) {
+            error.WouldBlock => break,
+            else => break,
+        };
+        worker.metrics.tcp_listener_accept_total.inc();
+        switch (worker.index) {
+            0 => worker.metrics.tcp_listener_accept_worker0_total.inc(),
+            1 => worker.metrics.tcp_listener_accept_worker1_total.inc(),
+            2 => worker.metrics.tcp_listener_accept_worker2_total.inc(),
+            3 => worker.metrics.tcp_listener_accept_worker3_total.inc(),
+            else => {},
+        }
+        entry.mutex.lock();
+        if (entry.status != .active or entry.effective_host == null or entry.effective_target_port == null) {
+            entry.mutex.unlock();
+            worker.metrics.rejected_no_host_total.inc();
+            closeIgnoreBadFd(conn_fd);
+            continue;
+        }
+        startTcpRuntimeSessionOnWorker(worker, entry, conn_fd) catch {
+            entry.mutex.unlock();
+            closeIgnoreBadFd(conn_fd);
+            continue;
+        };
+        entry.mutex.unlock();
+    }
+}
+
+fn startTcpRuntimeSessionOnWorker(worker: *TcpSessionWorker, entry: *ListenerEntry, client_fd: posix.fd_t) !void {
+    const host = entry.effective_host.?;
+    const port = entry.effective_target_port.?;
+    const addr = try config_mod.parseIpLiteral(host, port);
+    const family: u32 = switch (addr.any.family) {
+        std.posix.AF.INET => std.posix.AF.INET,
+        std.posix.AF.INET6 => std.posix.AF.INET6,
+        else => return error.AddressFamilyNotSupported,
+    };
+    const upstream_fd = try posix.socket(family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, posix.IPPROTO.TCP);
+    errdefer closeIgnoreBadFd(upstream_fd);
+    worker.metrics.tcp_upstream_connect_total.inc();
+
+    const upstream_connected = blk: {
+        posix.connect(upstream_fd, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
+            error.WouldBlock, error.ConnectionPending => break :blk false,
+            else => {
+                worker.metrics.tcp_upstream_connect_fail_total.inc();
+                return err;
+            },
+        };
+        break :blk true;
+    };
+
+    const session = try worker.allocator.create(TcpRuntimeSession);
+    errdefer worker.allocator.destroy(session);
+    session.* = .{
+        .client_fd = client_fd,
+        .upstream_fd = upstream_fd,
+        .upstream_connected = upstream_connected,
+        .client_read_closed = false,
+        .upstream_read_closed = false,
+        .client_shutdown_sent = false,
+        .upstream_shutdown_sent = false,
+    };
+
+    try worker.sessions.append(worker.allocator, session);
+    errdefer _ = worker.sessions.pop();
+    try worker.session_fds.put(client_fd, session);
+    errdefer _ = worker.session_fds.remove(client_fd);
+    try worker.session_fds.put(upstream_fd, session);
+    errdefer _ = worker.session_fds.remove(upstream_fd);
+
+    var client_event = std.os.linux.epoll_event{ .events = 0, .data = .{ .fd = client_fd } };
+    try posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, client_fd, &client_event);
+    errdefer posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_DEL, client_fd, null) catch {};
+    var upstream_event = std.os.linux.epoll_event{ .events = 0, .data = .{ .fd = upstream_fd } };
+    try posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, upstream_fd, &upstream_event);
+    updateTcpRuntimeSessionInterest(worker.epoll_fd, session);
+    worker.metrics.tcp_session_create_total.inc();
+    worker.metrics.tcp_active_sessions.inc();
+}
+
+fn startTcpAcceptedRuntimeSessionOnWorker(worker: *TcpSessionWorker, pending: PendingAcceptedTcpSession) !void {
+    defer worker.allocator.free(pending.host);
+    const addr = try config_mod.parseIpLiteral(pending.host, pending.port);
+    const family: u32 = switch (addr.any.family) {
+        std.posix.AF.INET => std.posix.AF.INET,
+        std.posix.AF.INET6 => std.posix.AF.INET6,
+        else => return error.AddressFamilyNotSupported,
+    };
+    const upstream_fd = try posix.socket(family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, posix.IPPROTO.TCP);
+    errdefer closeIgnoreBadFd(upstream_fd);
+    worker.metrics.tcp_upstream_connect_total.inc();
+
+    const upstream_connected = blk: {
+        posix.connect(upstream_fd, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
+            error.WouldBlock, error.ConnectionPending => break :blk false,
+            else => {
+                worker.metrics.tcp_upstream_connect_fail_total.inc();
+                return err;
+            },
+        };
+        break :blk true;
+    };
+
+    const session = try worker.allocator.create(TcpRuntimeSession);
+    errdefer worker.allocator.destroy(session);
+    session.* = .{
+        .client_fd = pending.client_fd,
+        .upstream_fd = upstream_fd,
+        .upstream_connected = upstream_connected,
+        .client_read_closed = false,
+        .upstream_read_closed = false,
+        .client_shutdown_sent = false,
+        .upstream_shutdown_sent = false,
+    };
+
+    try worker.sessions.append(worker.allocator, session);
+    errdefer _ = worker.sessions.pop();
+    try worker.session_fds.put(pending.client_fd, session);
+    errdefer _ = worker.session_fds.remove(pending.client_fd);
+    try worker.session_fds.put(upstream_fd, session);
+    errdefer _ = worker.session_fds.remove(upstream_fd);
+
+    var client_event = std.os.linux.epoll_event{ .events = 0, .data = .{ .fd = pending.client_fd } };
+    try posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, pending.client_fd, &client_event);
+    errdefer posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_DEL, pending.client_fd, null) catch {};
+    var upstream_event = std.os.linux.epoll_event{ .events = 0, .data = .{ .fd = upstream_fd } };
+    try posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, upstream_fd, &upstream_event);
+    updateTcpRuntimeSessionInterest(worker.epoll_fd, session);
+    worker.metrics.tcp_session_create_total.inc();
+    worker.metrics.tcp_active_sessions.inc();
+}
+
 const ListenerEntry = struct {
     allocator: std.mem.Allocator,
     manager: *RuntimeManager,
@@ -484,6 +948,7 @@ const ListenerEntry = struct {
     error_kind: ?model.ErrorKind,
     last_error: ?[]u8,
     fd: ?posix.fd_t,
+    tcp_worker_listener_fds: ?[]posix.fd_t,
     mutex: std.Thread.Mutex,
     udp_sessions: std.AutoHashMap(ClientKey, *UdpSession),
     udp_cached_key: ?ClientKey,
@@ -529,6 +994,7 @@ fn destroyEntry(allocator: std.mem.Allocator, entry: *ListenerEntry) void {
     if (entry.last_error) |msg| allocator.free(msg);
     closeUdpSessions(allocator, entry);
     entry.udp_sessions.deinit();
+    if (entry.tcp_worker_listener_fds) |fds| allocator.free(fds);
     allocator.destroy(entry);
 }
 
@@ -564,11 +1030,14 @@ fn replaceOptionalString(allocator: std.mem.Allocator, target: *?[]u8, value: ?[
     target.* = if (value) |text| try allocator.dupe(u8, text) else null;
 }
 
-fn bindTcpListener(port: u16, epoll_fd: posix.fd_t) !posix.fd_t {
+fn bindTcpListener(port: u16, epoll_fd: posix.fd_t, reuse_port: bool) !posix.fd_t {
     const fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, posix.IPPROTO.TCP);
     errdefer posix.close(fd);
     var one: c_int = 1;
     try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&one));
+    if (reuse_port) {
+        try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEPORT, std.mem.asBytes(&one));
+    }
     const addr = try net.Address.parseIp4("0.0.0.0", port);
     try posix.bind(fd, &addr.any, addr.getOsSockLen());
     try posix.listen(fd, 128);
@@ -662,6 +1131,86 @@ const TcpRuntimeSession = struct {
     upstream_to_client: TcpRuntimeBuffer = .{},
 };
 
+const PendingAcceptedTcpSession = struct {
+    client_fd: posix.fd_t,
+    host: []u8,
+    port: u16,
+};
+
+const TcpSessionWorker = struct {
+    allocator: std.mem.Allocator,
+    metrics: *Metrics,
+    index: usize,
+    epoll_fd: posix.fd_t,
+    wake_read_fd: posix.fd_t,
+    wake_write_fd: posix.fd_t,
+    thread: ?std.Thread = null,
+    stop_flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    mutex: std.Thread.Mutex = .{},
+    pending_accepts: std.ArrayList(PendingAcceptedTcpSession),
+    pending_sessions: std.ArrayList(*TcpRuntimeSession),
+    sessions: std.ArrayList(*TcpRuntimeSession),
+    session_fds: std.AutoHashMap(posix.fd_t, *TcpRuntimeSession),
+    listener_fds: std.AutoHashMap(posix.fd_t, *ListenerEntry),
+};
+
+fn initTcpSessionWorkers(allocator: std.mem.Allocator, metrics: *Metrics, worker_count: u32) ![]TcpSessionWorker {
+    const workers = try allocator.alloc(TcpSessionWorker, worker_count);
+    errdefer allocator.free(workers);
+    var initialized: usize = 0;
+    errdefer {
+        var idx: usize = 0;
+        while (idx < initialized) : (idx += 1) {
+            deinitTcpSessionWorker(allocator, &workers[idx]);
+        }
+    }
+    while (initialized < worker_count) : (initialized += 1) {
+        const epoll_fd = try posix.epoll_create1(0);
+        errdefer posix.close(epoll_fd);
+        const wake_pipe = try posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+        errdefer {
+            closeIgnoreBadFd(wake_pipe[0]);
+            closeIgnoreBadFd(wake_pipe[1]);
+        }
+        workers[initialized] = .{
+            .allocator = allocator,
+            .metrics = metrics,
+            .index = initialized,
+            .epoll_fd = epoll_fd,
+            .wake_read_fd = wake_pipe[0],
+            .wake_write_fd = wake_pipe[1],
+            .pending_accepts = .{},
+            .pending_sessions = .{},
+            .sessions = .{},
+            .session_fds = std.AutoHashMap(posix.fd_t, *TcpRuntimeSession).init(allocator),
+            .listener_fds = std.AutoHashMap(posix.fd_t, *ListenerEntry).init(allocator),
+        };
+    }
+    return workers;
+}
+
+fn deinitTcpSessionWorkers(allocator: std.mem.Allocator, workers: []TcpSessionWorker) void {
+    for (workers) |*worker| deinitTcpSessionWorker(allocator, worker);
+    allocator.free(workers);
+}
+
+fn deinitTcpSessionWorker(allocator: std.mem.Allocator, worker: *TcpSessionWorker) void {
+    closeIgnoreBadFd(worker.wake_read_fd);
+    closeIgnoreBadFd(worker.wake_write_fd);
+    closeIgnoreBadFd(worker.epoll_fd);
+    while (worker.pending_accepts.items.len > 0) {
+        const pending = worker.pending_accepts.pop() orelse break;
+        closeIgnoreBadFd(pending.client_fd);
+        allocator.free(pending.host);
+    }
+    worker.pending_accepts.deinit(allocator);
+    worker.pending_sessions.deinit(allocator);
+    worker.sessions.deinit(allocator);
+    worker.session_fds.deinit();
+    worker.listener_fds.deinit();
+    worker.* = undefined;
+}
+
 const TcpSpliceFallbackReason = enum {
     forced,
     unsupported,
@@ -688,6 +1237,8 @@ const SplicePumpResult = enum {
 fn handleTcpAccept(manager: *RuntimeManager, entry: *ListenerEntry) void {
     const listen_fd = entry.fd orelse return;
     const use_runtime_session_model = manager.tcp_session_model_enabled and !manager.tcp_splice_enabled;
+    const use_workerized_session_model = use_runtime_session_model and manager.tcp_session_model_workers > 1 and !manager.tcp_session_model_sharded_accept and !manager.tcp_session_model_accept_balanced;
+    const use_accept_balanced_session_model = use_runtime_session_model and manager.tcp_session_model_workers > 1 and manager.tcp_session_model_accept_balanced and !manager.tcp_session_model_sharded_accept;
     while (true) {
         var addr: net.Address = undefined;
         var len: posix.socklen_t = @sizeOf(net.Address);
@@ -705,8 +1256,15 @@ fn handleTcpAccept(manager: *RuntimeManager, entry: *ListenerEntry) void {
             continue;
         }
 
+        if (use_accept_balanced_session_model) {
+            dispatchAcceptedTcpSessionToWorker(manager, entry, conn_fd) catch {
+                closeIgnoreBadFd(conn_fd);
+            };
+            continue;
+        }
+
         if (use_runtime_session_model) {
-            startTcpRuntimeSession(manager, entry, conn_fd) catch {
+            startTcpRuntimeSession(manager, entry, conn_fd, use_workerized_session_model) catch {
                 closeIgnoreBadFd(conn_fd);
             };
             continue;
@@ -765,7 +1323,7 @@ fn handleTcpAccept(manager: *RuntimeManager, entry: *ListenerEntry) void {
     }
 }
 
-fn startTcpRuntimeSession(manager: *RuntimeManager, entry: *ListenerEntry, client_fd: posix.fd_t) !void {
+fn startTcpRuntimeSession(manager: *RuntimeManager, entry: *ListenerEntry, client_fd: posix.fd_t, workerized: bool) !void {
     const host = entry.effective_host.?;
     const port = entry.effective_target_port.?;
     const addr = try config_mod.parseIpLiteral(host, port);
@@ -797,6 +1355,13 @@ fn startTcpRuntimeSession(manager: *RuntimeManager, entry: *ListenerEntry, clien
         .upstream_shutdown_sent = false,
     };
 
+    if (workerized) {
+        try dispatchTcpRuntimeSessionToWorker(manager, session);
+        manager.metrics.tcp_session_create_total.inc();
+        manager.metrics.tcp_active_sessions.inc();
+        return;
+    }
+
     try manager.tcp_runtime_sessions.append(manager.allocator, session);
     errdefer _ = manager.tcp_runtime_sessions.pop();
     try manager.tcp_runtime_session_fds.put(client_fd, session);
@@ -809,10 +1374,9 @@ fn startTcpRuntimeSession(manager: *RuntimeManager, entry: *ListenerEntry, clien
     errdefer posix.epoll_ctl(manager.epoll_fd, std.os.linux.EPOLL.CTL_DEL, client_fd, null) catch {};
     var upstream_event = std.os.linux.epoll_event{ .events = 0, .data = .{ .fd = upstream_fd } };
     try posix.epoll_ctl(manager.epoll_fd, std.os.linux.EPOLL.CTL_ADD, upstream_fd, &upstream_event);
-
+    updateTcpRuntimeSessionInterest(manager.epoll_fd, session);
     manager.metrics.tcp_session_create_total.inc();
     manager.metrics.tcp_active_sessions.inc();
-    manager.updateTcpRuntimeSessionInterest(session);
 }
 
 fn finishTcpRuntimeConnect(session: *TcpRuntimeSession) !void {
