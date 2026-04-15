@@ -43,6 +43,13 @@ pub const App = struct {
             .tcp_session_model_sharded_accept = config.tcp_session_model_sharded_accept,
             .tcp_splice_enabled = config.tcp_splice_enabled,
             .force_tcp_copy_fallback = config.force_tcp_copy_fallback,
+            .udp_session_workers = config.udp_session_workers,
+            .udp_io_uring_enabled = config.udp_io_uring_enabled,
+            .udp_gro_enabled = config.udp_gro_enabled,
+            .udp_dataplane_redesign_enabled = config.udp_dataplane_redesign_enabled,
+            .udp_fast_path_enabled = config.udp_fast_path_enabled,
+            .udp_fast_path_segment_size = config.udp_fast_path_segment_size,
+            .udp_fast_path_gso_burst = config.udp_fast_path_gso_burst,
             .udp_socket_recv_buffer_bytes = config.udp_socket_recv_buffer_bytes,
             .udp_socket_send_buffer_bytes = config.udp_socket_send_buffer_bytes,
         });

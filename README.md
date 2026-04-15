@@ -17,6 +17,13 @@ Linux-first Zig port-forwarder with:
 - `TCP_SESSION_MODEL_SHARDED_ACCEPT` — optional `true/false`, default `false`
 - `TCP_SPLICE_ENABLED` — optional `true/false`, default `false`
 - `FORCE_TCP_COPY_FALLBACK` — optional `true/false`
+- `UDP_SESSION_WORKERS` — optional worker count for UDP attribution / workerized mode, default `0`
+- `UDP_IO_URING_ENABLED` — optional `true/false`, enables the bounded io_uring UDP path
+- `UDP_GRO_ENABLED` — optional `true/false`, enables the UDP GRO receive-offload path
+- `UDP_DATAPLANE_REDESIGN_ENABLED` — optional `true/false`, enables the broader worker-owned UDP dataplane redesign path
+- `UDP_FAST_PATH_ENABLED` — optional `true/false`, default `false`
+- `UDP_FAST_PATH_SEGMENT_SIZE` — optional UDP fast-path segment size, default `1472`
+- `UDP_FAST_PATH_GSO_BURST` — optional UDP fast-path max batch size, default `16`
 - `UDP_SOCKET_RCVBUF_BYTES` — optional UDP listener/upstream receive buffer size, default `8388608`
 - `UDP_SOCKET_SNDBUF_BYTES` — optional UDP listener/upstream send buffer size, default `8388608`
 - `RUNTIME_APPLY_TIMEOUT_MS` — optional, default `2000`
@@ -77,8 +84,40 @@ Useful knobs:
 - `TCP_SESSION_MODEL_WORKERS=4 TCP_SESSION_MODEL_ACCEPT_BALANCED=1` enables the accept-balanced lane used by `TCP_COMPARE_MODE=accept-balanced`
 - `TCP_SPLICE_ENABLED` enables the relay splice path; `FORCE_TCP_COPY_FALLBACK=1` overrides it and keeps relay TCP on copy
 - `UDP_SWEEP_RATES`, `UDP_PACKET_SIZES`, `IPERF_REPETITIONS`, `UDP_MATRIX_DURATION` for matrix mode
+- `UDP_SESSION_WORKERS=1` enables the UDP attribution probe lane
+- `UDP_SESSION_WORKERS=2` (or higher) enables the UDP workerized lane
+- `UDP_COMPARE_MODE=dataplane-redesign` runs the focused fast-path-baseline vs broader UDP redesign comparison and a redesign single-worker vs redesign workerized multi-flow comparison
+- `UDP_COMPARE_MODE=fast-path` runs the focused single-flow fast-path comparison and the narrow multi-flow workerization comparison
+- `UDP_COMPARE_MODE=gro` runs the focused single-flow fast-path-baseline vs GRO comparison and then preserves the narrow multi-flow workerization comparison
+- `UDP_COMPARE_MODE=io-uring` runs the focused single-flow fast-path-baseline vs io_uring comparison and then preserves the narrow multi-flow workerization comparison
+- `UDP_COMPARE_MODE=workerized` runs the focused UDP baseline/probe/workerized comparison at `10G/1472` and `25G/1472`
+- `UDP_MULTI_FLOW_STREAMS` controls the narrow multi-flow workerization suite, default `4`
+- `UDP_MULTI_FLOW_RATE` controls the per-suite offered UDP rate for the narrow multi-flow workerization comparison, default `10G`
+- `UDP_MULTI_FLOW_PACKET_SIZE` controls the packet size for the narrow multi-flow suite, default `1472`
+- `UDP_MULTI_FLOW_DURATION` controls the duration for the narrow multi-flow suite, default `UDP_MATRIX_DURATION`
 - `UDP_SOCKET_RCVBUF_BYTES`, `UDP_SOCKET_SNDBUF_BYTES` for relay UDP socket buffer tuning
 - artifacts are written under `.zig-cache/e2e/iperf3-latest`, including:
+  - `udp-fast-path-summary.txt`
+  - `udp-fast-path-focus-10g-1472.txt`
+  - `udp-fast-path-focus-25g-1472.txt`
+  - `udp-fast-path-multiflow-summary.txt`
+  - `udp-fast-path-overall-summary.txt`
+  - `udp-gro-summary.txt`
+  - `udp-gro-focus-10g-1472.txt`
+  - `udp-gro-focus-25g-1472.txt`
+  - `udp-gro-overall-summary.txt`
+  - `udp-dataplane-redesign-summary.txt`
+  - `udp-dataplane-redesign-focus-10g-1472.txt`
+  - `udp-dataplane-redesign-focus-25g-1472.txt`
+  - `udp-dataplane-redesign-multiflow-summary.txt`
+  - `udp-dataplane-redesign-overall-summary.txt`
+  - `udp-io-uring-summary.txt`
+  - `udp-io-uring-focus-10g-1472.txt`
+  - `udp-io-uring-focus-25g-1472.txt`
+  - `udp-io-uring-overall-summary.txt`
+  - `udp-workerized-summary.txt`
+  - `udp-workerized-focus-10g-1472.txt`
+  - `udp-workerized-focus-25g-1472.txt`
   - `tcp-accept-balanced-streams-1-summary.txt`
   - `tcp-accept-balanced-streams-4-summary.txt`
   - `tcp-accept-balanced-overall-summary.txt`
@@ -100,37 +139,74 @@ Useful knobs:
   - representative direct/threaded/session-model TCP JSON/log outputs under `tcp-session-model/streams-*`
   - representative direct/copy/splice TCP JSON/log outputs under `tcp-copy-vs-splice/streams-*`
 
+Example focused UDP workerization run:
+
+```bash
+IPERF_MODE=matrix \
+UDP_COMPARE_MODE=workerized \
+UDP_SESSION_WORKERS=2 \
+IPERF_REPETITIONS=3 \
+UDP_MATRIX_DURATION=2 \
+./scripts/ci/e2e_iperf3.sh
+```
+
+Example focused UDP fast-path run:
+
+```bash
+IPERF_MODE=matrix \
+UDP_COMPARE_MODE=fast-path \
+UDP_SESSION_WORKERS=2 \
+UDP_MULTI_FLOW_STREAMS=4 \
+IPERF_REPETITIONS=3 \
+UDP_MATRIX_DURATION=2 \
+./scripts/ci/e2e_iperf3.sh
+```
+
+Example focused broader UDP dataplane redesign run:
+
+```bash
+IPERF_MODE=matrix \
+UDP_COMPARE_MODE=dataplane-redesign \
+UDP_DATAPLANE_REDESIGN_ENABLED=1 \
+UDP_MULTI_FLOW_STREAMS=4 \
+IPERF_REPETITIONS=3 \
+UDP_MATRIX_DURATION=2 \
+./scripts/ci/e2e_iperf3.sh
+```
+
+Example focused UDP GRO run:
+
+```bash
+IPERF_MODE=matrix \
+UDP_COMPARE_MODE=gro \
+UDP_GRO_ENABLED=1 \
+UDP_MULTI_FLOW_STREAMS=4 \
+IPERF_REPETITIONS=3 \
+UDP_MATRIX_DURATION=2 \
+./scripts/ci/e2e_iperf3.sh
+```
+
+Example focused UDP io_uring run:
+
+```bash
+IPERF_MODE=matrix \
+UDP_COMPARE_MODE=io-uring \
+UDP_IO_URING_ENABLED=1 \
+UDP_MULTI_FLOW_STREAMS=4 \
+IPERF_REPETITIONS=3 \
+UDP_MATRIX_DURATION=2 \
+./scripts/ci/e2e_iperf3.sh
+```
+
 ## API
-### Create
-`POST /v1/ports`
-```json
-{"protocol":"tcp","target_port":80}
-```
+Canonical API documentation lives in [`docs/API.md`](docs/API.md).
 
-### Set target host
-`POST /v1/ports/target`
-```json
-{"id":"<uuid-v7>","host":"127.0.0.1"}
-```
+Quick example:
 
-### Update
-`POST /v1/ports/{id}`
-```json
-{"target_port":8080,"host":"127.0.0.1"}
-```
-
-### Delete
-`DELETE /v1/ports/{id}`
-
-### List
-`GET /v1/ports`
-
-### Metrics
-`GET /v1/metrics`
-
-All requests must send:
-```text
-Authorization: Bearer <AUTH_TOKEN>
+```bash
+curl -sS \
+  -H "Authorization: Bearer ${AUTH_TOKEN}" \
+  http://127.0.0.1:8080/v1/ports
 ```
 
 ## Notes

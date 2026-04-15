@@ -214,6 +214,25 @@ test "http metrics endpoint exposes tcp splice counters" {
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_listener_accept_worker3_total\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_upstream_connect_total\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_upstream_connect_fail_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"udp_fast_path_packets_in_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"udp_fast_path_packets_out_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"udp_fast_path_gso_send_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"udp_fast_path_gro_recv_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"udp_io_uring_submit_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"udp_io_uring_cqe_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"udp_io_uring_fallback_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"udp_io_uring_multishot_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"udp_io_uring_buf_release_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"udp_dataplane_redesign_packets_in_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"udp_dataplane_redesign_packets_out_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"udp_fast_path_fallback_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"udp_fast_path_drop_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"udp_worker_packets_in_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"udp_worker_packets_out_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"udp_worker0_packets_in_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"udp_worker1_packets_in_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"udp_worker2_packets_in_total\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"udp_worker3_packets_in_total\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"tcp_active_sessions\":") != null);
 }
 

@@ -410,6 +410,15 @@ fn waitForCounterValue(counter: *const metrics_mod.Counter, expected: u64, timeo
     return error.Timeout;
 }
 
+fn waitForCounterAtLeast(counter: *const metrics_mod.Counter, minimum: u64, timeout_ms: u32) !void {
+    const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+    while (std.time.milliTimestamp() < deadline_ms) {
+        if (counter.load() >= minimum) return;
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+    }
+    return error.Timeout;
+}
+
 fn expectUdpReplyCountersIfActive(metrics: *const metrics_mod.Metrics, expected_primary: ?u64, min_dropped_or_stale: u64) !void {
     const primary = metrics.udp_reply_primary_total.load();
     const dropped_or_stale = metrics.udp_reply_drop_total.load() + metrics.udp_reply_stale_total.load();
@@ -429,6 +438,31 @@ const UdpBurstSenderCtx = struct {
     count: usize,
     sleep_ms: u64,
 };
+
+fn sendUdpSegmentBurst(client: std.posix.fd_t, target: std.net.Address, payload: []const u8, count: usize, segment_size: u16) !void {
+    const combined = try std.testing.allocator.alloc(u8, payload.len * count);
+    defer std.testing.allocator.free(combined);
+    var offset: usize = 0;
+    var idx: usize = 0;
+    while (idx < count) : (idx += 1) {
+        @memcpy(combined[offset .. offset + payload.len], payload);
+        offset += payload.len;
+    }
+
+    var control: [32]u8 = undefined;
+    const control_len = runtime.encodeUdpSegmentControlMessage(&control, segment_size) orelse return error.UnexpectedNull;
+    const iov = [1]std.posix.iovec_const{.{ .base = combined.ptr, .len = combined.len }};
+    const msg = std.posix.msghdr_const{
+        .name = &target.any,
+        .namelen = target.getOsSockLen(),
+        .iov = @ptrCast(&iov[0]),
+        .iovlen = 1,
+        .control = control[0..control_len].ptr,
+        .controllen = control_len,
+        .flags = 0,
+    };
+    _ = try std.posix.sendmsg(client, &msg, 0);
+}
 
 fn udpBurstSender(ctx: UdpBurstSenderCtx) void {
     const client = createUdpClient() catch return;
@@ -471,9 +505,24 @@ fn currentUdpSessionCount(rt: *runtime.RuntimeManager, id: []const u8) ?usize {
     rt.registry_mutex.lock();
     defer rt.registry_mutex.unlock();
     const entry = rt.listeners.get(id) orelse return null;
-    entry.mutex.lock();
-    defer entry.mutex.unlock();
-    return entry.udp_sessions.count();
+    if (rt.udp_session_workers.len == 0) {
+        entry.mutex.lock();
+        defer entry.mutex.unlock();
+        return entry.udp_sessions.count();
+    }
+
+    var total: usize = 0;
+    for (rt.udp_session_workers) |*worker| {
+        worker.mutex.lock();
+        defer worker.mutex.unlock();
+        var it = worker.listener_fds.iterator();
+        while (it.next()) |kv| {
+            const listener = kv.value_ptr.*;
+            if (listener.entry != entry) continue;
+            total += listener.sessions.count();
+        }
+    }
+    return total;
 }
 
 fn waitForUdpSessionCount(rt: *runtime.RuntimeManager, id: []const u8, expected: usize, timeout_ms: u32) !void {
@@ -1099,6 +1148,435 @@ test "service forwards udp traffic after target is configured" {
     try std.testing.expect(metrics.udp_bytes_out_total.load() >= 4);
     try std.testing.expectEqual(@as(u64, 1), metrics.udp_session_create_total.load());
     try std.testing.expectEqual(@as(u64, 1), metrics.udp_active_sessions.load());
+}
+
+test "udp io_uring path forwards traffic and records activation counters" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{
+        .udp_io_uring_enabled = true,
+    });
+    defer rt.deinit();
+    try rt.start();
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = 55500, .end = 55600 }, 2000);
+
+    var upstream = try startUdpCaptureServer(std.testing.allocator, 1, .echo, "");
+    defer upstream.deinit(std.testing.allocator);
+
+    var alloc = try svc.createAllocation(model.Protocol.udp, upstream.port);
+    defer alloc.deinit(std.testing.allocator);
+    var updated = try svc.setTarget(alloc.id, "127.0.0.1");
+    defer updated.deinit(std.testing.allocator);
+
+    const target = try config.parseIpLiteral("127.0.0.1", alloc.port);
+    const client = try createUdpClient();
+    defer closeIgnore(client);
+
+    try sendUdpAndExpect(client, target, "uring", "uring", 250);
+    try waitForCounterAtLeast(&metrics.udp_io_uring_multishot_total, 1, 500);
+    try waitForCounterAtLeast(&metrics.udp_io_uring_submit_total, 1, 500);
+    try waitForCounterAtLeast(&metrics.udp_io_uring_cqe_total, 1, 500);
+    try waitForCounterAtLeast(&metrics.udp_io_uring_buf_release_total, 1, 500);
+    try std.testing.expectEqual(@as(u64, 0), metrics.udp_io_uring_fallback_total.load());
+}
+
+test "udp io_uring forced fallback preserves forwarding" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{
+        .udp_io_uring_enabled = true,
+        .udp_io_uring_test_force_fallback = true,
+    });
+    defer rt.deinit();
+    try rt.start();
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = 55510, .end = 55610 }, 2000);
+
+    var upstream = try startUdpCaptureServer(std.testing.allocator, 1, .echo, "");
+    defer upstream.deinit(std.testing.allocator);
+
+    var alloc = try svc.createAllocation(model.Protocol.udp, upstream.port);
+    defer alloc.deinit(std.testing.allocator);
+    var updated = try svc.setTarget(alloc.id, "127.0.0.1");
+    defer updated.deinit(std.testing.allocator);
+
+    const target = try config.parseIpLiteral("127.0.0.1", alloc.port);
+    const client = try createUdpClient();
+    defer closeIgnore(client);
+
+    try sendUdpAndExpect(client, target, "fallback-uring", "fallback-uring", 250);
+    try waitForCounterAtLeast(&metrics.udp_io_uring_fallback_total, 1, 500);
+}
+
+test "udp GRO receive path coalesces segmented ingress without regressing forwarding" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{
+        .udp_fast_path_enabled = true,
+        .udp_gro_enabled = true,
+        .udp_fast_path_segment_size = 4,
+        .udp_fast_path_gso_burst = 16,
+    });
+    defer rt.deinit();
+    try rt.start();
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = 55515, .end = 55615 }, 2000);
+
+    var upstream = try startUdpCaptureServer(std.testing.allocator, 4, .echo, "");
+    defer upstream.deinit(std.testing.allocator);
+
+    var alloc = try svc.createAllocation(model.Protocol.udp, upstream.port);
+    defer alloc.deinit(std.testing.allocator);
+    var updated = try svc.setTarget(alloc.id, "127.0.0.1");
+    defer updated.deinit(std.testing.allocator);
+
+    const target = try config.parseIpLiteral("127.0.0.1", alloc.port);
+    const client = try createUdpClient();
+    defer closeIgnore(client);
+
+    try sendUdpSegmentBurst(client, target, "gro!", 4, 4);
+    var idx: usize = 0;
+    while (idx < 4) : (idx += 1) {
+        var buf: [16]u8 = undefined;
+        const amt = (try recvUdpWithTimeout(client, &buf, 250)) orelse return error.Timeout;
+        try std.testing.expectEqualStrings("gro!", buf[0..amt]);
+    }
+
+    upstream.thread.join();
+    upstream.joined = true;
+    try std.testing.expectEqual(@as(usize, 4), upstream.state.actual_packets);
+    try waitForCounterAtLeast(&metrics.udp_fast_path_gro_recv_total, 1, 500);
+    try std.testing.expect(metrics.udp_fast_path_gso_send_total.load() >= 1 or metrics.udp_batch_messages_total.load() >= 4);
+}
+
+test "udp fast path batches same-session ingress without regressing forwarding" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{
+        .udp_fast_path_enabled = true,
+        .udp_fast_path_segment_size = 1472,
+        .udp_fast_path_gso_burst = 16,
+    });
+    defer rt.deinit();
+    try rt.start();
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = 55520, .end = 55620 }, 2000);
+
+    var upstream = try startUdpCaptureServer(std.testing.allocator, 8, .echo, "");
+    defer upstream.deinit(std.testing.allocator);
+
+    var alloc = try svc.createAllocation(model.Protocol.udp, upstream.port);
+    defer alloc.deinit(std.testing.allocator);
+    var updated = try svc.setTarget(alloc.id, "127.0.0.1");
+    defer updated.deinit(std.testing.allocator);
+
+    const target = try config.parseIpLiteral("127.0.0.1", alloc.port);
+    const client = try createUdpClient();
+    defer closeIgnore(client);
+
+    var idx: usize = 0;
+    while (idx < 8) : (idx += 1) {
+        _ = try std.posix.sendto(client, "fastpath", 0, &target.any, target.getOsSockLen());
+    }
+    idx = 0;
+    while (idx < 8) : (idx += 1) {
+        var buf: [16]u8 = undefined;
+        const amt = (try recvUdpWithTimeout(client, &buf, 250)) orelse return error.Timeout;
+        try std.testing.expectEqualStrings("fastpath", buf[0..amt]);
+    }
+
+    upstream.thread.join();
+    upstream.joined = true;
+    try waitForCounterAtLeast(&metrics.udp_fast_path_packets_out_total, 1, 500);
+    try std.testing.expectEqual(@as(usize, 8), upstream.state.actual_packets);
+    try std.testing.expect(metrics.udp_fast_path_gso_send_total.load() >= 1 or metrics.udp_fast_path_fallback_total.load() >= 1);
+}
+
+test "udp fast path forced fallback preserves forwarding" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{
+        .udp_fast_path_enabled = true,
+        .udp_fast_path_segment_size = 1472,
+        .udp_fast_path_gso_burst = 16,
+        .udp_fast_path_test_force_fallback = true,
+    });
+    defer rt.deinit();
+    try rt.start();
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = 55540, .end = 55640 }, 2000);
+
+    var upstream = try startUdpCaptureServer(std.testing.allocator, 8, .echo, "");
+    defer upstream.deinit(std.testing.allocator);
+
+    var alloc = try svc.createAllocation(model.Protocol.udp, upstream.port);
+    defer alloc.deinit(std.testing.allocator);
+    var updated = try svc.setTarget(alloc.id, "127.0.0.1");
+    defer updated.deinit(std.testing.allocator);
+
+    const target = try config.parseIpLiteral("127.0.0.1", alloc.port);
+    const client = try createUdpClient();
+    defer closeIgnore(client);
+
+    var idx: usize = 0;
+    while (idx < 8) : (idx += 1) {
+        _ = try std.posix.sendto(client, "fallback", 0, &target.any, target.getOsSockLen());
+    }
+    idx = 0;
+    while (idx < 8) : (idx += 1) {
+        var buf: [16]u8 = undefined;
+        const amt = (try recvUdpWithTimeout(client, &buf, 250)) orelse return error.Timeout;
+        try std.testing.expectEqualStrings("fallback", buf[0..amt]);
+    }
+
+    upstream.thread.join();
+    upstream.joined = true;
+    try waitForCounterAtLeast(&metrics.udp_fast_path_fallback_total, 1, 500);
+    try std.testing.expectEqual(@as(usize, 8), upstream.state.actual_packets);
+}
+
+test "udp dataplane redesign mode forwards traffic and records redesign counters" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{
+        .udp_dataplane_redesign_enabled = true,
+    });
+    defer rt.deinit();
+    try rt.start();
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = 55550, .end = 55650 }, 2000);
+
+    var upstream = try startUdpCaptureServer(std.testing.allocator, 1, .echo, "");
+    defer upstream.deinit(std.testing.allocator);
+
+    var alloc = try svc.createAllocation(model.Protocol.udp, upstream.port);
+    defer alloc.deinit(std.testing.allocator);
+    var updated = try svc.setTarget(alloc.id, "127.0.0.1");
+    defer updated.deinit(std.testing.allocator);
+
+    const target = try config.parseIpLiteral("127.0.0.1", alloc.port);
+    const client = try createUdpClient();
+    defer closeIgnore(client);
+
+    try sendUdpAndExpect(client, target, "redesign", "redesign", 250);
+    try waitForCounterAtLeast(&metrics.udp_dataplane_redesign_packets_in_total, 1, 500);
+    try waitForCounterAtLeast(&metrics.udp_dataplane_redesign_packets_out_total, 1, 500);
+    try std.testing.expect(metrics.udp_session_create_total.load() >= 1);
+}
+
+test "udp workerized mode distributes sessions across workers and preserves forwarding" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{
+        .udp_session_workers = 2,
+    });
+    defer rt.deinit();
+    try rt.start();
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = 55560, .end = 55660 }, 2000);
+
+    var upstream = try startUdpCaptureServer(std.testing.allocator, 8, .echo, "");
+    defer upstream.deinit(std.testing.allocator);
+
+    var alloc = try svc.createAllocation(model.Protocol.udp, upstream.port);
+    defer alloc.deinit(std.testing.allocator);
+    var updated = try svc.setTarget(alloc.id, "127.0.0.1");
+    defer updated.deinit(std.testing.allocator);
+
+    const target = try config.parseIpLiteral("127.0.0.1", alloc.port);
+    var clients: [8]std.posix.fd_t = undefined;
+    defer for (clients) |fd| closeIgnore(fd);
+
+    for (&clients, 0..) |*client, idx| {
+        client.* = try createUdpClient();
+        const payload = try std.fmt.allocPrint(std.testing.allocator, "worker-{d}", .{idx});
+        defer std.testing.allocator.free(payload);
+        try sendUdpAndExpect(client.*, target, payload, payload, 250);
+    }
+
+    try waitForUdpSessionCount(&rt, alloc.id, clients.len, 500);
+    try waitForCounterAtLeast(&metrics.udp_worker0_packets_in_total, 1, 500);
+    try waitForCounterAtLeast(&metrics.udp_worker1_packets_in_total, 1, 500);
+    try std.testing.expectEqual(@as(u64, clients.len), metrics.udp_session_create_total.load());
+    try std.testing.expect(metrics.udp_worker_packets_in_total.load() >= clients.len);
+    try std.testing.expect(metrics.udp_worker_packets_out_total.load() >= clients.len);
+}
+
+test "udp workerized delete clears active sessions and resets the active-session gauge" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{
+        .udp_session_workers = 2,
+    });
+    defer rt.deinit();
+    try rt.start();
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = 55680, .end = 55780 }, 2000);
+
+    var upstream = try startUdpCaptureServer(std.testing.allocator, 2, .echo, "");
+    defer upstream.deinit(std.testing.allocator);
+
+    var alloc = try svc.createAllocation(model.Protocol.udp, upstream.port);
+    defer alloc.deinit(std.testing.allocator);
+    var updated = try svc.setTarget(alloc.id, "127.0.0.1");
+    defer updated.deinit(std.testing.allocator);
+
+    const target = try config.parseIpLiteral("127.0.0.1", alloc.port);
+    const client_one = try createUdpClient();
+    defer closeIgnore(client_one);
+    const client_two = try createUdpClient();
+    defer closeIgnore(client_two);
+
+    try sendUdpAndExpect(client_one, target, "omega", "omega", 250);
+    try sendUdpAndExpect(client_two, target, "sigma", "sigma", 250);
+    try waitForUdpSessionCount(&rt, alloc.id, 2, 500);
+    try std.testing.expectEqual(@as(u64, 2), metrics.udp_active_sessions.load());
+
+    try svc.deleteAllocation(alloc.id);
+    try waitForAllocationRemoval(&rt, alloc.id, 500);
+    try std.testing.expectEqual(@as(u64, 0), metrics.udp_active_sessions.load());
+}
+
+test "udp workerized mode forwards traffic and cleans up counters" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{
+        .udp_session_workers = 2,
+    });
+    defer rt.deinit();
+    try rt.start();
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = 55560, .end = 55660 }, 2000);
+
+    var upstream = try startUdpCaptureServer(std.testing.allocator, 1, .echo, "");
+    defer upstream.deinit(std.testing.allocator);
+
+    var alloc = try svc.createAllocation(model.Protocol.udp, upstream.port);
+    defer alloc.deinit(std.testing.allocator);
+    var updated = try svc.setTarget(alloc.id, "127.0.0.1");
+    defer updated.deinit(std.testing.allocator);
+
+    const target = try config.parseIpLiteral("127.0.0.1", alloc.port);
+    const client = try createUdpClient();
+    defer closeIgnore(client);
+
+    try sendUdpAndExpect(client, target, "workerized", "workerized", 250);
+    try waitForUdpSessionCount(&rt, alloc.id, 1, 500);
+    try waitForCounterAtLeast(&metrics.udp_worker_packets_in_total, 1, 500);
+    try waitForCounterAtLeast(&metrics.udp_worker_packets_out_total, 1, 500);
+
+    upstream.thread.join();
+    upstream.joined = true;
+    try std.testing.expectEqual(@as(usize, 1), upstream.state.actual_packets);
+    try std.testing.expectEqual(@as(u64, 1), metrics.udp_session_create_total.load());
+    try std.testing.expectEqual(@as(u64, 1), metrics.udp_active_sessions.load());
+}
+
+test "udp workerized mode distributes multi-client traffic across workers" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{
+        .udp_session_workers = 4,
+    });
+    defer rt.deinit();
+    try rt.start();
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = 55580, .end = 55680 }, 2000);
+
+    var upstream = try startUdpCaptureServer(std.testing.allocator, 16, .echo, "");
+    defer upstream.deinit(std.testing.allocator);
+
+    var alloc = try svc.createAllocation(model.Protocol.udp, upstream.port);
+    defer alloc.deinit(std.testing.allocator);
+    var updated = try svc.setTarget(alloc.id, "127.0.0.1");
+    defer updated.deinit(std.testing.allocator);
+
+    const target = try config.parseIpLiteral("127.0.0.1", alloc.port);
+    var idx: usize = 0;
+    while (idx < 16) : (idx += 1) {
+        const client = try createUdpClient();
+        defer closeIgnore(client);
+        try sendUdpAndExpect(client, target, "spread", "spread", 250);
+    }
+
+    try waitForUdpSessionCount(&rt, alloc.id, 16, 1_000);
+    upstream.thread.join();
+    upstream.joined = true;
+
+    const worker_hits = [_]u64{
+        metrics.udp_worker0_packets_in_total.load(),
+        metrics.udp_worker1_packets_in_total.load(),
+        metrics.udp_worker2_packets_in_total.load(),
+        metrics.udp_worker3_packets_in_total.load(),
+    };
+    var nonzero_workers: usize = 0;
+    for (worker_hits) |value| {
+        if (value > 0) nonzero_workers += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 16), upstream.state.actual_packets);
+    try std.testing.expectEqual(@as(u64, 16), metrics.udp_session_create_total.load());
+    try std.testing.expect(nonzero_workers >= 2);
 }
 
 test "udp runtime reuses a session for repeat packets from one client and creates a second session for another client" {

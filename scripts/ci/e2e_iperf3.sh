@@ -12,14 +12,27 @@ TCP_SESSION_MODEL_ACCEPT_BALANCED="${TCP_SESSION_MODEL_ACCEPT_BALANCED:-0}"
 TCP_SESSION_MODEL_SHARDED_ACCEPT="${TCP_SESSION_MODEL_SHARDED_ACCEPT:-0}"
 TCP_SPLICE_ENABLED="${TCP_SPLICE_ENABLED:-0}"
 FORCE_TCP_COPY_FALLBACK="${FORCE_TCP_COPY_FALLBACK:-0}"
+UDP_SESSION_WORKERS="${UDP_SESSION_WORKERS:-0}"
+UDP_IO_URING_ENABLED="${UDP_IO_URING_ENABLED:-0}"
+UDP_GRO_ENABLED="${UDP_GRO_ENABLED:-0}"
+UDP_DATAPLANE_REDESIGN_ENABLED="${UDP_DATAPLANE_REDESIGN_ENABLED:-0}"
+UDP_FAST_PATH_ENABLED="${UDP_FAST_PATH_ENABLED:-0}"
+UDP_FAST_PATH_SEGMENT_SIZE="${UDP_FAST_PATH_SEGMENT_SIZE:-1472}"
+UDP_FAST_PATH_GSO_BURST="${UDP_FAST_PATH_GSO_BURST:-16}"
+UDP_STREAMS="${UDP_STREAMS:-1}"
+IPERF_DURATION="${IPERF_DURATION:-2}"
+UDP_MATRIX_DURATION="${UDP_MATRIX_DURATION:-$IPERF_DURATION}"
+UDP_MULTI_FLOW_STREAMS="${UDP_MULTI_FLOW_STREAMS:-4}"
+UDP_MULTI_FLOW_RATE="${UDP_MULTI_FLOW_RATE:-10G}"
+UDP_MULTI_FLOW_PACKET_SIZE="${UDP_MULTI_FLOW_PACKET_SIZE:-1472}"
+UDP_MULTI_FLOW_DURATION="${UDP_MULTI_FLOW_DURATION:-$UDP_MATRIX_DURATION}"
 UDP_RATE="${UDP_RATE:-100G}"
 UDP_PACKET_SIZE="${UDP_PACKET_SIZE:-}"
-IPERF_DURATION="${IPERF_DURATION:-2}"
 IPERF_MODE="${IPERF_MODE:-oneshot}"
+UDP_COMPARE_MODE="${UDP_COMPARE_MODE:-baseline}"
 UDP_SWEEP_RATES="${UDP_SWEEP_RATES:-1G,5G,10G,25G,50G,100G}"
 UDP_PACKET_SIZES="${UDP_PACKET_SIZES:-256,1200,1472}"
 IPERF_REPETITIONS="${IPERF_REPETITIONS:-3}"
-UDP_MATRIX_DURATION="${UDP_MATRIX_DURATION:-$IPERF_DURATION}"
 TCP_DIRECT_VS_RELAY="${TCP_DIRECT_VS_RELAY:-1}"
 TCP_COMPARE_MODE="${TCP_COMPARE_MODE:-accept-balanced}"
 TCP_BENCH_DURATION="${TCP_BENCH_DURATION:-$IPERF_DURATION}"
@@ -106,6 +119,44 @@ ONE_SHOT_REPORT="${RUN_DIR}/one-shot-report.txt"
 UDP_MATRIX_RESULTS="${RUN_DIR}/udp-matrix-results.ndjson"
 UDP_MATRIX_SUMMARY_TXT="${RUN_DIR}/udp-matrix-summary.txt"
 UDP_MATRIX_SUMMARY_JSON="${RUN_DIR}/udp-matrix-summary.json"
+UDP_FAST_PATH_RESULTS="${RUN_DIR}/udp-fast-path-results.ndjson"
+UDP_FAST_PATH_SUMMARY_TXT="${RUN_DIR}/udp-fast-path-summary.txt"
+UDP_FAST_PATH_SUMMARY_JSON="${RUN_DIR}/udp-fast-path-summary.json"
+UDP_FAST_PATH_FOCUS_10_TXT="${RUN_DIR}/udp-fast-path-focus-10g-1472.txt"
+UDP_FAST_PATH_FOCUS_25_TXT="${RUN_DIR}/udp-fast-path-focus-25g-1472.txt"
+UDP_FAST_PATH_MULTIFLOW_RESULTS="${RUN_DIR}/udp-fast-path-multiflow-results.ndjson"
+UDP_FAST_PATH_MULTIFLOW_SUMMARY_TXT="${RUN_DIR}/udp-fast-path-multiflow-summary.txt"
+UDP_FAST_PATH_MULTIFLOW_SUMMARY_JSON="${RUN_DIR}/udp-fast-path-multiflow-summary.json"
+UDP_FAST_PATH_OVERALL_SUMMARY_TXT="${RUN_DIR}/udp-fast-path-overall-summary.txt"
+UDP_FAST_PATH_OVERALL_SUMMARY_JSON="${RUN_DIR}/udp-fast-path-overall-summary.json"
+UDP_IO_URING_RESULTS="${RUN_DIR}/udp-io-uring-results.ndjson"
+UDP_IO_URING_SUMMARY_TXT="${RUN_DIR}/udp-io-uring-summary.txt"
+UDP_IO_URING_SUMMARY_JSON="${RUN_DIR}/udp-io-uring-summary.json"
+UDP_IO_URING_FOCUS_10_TXT="${RUN_DIR}/udp-io-uring-focus-10g-1472.txt"
+UDP_IO_URING_FOCUS_25_TXT="${RUN_DIR}/udp-io-uring-focus-25g-1472.txt"
+UDP_IO_URING_OVERALL_SUMMARY_TXT="${RUN_DIR}/udp-io-uring-overall-summary.txt"
+UDP_IO_URING_OVERALL_SUMMARY_JSON="${RUN_DIR}/udp-io-uring-overall-summary.json"
+UDP_GRO_RESULTS="${RUN_DIR}/udp-gro-results.ndjson"
+UDP_GRO_SUMMARY_TXT="${RUN_DIR}/udp-gro-summary.txt"
+UDP_GRO_SUMMARY_JSON="${RUN_DIR}/udp-gro-summary.json"
+UDP_GRO_FOCUS_10_TXT="${RUN_DIR}/udp-gro-focus-10g-1472.txt"
+UDP_GRO_FOCUS_25_TXT="${RUN_DIR}/udp-gro-focus-25g-1472.txt"
+UDP_GRO_OVERALL_SUMMARY_TXT="${RUN_DIR}/udp-gro-overall-summary.txt"
+UDP_GRO_OVERALL_SUMMARY_JSON="${RUN_DIR}/udp-gro-overall-summary.json"
+UDP_DATAPLANE_REDESIGN_RESULTS="${RUN_DIR}/udp-dataplane-redesign-results.ndjson"
+UDP_DATAPLANE_REDESIGN_SUMMARY_TXT="${RUN_DIR}/udp-dataplane-redesign-summary.txt"
+UDP_DATAPLANE_REDESIGN_SUMMARY_JSON="${RUN_DIR}/udp-dataplane-redesign-summary.json"
+UDP_DATAPLANE_REDESIGN_FOCUS_10_TXT="${RUN_DIR}/udp-dataplane-redesign-focus-10g-1472.txt"
+UDP_DATAPLANE_REDESIGN_FOCUS_25_TXT="${RUN_DIR}/udp-dataplane-redesign-focus-25g-1472.txt"
+UDP_DATAPLANE_REDESIGN_MULTIFLOW_SUMMARY_TXT="${RUN_DIR}/udp-dataplane-redesign-multiflow-summary.txt"
+UDP_DATAPLANE_REDESIGN_MULTIFLOW_SUMMARY_JSON="${RUN_DIR}/udp-dataplane-redesign-multiflow-summary.json"
+UDP_DATAPLANE_REDESIGN_OVERALL_SUMMARY_TXT="${RUN_DIR}/udp-dataplane-redesign-overall-summary.txt"
+UDP_DATAPLANE_REDESIGN_OVERALL_SUMMARY_JSON="${RUN_DIR}/udp-dataplane-redesign-overall-summary.json"
+UDP_WORKERIZED_RESULTS="${RUN_DIR}/udp-workerized-results.ndjson"
+UDP_WORKERIZED_SUMMARY_TXT="${RUN_DIR}/udp-workerized-summary.txt"
+UDP_WORKERIZED_SUMMARY_JSON="${RUN_DIR}/udp-workerized-summary.json"
+UDP_WORKERIZED_FOCUS_10_TXT="${RUN_DIR}/udp-workerized-focus-10g-1472.txt"
+UDP_WORKERIZED_FOCUS_25_TXT="${RUN_DIR}/udp-workerized-focus-25g-1472.txt"
 RUN_MANIFEST="${RUN_DIR}/run-manifest.txt"
 
 child_pids=()
@@ -156,6 +207,10 @@ validate_mode() {
     accept-balanced|sharded-worker|workerized-session|session-model|copy-vs-splice) ;;
     *) die "TCP_COMPARE_MODE must be one of: accept-balanced, sharded-worker, workerized-session, session-model, copy-vs-splice (got ${TCP_COMPARE_MODE})" ;;
   esac
+  case "$UDP_COMPARE_MODE" in
+    baseline|dataplane-redesign|fast-path|gro|io-uring|workerized) ;;
+    *) die "UDP_COMPARE_MODE must be one of: baseline, dataplane-redesign, fast-path, gro, io-uring, workerized (got ${UDP_COMPARE_MODE})" ;;
+  esac
 }
 
 dump_file() {
@@ -205,6 +260,27 @@ dump_logs() {
   dump_file ports_list_json "$LATEST_LIST_JSON"
   dump_file one_shot_report "$ONE_SHOT_REPORT"
   dump_file udp_matrix_summary "$UDP_MATRIX_SUMMARY_TXT"
+  dump_file udp_fast_path_summary "$UDP_FAST_PATH_SUMMARY_TXT"
+  dump_file udp_fast_path_focus_10 "$UDP_FAST_PATH_FOCUS_10_TXT"
+  dump_file udp_fast_path_focus_25 "$UDP_FAST_PATH_FOCUS_25_TXT"
+  dump_file udp_fast_path_multiflow_summary "$UDP_FAST_PATH_MULTIFLOW_SUMMARY_TXT"
+  dump_file udp_fast_path_overall_summary "$UDP_FAST_PATH_OVERALL_SUMMARY_TXT"
+  dump_file udp_gro_summary "$UDP_GRO_SUMMARY_TXT"
+  dump_file udp_gro_focus_10 "$UDP_GRO_FOCUS_10_TXT"
+  dump_file udp_gro_focus_25 "$UDP_GRO_FOCUS_25_TXT"
+  dump_file udp_gro_overall_summary "$UDP_GRO_OVERALL_SUMMARY_TXT"
+  dump_file udp_dataplane_redesign_summary "$UDP_DATAPLANE_REDESIGN_SUMMARY_TXT"
+  dump_file udp_dataplane_redesign_focus_10 "$UDP_DATAPLANE_REDESIGN_FOCUS_10_TXT"
+  dump_file udp_dataplane_redesign_focus_25 "$UDP_DATAPLANE_REDESIGN_FOCUS_25_TXT"
+  dump_file udp_dataplane_redesign_multiflow_summary "$UDP_DATAPLANE_REDESIGN_MULTIFLOW_SUMMARY_TXT"
+  dump_file udp_dataplane_redesign_overall_summary "$UDP_DATAPLANE_REDESIGN_OVERALL_SUMMARY_TXT"
+  dump_file udp_io_uring_summary "$UDP_IO_URING_SUMMARY_TXT"
+  dump_file udp_io_uring_focus_10 "$UDP_IO_URING_FOCUS_10_TXT"
+  dump_file udp_io_uring_focus_25 "$UDP_IO_URING_FOCUS_25_TXT"
+  dump_file udp_io_uring_overall_summary "$UDP_IO_URING_OVERALL_SUMMARY_TXT"
+  dump_file udp_workerized_summary "$UDP_WORKERIZED_SUMMARY_TXT"
+  dump_file udp_workerized_focus_10 "$UDP_WORKERIZED_FOCUS_10_TXT"
+  dump_file udp_workerized_focus_25 "$UDP_WORKERIZED_FOCUS_25_TXT"
 }
 
 api_request() {
@@ -493,8 +569,8 @@ start_relayd() {
   : >"${RUN_DIR}/readiness.body"
   : >"${RUN_DIR}/unauth.status"
   : >"${RUN_DIR}/unauth.body"
-  printf '\n=== relayd start mode=%s tcp_session_model_enabled=%s tcp_session_model_workers=%s tcp_session_model_sharded_accept=%s tcp_session_model_accept_balanced=%s tcp_splice_enabled=%s force_tcp_copy_fallback=%s ===\n' \
-    "$mode_label" "$tcp_session_model_enabled" "$tcp_session_model_workers" "$tcp_session_model_sharded_accept" "$tcp_session_model_accept_balanced" "$tcp_splice_enabled" "$force_tcp_copy_fallback" >>"$RELAYD_LOG"
+  printf '\n=== relayd start mode=%s tcp_session_model_enabled=%s tcp_session_model_workers=%s tcp_session_model_sharded_accept=%s tcp_session_model_accept_balanced=%s udp_session_workers=%s udp_io_uring_enabled=%s udp_gro_enabled=%s tcp_splice_enabled=%s force_tcp_copy_fallback=%s ===\n' \
+    "$mode_label" "$tcp_session_model_enabled" "$tcp_session_model_workers" "$tcp_session_model_sharded_accept" "$tcp_session_model_accept_balanced" "$UDP_SESSION_WORKERS" "$UDP_IO_URING_ENABLED" "$UDP_GRO_ENABLED" "$tcp_splice_enabled" "$force_tcp_copy_fallback" >>"$RELAYD_LOG"
 
   log "starting relayd mode=${mode_label} on ${HTTP_LISTEN} with port range ${PORT_RANGE}"
   AUTH_TOKEN="$AUTH_TOKEN" \
@@ -505,6 +581,13 @@ start_relayd() {
   TCP_SESSION_MODEL_WORKERS="$tcp_session_model_workers" \
   TCP_SESSION_MODEL_SHARDED_ACCEPT="$tcp_session_model_sharded_accept" \
   TCP_SESSION_MODEL_ACCEPT_BALANCED="$tcp_session_model_accept_balanced" \
+  UDP_SESSION_WORKERS="$UDP_SESSION_WORKERS" \
+  UDP_IO_URING_ENABLED="$UDP_IO_URING_ENABLED" \
+  UDP_GRO_ENABLED="$UDP_GRO_ENABLED" \
+  UDP_DATAPLANE_REDESIGN_ENABLED="$UDP_DATAPLANE_REDESIGN_ENABLED" \
+  UDP_FAST_PATH_ENABLED="$UDP_FAST_PATH_ENABLED" \
+  UDP_FAST_PATH_SEGMENT_SIZE="$UDP_FAST_PATH_SEGMENT_SIZE" \
+  UDP_FAST_PATH_GSO_BURST="$UDP_FAST_PATH_GSO_BURST" \
   TCP_SPLICE_ENABLED="$tcp_splice_enabled" \
   FORCE_TCP_COPY_FALLBACK="$force_tcp_copy_fallback" \
   "$RELAYD_BIN" >>"$RELAYD_LOG" 2>&1 &
@@ -647,7 +730,9 @@ append_udp_result() {
   local json_file=$7
   local client_log=$8
   local server_log=$9
-  python3 - "$results_file" "$path_label" "$rate" "$packet_size" "$repetition" "$duration" "$json_file" "$client_log" "$server_log" <<'PY'
+  local before_metrics=${10:-}
+  local after_metrics=${11:-}
+  python3 - "$results_file" "$path_label" "$rate" "$packet_size" "$repetition" "$duration" "$json_file" "$client_log" "$server_log" "$before_metrics" "$after_metrics" <<'PY'
 import json
 import pathlib
 import sys
@@ -661,9 +746,17 @@ duration = float(sys.argv[6])
 json_file = pathlib.Path(sys.argv[7])
 client_log = pathlib.Path(sys.argv[8])
 server_log = pathlib.Path(sys.argv[9])
+before_metrics_file = pathlib.Path(sys.argv[10]) if sys.argv[10] else None
+after_metrics_file = pathlib.Path(sys.argv[11]) if sys.argv[11] else None
 payload = json.load(open(json_file, encoding='utf-8'))
 end = payload.get('end') or {}
 summary = end.get('sum_received') or end.get('sum') or {}
+before_metrics = json.load(open(before_metrics_file, encoding='utf-8')) if before_metrics_file else {}
+after_metrics = json.load(open(after_metrics_file, encoding='utf-8')) if after_metrics_file else {}
+
+def delta(key):
+    return int(after_metrics.get(key, 0)) - int(before_metrics.get(key, 0))
+
 record = {
     'path': path_label,
     'rate': rate,
@@ -679,6 +772,27 @@ record = {
     'json_file': json_file.relative_to(results_file.parent).as_posix(),
     'client_log': client_log.relative_to(results_file.parent).as_posix(),
     'server_log': server_log.relative_to(results_file.parent).as_posix(),
+    'udp_fast_path_packets_in_delta': delta('udp_fast_path_packets_in_total'),
+    'udp_fast_path_packets_out_delta': delta('udp_fast_path_packets_out_total'),
+    'udp_fast_path_gso_send_delta': delta('udp_fast_path_gso_send_total'),
+    'udp_fast_path_gro_recv_delta': delta('udp_fast_path_gro_recv_total'),
+    'udp_fast_path_fallback_delta': delta('udp_fast_path_fallback_total'),
+    'udp_fast_path_drop_delta': delta('udp_fast_path_drop_total'),
+    'udp_worker_packets_in_delta': delta('udp_worker_packets_in_total'),
+    'udp_worker_packets_out_delta': delta('udp_worker_packets_out_total'),
+    'udp_worker0_packets_in_delta': delta('udp_worker0_packets_in_total'),
+    'udp_worker1_packets_in_delta': delta('udp_worker1_packets_in_total'),
+    'udp_worker2_packets_in_delta': delta('udp_worker2_packets_in_total'),
+    'udp_worker3_packets_in_delta': delta('udp_worker3_packets_in_total'),
+    'udp_worker0_packets_out_delta': delta('udp_worker0_packets_out_total'),
+    'udp_worker1_packets_out_delta': delta('udp_worker1_packets_out_total'),
+    'udp_worker2_packets_out_delta': delta('udp_worker2_packets_out_total'),
+    'udp_worker3_packets_out_delta': delta('udp_worker3_packets_out_total'),
+    'udp_dataplane_redesign_packets_in_delta': delta('udp_dataplane_redesign_packets_in_total'),
+    'udp_dataplane_redesign_packets_out_delta': delta('udp_dataplane_redesign_packets_out_total'),
+    'udp_io_uring_submit_delta': delta('udp_io_uring_submit_total'),
+    'udp_io_uring_cqe_delta': delta('udp_io_uring_cqe_total'),
+    'udp_io_uring_fallback_delta': delta('udp_io_uring_fallback_total'),
 }
 with open(results_file, 'a', encoding='utf-8') as handle:
     handle.write(json.dumps(record, sort_keys=True))
@@ -1830,7 +1944,6 @@ duration = float(sys.argv[7])
 records = [json.loads(line) for line in results_path.read_text(encoding='utf-8').splitlines() if line.strip()]
 
 UNITS_BPS = ['bps', 'kbps', 'mbps', 'gbps']
-UNITS_BYTES = ['bytes', 'kbytes', 'mbytes', 'gbytes']
 
 def format_decimal(value, units):
     value = float(value)
@@ -1946,6 +2059,1113 @@ print(summary_txt_path.read_text(encoding='utf-8'), end='')
 PY
 }
 
+emit_udp_fast_path_report() {
+  local results_file=$1
+  local summary_txt=$2
+  local summary_json=$3
+  local focus_10_txt=$4
+  local focus_25_txt=$5
+  python3 - "$results_file" "$summary_txt" "$summary_json" "$focus_10_txt" "$focus_25_txt" <<'PY'
+import json, pathlib, statistics, sys
+
+results_path = pathlib.Path(sys.argv[1])
+summary_txt = pathlib.Path(sys.argv[2])
+summary_json = pathlib.Path(sys.argv[3])
+focus10 = pathlib.Path(sys.argv[4])
+focus25 = pathlib.Path(sys.argv[5])
+records = [json.loads(line) for line in results_path.read_text(encoding='utf-8').splitlines() if line.strip()]
+if not records:
+    raise SystemExit('no UDP fast-path records found')
+
+UNITS_BPS = ['bps', 'kbps', 'mbps', 'gbps']
+def fmt(value):
+    value = float(value)
+    idx = 0
+    while value >= 1000.0 and idx < len(UNITS_BPS) - 1:
+        value /= 1000.0
+        idx += 1
+    return f"{value:.2f} {UNITS_BPS[idx]}"
+
+def aggregate(items):
+    return {
+        'median_bps': statistics.median([i['bits_per_second'] for i in items]),
+        'best_bps': max(i['bits_per_second'] for i in items),
+        'median_loss': statistics.median([i['lost_percent'] for i in items]),
+        'median_jitter': statistics.median([i['jitter_ms'] for i in items]),
+        'median_gso_sends': statistics.median([i.get('udp_fast_path_gso_send_delta', 0) for i in items]),
+        'median_fallbacks': statistics.median([i.get('udp_fast_path_fallback_delta', 0) for i in items]),
+    }
+
+grouped = {}
+for rec in records:
+    grouped.setdefault((rec['rate'], rec['packet_size'], rec['path']), []).append(rec)
+
+summary = {'pairs': {}}
+lines = ['=== relayd udp fast path summary ===']
+for rate in ['10G', '25G']:
+    key_direct = (rate, 1472, 'direct')
+    key_base = (rate, 1472, 'relay-baseline')
+    key_fast = (rate, 1472, 'relay-fast')
+    if key_direct not in grouped or key_base not in grouped or key_fast not in grouped:
+        continue
+    direct = aggregate(grouped[key_direct])
+    base = aggregate(grouped[key_base])
+    fast = aggregate(grouped[key_fast])
+    fast_vs_base = fast['median_bps'] / base['median_bps'] if base['median_bps'] else None
+    loss_delta = base['median_loss'] - fast['median_loss']
+    summary['pairs'][rate] = {
+        'direct': direct,
+        'baseline': base,
+        'fast': fast,
+        'fast_vs_base': fast_vs_base,
+        'loss_delta_pp': loss_delta,
+    }
+    line = (
+        f"{rate}/1472: direct {fmt(direct['median_bps'])}, baseline {fmt(base['median_bps'])}, fast {fmt(fast['median_bps'])}, "
+        f"fast/base {('n/a' if fast_vs_base is None else f'{fast_vs_base:.2f}x')}, "
+        f"baseline loss {base['median_loss']:.2f}%, fast loss {fast['median_loss']:.2f}%, loss delta {loss_delta:.2f} pp, "
+        f"median gso sends {fast['median_gso_sends']:.0f}, median fallbacks {fast['median_fallbacks']:.0f}"
+    )
+    lines.append(line)
+    (focus10 if rate == '10G' else focus25).write_text(line + '\n', encoding='utf-8')
+
+overall = 'fast-path round did not clear the next gate; escalate to io_uring planning'
+if '10G' in summary['pairs'] and '25G' in summary['pairs']:
+    p10 = summary['pairs']['10G']
+    p25 = summary['pairs']['25G']
+    if (
+        p10['fast_vs_base'] is not None and p10['fast_vs_base'] >= 1.20 and
+        p25['fast_vs_base'] is not None and p25['fast_vs_base'] >= 1.20 and
+        p10['fast']['median_gso_sends'] >= 1 and p25['fast']['median_gso_sends'] >= 1 and
+        ((p10['loss_delta_pp'] >= 8.0) or (p10['fast']['median_loss'] < 35.0)) and
+        ((p25['loss_delta_pp'] >= 8.0) or (p25['fast']['median_loss'] < 35.0))
+    ):
+        overall = 'UDP_SEGMENT fast path is justified as the next UDP baseline'
+
+lines.extend(['', overall])
+summary['overall'] = overall
+summary_txt.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+summary_json.write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+print(summary_txt.read_text(encoding='utf-8'), end='')
+PY
+}
+
+emit_udp_io_uring_report() {
+  local results_file=$1
+  local summary_txt=$2
+  local summary_json=$3
+  local focus_10_txt=$4
+  local focus_25_txt=$5
+  python3 - "$results_file" "$summary_txt" "$summary_json" "$focus_10_txt" "$focus_25_txt" <<'PY'
+import json, pathlib, statistics, sys
+
+results_path = pathlib.Path(sys.argv[1])
+summary_txt = pathlib.Path(sys.argv[2])
+summary_json = pathlib.Path(sys.argv[3])
+focus10 = pathlib.Path(sys.argv[4])
+focus25 = pathlib.Path(sys.argv[5])
+records = [json.loads(line) for line in results_path.read_text(encoding='utf-8').splitlines() if line.strip()]
+if not records:
+    raise SystemExit('no UDP io_uring records found')
+
+UNITS_BPS = ['bps', 'kbps', 'mbps', 'gbps']
+def fmt(value):
+    value = float(value)
+    idx = 0
+    while value >= 1000.0 and idx < len(UNITS_BPS) - 1:
+        value /= 1000.0
+        idx += 1
+    return f"{value:.2f} {UNITS_BPS[idx]}"
+
+def summarize(items):
+    return {
+        'median_bps': statistics.median([i['bits_per_second'] for i in items]),
+        'median_loss_percent': statistics.median([i['lost_percent'] for i in items]),
+        'median_submit_delta': statistics.median([i.get('udp_io_uring_submit_delta', 0) for i in items]),
+        'median_cqe_delta': statistics.median([i.get('udp_io_uring_cqe_delta', 0) for i in items]),
+        'median_fallback_delta': statistics.median([i.get('udp_io_uring_fallback_delta', 0) for i in items]),
+    }
+
+grouped = {}
+for rec in records:
+    grouped.setdefault((rec['rate'], rec['packet_size'], rec['path']), []).append(rec)
+
+summary = {'pairs': {}}
+lines = ['=== relayd udp io_uring summary ===']
+for rate in ['10G', '25G']:
+    key_direct = (rate, 1472, 'direct')
+    key_base = (rate, 1472, 'relay-fast-baseline')
+    key_io = (rate, 1472, 'relay-io-uring')
+    if key_direct not in grouped or key_base not in grouped or key_io not in grouped:
+        continue
+    direct = summarize(grouped[key_direct])
+    baseline = summarize(grouped[key_base])
+    io_uring = summarize(grouped[key_io])
+    io_ratio = io_uring['median_bps'] / baseline['median_bps'] if baseline['median_bps'] else None
+    loss_delta = baseline['median_loss_percent'] - io_uring['median_loss_percent']
+    summary['pairs'][rate] = {
+        'direct': direct,
+        'baseline': baseline,
+        'io_uring': io_uring,
+        'io_uring_vs_baseline_ratio': io_ratio,
+        'loss_delta_pp': loss_delta,
+    }
+    line = (
+        f"{rate}/1472: direct {fmt(direct['median_bps'])}, baseline {fmt(baseline['median_bps'])}, io_uring {fmt(io_uring['median_bps'])}, "
+        f"io/base {('n/a' if io_ratio is None else f'{io_ratio:.2f}x')}, "
+        f"baseline loss {baseline['median_loss_percent']:.2f}%, io loss {io_uring['median_loss_percent']:.2f}%, loss delta {loss_delta:.2f} pp, "
+        f"median submits {io_uring['median_submit_delta']:.0f}, median cqes {io_uring['median_cqe_delta']:.0f}, median fallbacks {io_uring['median_fallback_delta']:.0f}"
+    )
+    lines.append(line)
+    (focus10 if rate == '10G' else focus25).write_text(line + '\n', encoding='utf-8')
+
+overall = 'io_uring round did not clear the next gate; reevaluate receive-offload / broader dataplane options'
+if '10G' in summary['pairs'] and '25G' in summary['pairs']:
+    p10 = summary['pairs']['10G']
+    p25 = summary['pairs']['25G']
+    if (
+        p10['io_uring_vs_baseline_ratio'] is not None and p10['io_uring_vs_baseline_ratio'] >= 1.20 and
+        p25['io_uring_vs_baseline_ratio'] is not None and p25['io_uring_vs_baseline_ratio'] >= 1.20 and
+        p10['io_uring']['median_submit_delta'] >= 1 and p10['io_uring']['median_cqe_delta'] >= 1 and
+        p25['io_uring']['median_submit_delta'] >= 1 and p25['io_uring']['median_cqe_delta'] >= 1 and
+        ((p10['loss_delta_pp'] >= 5.0) or (p10['io_uring']['median_loss_percent'] < 30.0)) and
+        ((p25['loss_delta_pp'] >= 5.0) or (p25['io_uring']['median_loss_percent'] < 30.0))
+    ):
+        overall = 'io_uring UDP path is justified as the next UDP baseline'
+
+summary['overall'] = overall
+lines.extend(['', overall])
+summary_txt.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+summary_json.write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+print(summary_txt.read_text(encoding='utf-8'), end='')
+PY
+}
+
+emit_udp_gro_report() {
+  local results_file=$1
+  local summary_txt=$2
+  local summary_json=$3
+  local focus_10_txt=$4
+  local focus_25_txt=$5
+  python3 - "$results_file" "$summary_txt" "$summary_json" "$focus_10_txt" "$focus_25_txt" <<'PY'
+import json, pathlib, statistics, sys
+
+results_path = pathlib.Path(sys.argv[1])
+summary_txt = pathlib.Path(sys.argv[2])
+summary_json = pathlib.Path(sys.argv[3])
+focus10 = pathlib.Path(sys.argv[4])
+focus25 = pathlib.Path(sys.argv[5])
+records = [json.loads(line) for line in results_path.read_text(encoding='utf-8').splitlines() if line.strip()]
+if not records:
+    raise SystemExit('no UDP GRO records found')
+
+UNITS_BPS = ['bps', 'kbps', 'mbps', 'gbps']
+def fmt(value):
+    value = float(value)
+    idx = 0
+    while value >= 1000.0 and idx < len(UNITS_BPS) - 1:
+        value /= 1000.0
+        idx += 1
+    return f"{value:.2f} {UNITS_BPS[idx]}"
+
+def summarize(items):
+    return {
+        'median_bps': statistics.median([i['bits_per_second'] for i in items]),
+        'median_loss_percent': statistics.median([i['lost_percent'] for i in items]),
+        'median_gro_delta': statistics.median([i.get('udp_fast_path_gro_recv_delta', 0) for i in items]),
+        'median_fallback_delta': statistics.median([i.get('udp_fast_path_fallback_delta', 0) for i in items]),
+    }
+
+grouped = {}
+for rec in records:
+    grouped.setdefault((rec['rate'], rec['packet_size'], rec['path']), []).append(rec)
+
+summary = {'pairs': {}}
+lines = ['=== relayd udp GRO summary ===']
+for rate in ['10G', '25G']:
+    key_direct = (rate, 1472, 'direct')
+    key_base = (rate, 1472, 'relay-fast-baseline')
+    key_gro = (rate, 1472, 'relay-gro')
+    if key_direct not in grouped or key_base not in grouped or key_gro not in grouped:
+        continue
+    direct = summarize(grouped[key_direct])
+    baseline = summarize(grouped[key_base])
+    gro = summarize(grouped[key_gro])
+    gro_ratio = gro['median_bps'] / baseline['median_bps'] if baseline['median_bps'] else None
+    loss_delta = baseline['median_loss_percent'] - gro['median_loss_percent']
+    summary['pairs'][rate] = {
+        'direct': direct,
+        'baseline': baseline,
+        'gro': gro,
+        'gro_vs_baseline_ratio': gro_ratio,
+        'loss_delta_pp': loss_delta,
+    }
+    line = (
+        f"{rate}/1472: direct {fmt(direct['median_bps'])}, baseline {fmt(baseline['median_bps'])}, gro {fmt(gro['median_bps'])}, "
+        f"gro/base {('n/a' if gro_ratio is None else f'{gro_ratio:.2f}x')}, "
+        f"baseline loss {baseline['median_loss_percent']:.2f}%, gro loss {gro['median_loss_percent']:.2f}%, loss delta {loss_delta:.2f} pp, "
+        f"median gro delta {gro['median_gro_delta']:.0f}, median fallbacks {gro['median_fallback_delta']:.0f}"
+    )
+    lines.append(line)
+    (focus10 if rate == '10G' else focus25).write_text(line + '\n', encoding='utf-8')
+
+overall = 'GRO round did not clear the next gate; escalate to broader UDP dataplane redesign'
+if '10G' in summary['pairs'] and '25G' in summary['pairs']:
+    p10 = summary['pairs']['10G']
+    p25 = summary['pairs']['25G']
+    if (
+        p10['gro_vs_baseline_ratio'] is not None and p10['gro_vs_baseline_ratio'] >= 1.10 and
+        p25['gro_vs_baseline_ratio'] is not None and p25['gro_vs_baseline_ratio'] >= 1.10 and
+        p10['gro']['median_gro_delta'] >= 1 and p25['gro']['median_gro_delta'] >= 1 and
+        ((p10['loss_delta_pp'] >= 5.0) or (p10['gro']['median_loss_percent'] < 30.0)) and
+        ((p25['loss_delta_pp'] >= 5.0) or (p25['gro']['median_loss_percent'] < 30.0))
+    ):
+        overall = 'UDP_GRO receive-offload is justified as the next UDP baseline refinement'
+
+summary['overall'] = overall
+lines.extend(['', overall])
+summary_txt.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+summary_json.write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+print(summary_txt.read_text(encoding='utf-8'), end='')
+PY
+}
+
+emit_udp_gro_overall_report() {
+  local single_json=$1
+  local multiflow_json=$2
+  local summary_txt=$3
+  local summary_json=$4
+  python3 - "$single_json" "$multiflow_json" "$summary_txt" "$summary_json" <<'PY'
+import json, pathlib, sys
+
+single = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
+multiflow = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding='utf-8'))
+summary_txt = pathlib.Path(sys.argv[3])
+summary_json = pathlib.Path(sys.argv[4])
+
+single_overall = single.get('overall', '')
+multiflow_overall = multiflow.get('overall', '')
+if single_overall == 'UDP_GRO receive-offload is justified as the next UDP baseline refinement':
+    if multiflow_overall == 'workerization shows first-order evidence in the narrow multi-flow suite':
+        overall = 'UDP_GRO receive-offload is justified as the next UDP baseline refinement'
+    else:
+        overall = 'single-flow GRO improved relay materially, while workerization remains workload-sensitive but useful'
+else:
+    overall = 'GRO round did not clear the next gate; escalate to broader UDP dataplane redesign'
+
+payload = {
+    'single_flow_overall': single_overall,
+    'multiflow_overall': multiflow_overall,
+    'overall': overall,
+}
+lines = [
+    '=== relayd udp GRO overall summary ===',
+    f"single-flow: {single_overall}",
+    f"multiflow:   {multiflow_overall}",
+    '',
+    overall,
+]
+summary_txt.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+summary_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+print(summary_txt.read_text(encoding='utf-8'), end='')
+PY
+}
+
+emit_udp_dataplane_redesign_report() {
+  local results_file=$1
+  local summary_txt=$2
+  local summary_json=$3
+  local focus_10_txt=$4
+  local focus_25_txt=$5
+  python3 - "$results_file" "$summary_txt" "$summary_json" "$focus_10_txt" "$focus_25_txt" <<'PY'
+import json, pathlib, statistics, sys
+
+results_path = pathlib.Path(sys.argv[1])
+summary_txt = pathlib.Path(sys.argv[2])
+summary_json = pathlib.Path(sys.argv[3])
+focus10 = pathlib.Path(sys.argv[4])
+focus25 = pathlib.Path(sys.argv[5])
+records = [json.loads(line) for line in results_path.read_text(encoding='utf-8').splitlines() if line.strip()]
+if not records:
+    raise SystemExit('no UDP dataplane redesign records found')
+
+UNITS_BPS = ['bps', 'kbps', 'mbps', 'gbps']
+def fmt(value):
+    value = float(value)
+    idx = 0
+    while value >= 1000.0 and idx < len(UNITS_BPS) - 1:
+        value /= 1000.0
+        idx += 1
+    return f"{value:.2f} {UNITS_BPS[idx]}"
+
+def summarize(items):
+    return {
+        'median_bps': statistics.median([i['bits_per_second'] for i in items]),
+        'median_loss_percent': statistics.median([i['lost_percent'] for i in items]),
+        'median_redesign_in_delta': statistics.median([i.get('udp_dataplane_redesign_packets_in_delta', 0) for i in items]),
+        'median_redesign_out_delta': statistics.median([i.get('udp_dataplane_redesign_packets_out_delta', 0) for i in items]),
+    }
+
+grouped = {}
+for rec in records:
+    grouped.setdefault((rec['rate'], rec['packet_size'], rec['path']), []).append(rec)
+
+summary = {'pairs': {}}
+lines = ['=== relayd udp dataplane redesign summary ===']
+for rate in ['10G', '25G']:
+    key_direct = (rate, 1472, 'direct')
+    key_base = (rate, 1472, 'relay-fast-baseline')
+    key_redesign = (rate, 1472, 'relay-dataplane-redesign')
+    if key_direct not in grouped or key_base not in grouped or key_redesign not in grouped:
+        continue
+    direct = summarize(grouped[key_direct])
+    baseline = summarize(grouped[key_base])
+    redesign = summarize(grouped[key_redesign])
+    redesign_ratio = redesign['median_bps'] / baseline['median_bps'] if baseline['median_bps'] else None
+    loss_delta = baseline['median_loss_percent'] - redesign['median_loss_percent']
+    summary['pairs'][rate] = {
+        'direct': direct,
+        'baseline': baseline,
+        'redesign': redesign,
+        'redesign_vs_baseline_ratio': redesign_ratio,
+        'loss_delta_pp': loss_delta,
+    }
+    line = (
+        f"{rate}/1472: direct {fmt(direct['median_bps'])}, baseline {fmt(baseline['median_bps'])}, redesign {fmt(redesign['median_bps'])}, "
+        f"redesign/base {('n/a' if redesign_ratio is None else f'{redesign_ratio:.2f}x')}, "
+        f"baseline loss {baseline['median_loss_percent']:.2f}%, redesign loss {redesign['median_loss_percent']:.2f}%, loss delta {loss_delta:.2f} pp, "
+        f"median redesign in/out {redesign['median_redesign_in_delta']:.0f}/{redesign['median_redesign_out_delta']:.0f}"
+    )
+    lines.append(line)
+    (focus10 if rate == '10G' else focus25).write_text(line + '\n', encoding='utf-8')
+
+overall = 'UDP dataplane redesign did not clear the next gate; rethink architecture assumptions'
+if '10G' in summary['pairs'] and '25G' in summary['pairs']:
+    p10 = summary['pairs']['10G']
+    p25 = summary['pairs']['25G']
+    if (
+        p10['redesign_vs_baseline_ratio'] is not None and p10['redesign_vs_baseline_ratio'] >= 1.20 and
+        p25['redesign_vs_baseline_ratio'] is not None and p25['redesign_vs_baseline_ratio'] >= 1.20 and
+        p10['redesign']['median_redesign_in_delta'] >= 1 and p25['redesign']['median_redesign_in_delta'] >= 1 and
+        ((p10['loss_delta_pp'] >= 8.0) or (p10['redesign']['median_loss_percent'] < 30.0)) and
+        ((p25['loss_delta_pp'] >= 8.0) or (p25['redesign']['median_loss_percent'] < 30.0))
+    ):
+        overall = 'UDP dataplane redesign is justified as the next UDP baseline'
+
+summary['overall'] = overall
+lines.extend(['', overall])
+summary_txt.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+summary_json.write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+print(summary_txt.read_text(encoding='utf-8'), end='')
+PY
+}
+
+emit_udp_dataplane_redesign_multiflow_report() {
+  local results_file=$1
+  local summary_txt=$2
+  local summary_json=$3
+  python3 - "$results_file" "$summary_txt" "$summary_json" <<'PY'
+import json, pathlib, statistics, sys
+
+results_path = pathlib.Path(sys.argv[1])
+summary_txt = pathlib.Path(sys.argv[2])
+summary_json = pathlib.Path(sys.argv[3])
+records = [json.loads(line) for line in results_path.read_text(encoding='utf-8').splitlines() if line.strip()]
+if not records:
+    raise SystemExit('no UDP dataplane redesign multiflow records found')
+
+UNITS_BPS = ['bps', 'kbps', 'mbps', 'gbps']
+def fmt(value):
+    value = float(value)
+    idx = 0
+    while value >= 1000.0 and idx < len(UNITS_BPS) - 1:
+        value /= 1000.0
+        idx += 1
+    return f"{value:.2f} {UNITS_BPS[idx]}"
+
+def summarize(items):
+    return {
+        'median_bps': statistics.median([i['bits_per_second'] for i in items]),
+        'median_loss_percent': statistics.median([i['lost_percent'] for i in items]),
+        'median_redesign_in_delta': statistics.median([i.get('udp_dataplane_redesign_packets_in_delta', 0) for i in items]),
+        'median_redesign_out_delta': statistics.median([i.get('udp_dataplane_redesign_packets_out_delta', 0) for i in items]),
+    }
+
+grouped = {}
+for rec in records:
+    grouped.setdefault(rec['path'], []).append(rec)
+
+if 'relay-redesign-single' not in grouped or 'relay-redesign-workerized' not in grouped:
+    raise SystemExit('missing redesign single or workerized multiflow records')
+single = summarize(grouped['relay-redesign-single'])
+workerized = summarize(grouped['relay-redesign-workerized'])
+ratio = workerized['median_bps'] / single['median_bps'] if single['median_bps'] else None
+loss_delta = single['median_loss_percent'] - workerized['median_loss_percent']
+overall = 'UDP dataplane redesign did not clear the next gate; rethink architecture assumptions'
+if ratio is not None and (ratio >= 1.25 or loss_delta >= 10.0):
+    overall = 'UDP dataplane redesign improved relay materially but still needs follow-up tuning'
+
+summary = {
+    'single': single,
+    'workerized': workerized,
+    'workerized_vs_single_ratio': ratio,
+    'loss_delta_pp': loss_delta,
+    'overall': overall,
+}
+lines = [
+    '=== relayd udp dataplane redesign multiflow summary ===',
+    f"single-worker throughput {fmt(single['median_bps'])}, loss {single['median_loss_percent']:.2f}%",
+    f"workerized throughput {fmt(workerized['median_bps'])}, loss {workerized['median_loss_percent']:.2f}%",
+    f"workerized/single {('n/a' if ratio is None else f'{ratio:.2f}x')}, loss delta {loss_delta:.2f} pp, redesign in/out {workerized['median_redesign_in_delta']:.0f}/{workerized['median_redesign_out_delta']:.0f}",
+    '',
+    overall,
+]
+summary_txt.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+summary_json.write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+print(summary_txt.read_text(encoding='utf-8'), end='')
+PY
+}
+
+emit_udp_dataplane_redesign_overall_report() {
+  local single_json=$1
+  local multiflow_json=$2
+  local summary_txt=$3
+  local summary_json=$4
+  python3 - "$single_json" "$multiflow_json" "$summary_txt" "$summary_json" <<'PY'
+import json, pathlib, sys
+
+single = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
+multiflow = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding='utf-8'))
+summary_txt = pathlib.Path(sys.argv[3])
+summary_json = pathlib.Path(sys.argv[4])
+
+single_overall = single.get('overall', '')
+multiflow_overall = multiflow.get('overall', '')
+if single_overall == 'UDP dataplane redesign is justified as the next UDP baseline':
+    if multiflow_overall == 'UDP dataplane redesign improved relay materially but still needs follow-up tuning':
+        overall = 'UDP dataplane redesign improved relay materially but still needs follow-up tuning'
+    else:
+        overall = 'UDP dataplane redesign is justified as the next UDP baseline'
+else:
+    overall = 'UDP dataplane redesign did not clear the next gate; rethink architecture assumptions'
+
+payload = {
+    'single_flow_overall': single_overall,
+    'multiflow_overall': multiflow_overall,
+    'overall': overall,
+}
+lines = [
+    '=== relayd udp dataplane redesign overall summary ===',
+    f"single-flow: {single_overall}",
+    f"multiflow:   {multiflow_overall}",
+    '',
+    overall,
+]
+summary_txt.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+summary_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+print(summary_txt.read_text(encoding='utf-8'), end='')
+PY
+}
+
+emit_udp_fast_path_overall_report() {
+  local single_json=$1
+  local multiflow_json=$2
+  local summary_txt=$3
+  local summary_json=$4
+  python3 - "$single_json" "$multiflow_json" "$summary_txt" "$summary_json" <<'PY'
+import json, pathlib, sys
+
+single = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
+multiflow = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding='utf-8'))
+summary_txt = pathlib.Path(sys.argv[3])
+summary_json = pathlib.Path(sys.argv[4])
+
+single_overall = single.get('overall', '')
+multiflow_overall = multiflow.get('overall', '')
+if single_overall == 'UDP_SEGMENT fast path is justified as the next UDP baseline':
+    if multiflow_overall == 'workerization shows first-order evidence in the narrow multi-flow suite':
+        overall = 'UDP_SEGMENT fast path is justified as the next UDP baseline'
+    else:
+        overall = 'single-flow fast path improved relay materially, but workerization remains workload-sensitive'
+else:
+    overall = 'fast-path round did not clear the next gate; escalate to io_uring planning'
+
+payload = {
+    'single_flow_overall': single_overall,
+    'multiflow_overall': multiflow_overall,
+    'overall': overall,
+}
+lines = [
+    '=== relayd udp fast path overall summary ===',
+    f"single-flow: {single_overall}",
+    f"multiflow:   {multiflow_overall}",
+    '',
+    overall,
+]
+summary_txt.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+summary_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+print(summary_txt.read_text(encoding='utf-8'), end='')
+PY
+}
+
+emit_udp_io_uring_overall_report() {
+  local single_json=$1
+  local multiflow_json=$2
+  local summary_txt=$3
+  local summary_json=$4
+  python3 - "$single_json" "$multiflow_json" "$summary_txt" "$summary_json" <<'PY'
+import json, pathlib, sys
+
+single = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
+multiflow = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding='utf-8'))
+summary_txt = pathlib.Path(sys.argv[3])
+summary_json = pathlib.Path(sys.argv[4])
+
+single_overall = single.get('overall', '')
+multiflow_overall = multiflow.get('overall', '')
+if single_overall == 'io_uring UDP path is justified as the next UDP baseline':
+    if multiflow_overall == 'workerization shows first-order evidence in the narrow multi-flow suite':
+        overall = 'io_uring UDP path is justified as the next UDP baseline'
+    else:
+        overall = 'single-flow io_uring improved relay materially, while workerization remains workload-sensitive but useful'
+else:
+    overall = 'io_uring round did not clear the next gate; reevaluate receive-offload / broader dataplane options'
+
+payload = {
+    'single_flow_overall': single_overall,
+    'multiflow_overall': multiflow_overall,
+    'overall': overall,
+}
+lines = [
+    '=== relayd udp io_uring overall summary ===',
+    f"single-flow: {single_overall}",
+    f"multiflow:   {multiflow_overall}",
+    '',
+    overall,
+]
+summary_txt.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+summary_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+print(summary_txt.read_text(encoding='utf-8'), end='')
+PY
+}
+
+emit_udp_multiflow_worker_report() {
+  local results_file=$1
+  local summary_txt=$2
+  local summary_json=$3
+  python3 - "$results_file" "$summary_txt" "$summary_json" <<'PY'
+import json, pathlib, statistics, sys
+
+results_path = pathlib.Path(sys.argv[1])
+summary_txt = pathlib.Path(sys.argv[2])
+summary_json = pathlib.Path(sys.argv[3])
+records = [json.loads(line) for line in results_path.read_text(encoding='utf-8').splitlines() if line.strip()]
+if not records:
+    raise SystemExit('no UDP multi-flow worker records found')
+
+UNITS_BPS = ['bps', 'kbps', 'mbps', 'gbps']
+def fmt(value):
+    value = float(value)
+    idx = 0
+    while value >= 1000.0 and idx < len(UNITS_BPS) - 1:
+        value /= 1000.0
+        idx += 1
+    return f"{value:.2f} {UNITS_BPS[idx]}"
+
+def summarize(items):
+    return {
+        'median_bps': statistics.median([i['bits_per_second'] for i in items]),
+        'median_loss_percent': statistics.median([i['lost_percent'] for i in items]),
+        'median_worker_packets_in': statistics.median([i.get('udp_worker_packets_in_delta', 0) for i in items]),
+        'median_worker_packets_out': statistics.median([i.get('udp_worker_packets_out_delta', 0) for i in items]),
+    }
+
+grouped = {}
+for rec in records:
+    grouped.setdefault(rec['path'], []).append(rec)
+
+if 'relay-multiflow-baseline' not in grouped or 'relay-multiflow-workerized' not in grouped:
+    raise SystemExit('missing baseline or workerized multi-flow records')
+baseline = summarize(grouped['relay-multiflow-baseline'])
+workerized = summarize(grouped['relay-multiflow-workerized'])
+
+worker_vs_base = workerized['median_bps'] / baseline['median_bps'] if baseline['median_bps'] else None
+loss_delta = baseline['median_loss_percent'] - workerized['median_loss_percent']
+decision = 'workerization still lacks first-order evidence on this runner'
+if worker_vs_base is not None and (worker_vs_base >= 1.15 or loss_delta >= 10.0):
+    decision = 'workerization shows first-order evidence in the narrow multi-flow suite'
+
+summary = {
+    'baseline': baseline,
+    'workerized': workerized,
+    'workerized_vs_baseline_ratio': worker_vs_base,
+    'loss_delta_pp': loss_delta,
+    'overall': decision,
+}
+lines = [
+    '=== relayd udp fast-path multi-flow workerization summary ===',
+    f"baseline throughput {fmt(baseline['median_bps'])}, loss {baseline['median_loss_percent']:.2f}%",
+    f"workerized throughput {fmt(workerized['median_bps'])}, loss {workerized['median_loss_percent']:.2f}%",
+    f"workerized/baseline {('n/a' if worker_vs_base is None else f'{worker_vs_base:.2f}x')}, loss delta {loss_delta:.2f} pp, "
+    f"median worker packets in/out {workerized['median_worker_packets_in']:.0f}/{workerized['median_worker_packets_out']:.0f}",
+    '',
+    decision,
+]
+summary_txt.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+summary_json.write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+print(summary_txt.read_text(encoding='utf-8'), end='')
+PY
+}
+
+emit_udp_fast_path_overall_report() {
+  local single_json=$1
+  local multiflow_json=$2
+  local summary_txt=$3
+  local summary_json=$4
+  python3 - "$single_json" "$multiflow_json" "$summary_txt" "$summary_json" <<'PY'
+import json, pathlib, sys
+
+single = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
+multiflow = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding='utf-8'))
+summary_txt = pathlib.Path(sys.argv[3])
+summary_json = pathlib.Path(sys.argv[4])
+
+single_overall = single.get('overall', '')
+multiflow_overall = multiflow.get('overall', '')
+if single_overall == 'UDP_SEGMENT fast path is justified as the next UDP baseline':
+    if multiflow_overall == 'workerization shows first-order evidence in the narrow multi-flow suite':
+        overall = 'UDP_SEGMENT fast path is justified as the next UDP baseline'
+    else:
+        overall = 'single-flow fast path improved relay materially, but workerization remains workload-sensitive'
+else:
+    overall = 'fast-path round did not clear the next gate; escalate to io_uring planning'
+
+payload = {
+    'single_flow_overall': single_overall,
+    'multiflow_overall': multiflow_overall,
+    'overall': overall,
+}
+lines = [
+    '=== relayd udp fast-path overall summary ===',
+    f"single-flow: {single_overall}",
+    f"multiflow:   {multiflow_overall}",
+    '',
+    overall,
+]
+summary_txt.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+summary_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+print(summary_txt.read_text(encoding='utf-8'), end='')
+PY
+}
+
+run_udp_multiflow_workerization_suite() {
+  local prev_udp_session_workers=$UDP_SESSION_WORKERS
+  local prev_fast_path=$UDP_FAST_PATH_ENABLED
+  local prev_gro=$UDP_GRO_ENABLED
+  local repetition trial_dir output_prefix
+  mkdir -p "${RUN_DIR}/udp-fast-path-multiflow"
+  : >"$UDP_FAST_PATH_MULTIFLOW_RESULTS"
+
+  UDP_FAST_PATH_ENABLED=1
+  UDP_GRO_ENABLED=0
+  UDP_SESSION_WORKERS=0
+  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-fast-multiflow-baseline "$TCP_SESSION_MODEL_ENABLED" "$TCP_SESSION_MODEL_WORKERS" "$TCP_SESSION_MODEL_SHARDED_ACCEPT" "$TCP_SESSION_MODEL_ACCEPT_BALANCED"
+  for ((repetition = 1; repetition <= IPERF_REPETITIONS; repetition++)); do
+    trial_dir="${RUN_DIR}/udp-fast-path-multiflow/rep-${repetition}"
+    mkdir -p "$trial_dir"
+    output_prefix="${trial_dir}/relay-multiflow-baseline"
+    run_udp_relay_trial "$UDP_MULTI_FLOW_RATE" "$UDP_MULTI_FLOW_PACKET_SIZE" "$repetition" "$UDP_MULTI_FLOW_DURATION" "$output_prefix" relay-multiflow-baseline "$UDP_MULTI_FLOW_STREAMS" "$UDP_FAST_PATH_MULTIFLOW_RESULTS"
+  done
+  stop_relayd
+
+  UDP_SESSION_WORKERS=${prev_udp_session_workers:-2}
+  if [[ "$UDP_SESSION_WORKERS" -lt 2 ]]; then
+    UDP_SESSION_WORKERS=2
+  fi
+  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-fast-multiflow-workerized "$TCP_SESSION_MODEL_ENABLED" "$TCP_SESSION_MODEL_WORKERS" "$TCP_SESSION_MODEL_SHARDED_ACCEPT" "$TCP_SESSION_MODEL_ACCEPT_BALANCED"
+  for ((repetition = 1; repetition <= IPERF_REPETITIONS; repetition++)); do
+    trial_dir="${RUN_DIR}/udp-fast-path-multiflow/rep-${repetition}"
+    output_prefix="${trial_dir}/relay-multiflow-workerized"
+    run_udp_relay_trial "$UDP_MULTI_FLOW_RATE" "$UDP_MULTI_FLOW_PACKET_SIZE" "$repetition" "$UDP_MULTI_FLOW_DURATION" "$output_prefix" relay-multiflow-workerized "$UDP_MULTI_FLOW_STREAMS" "$UDP_FAST_PATH_MULTIFLOW_RESULTS"
+  done
+  stop_relayd
+  UDP_FAST_PATH_ENABLED=$prev_fast_path
+  UDP_GRO_ENABLED=$prev_gro
+  UDP_SESSION_WORKERS=$prev_udp_session_workers
+
+  emit_udp_multiflow_worker_report "$UDP_FAST_PATH_MULTIFLOW_RESULTS" "$UDP_FAST_PATH_MULTIFLOW_SUMMARY_TXT" "$UDP_FAST_PATH_MULTIFLOW_SUMMARY_JSON"
+}
+
+emit_udp_workerized_report() {
+  local results_file=$1
+  local summary_txt=$2
+  local summary_json=$3
+  local focus_10_txt=$4
+  local focus_25_txt=$5
+  python3 - "$results_file" "$summary_txt" "$summary_json" "$focus_10_txt" "$focus_25_txt" <<'PY'
+import json, pathlib, statistics, sys
+
+results_path = pathlib.Path(sys.argv[1])
+summary_txt = pathlib.Path(sys.argv[2])
+summary_json = pathlib.Path(sys.argv[3])
+focus10 = pathlib.Path(sys.argv[4])
+focus25 = pathlib.Path(sys.argv[5])
+records = [json.loads(line) for line in results_path.read_text(encoding='utf-8').splitlines() if line.strip()]
+if not records:
+    raise SystemExit('no UDP workerized records found')
+
+UNITS_BPS = ['bps', 'kbps', 'mbps', 'gbps']
+def fmt(value):
+    value = float(value)
+    idx = 0
+    while value >= 1000.0 and idx < len(UNITS_BPS) - 1:
+        value /= 1000.0
+        idx += 1
+    return f"{value:.2f} {UNITS_BPS[idx]}"
+
+def summarize(items):
+    return {
+        'median_bps': statistics.median([i['bits_per_second'] for i in items]),
+        'median_loss_percent': statistics.median([i['lost_percent'] for i in items]),
+        'median_udp_worker_packets_in_delta': statistics.median([i.get('udp_worker_packets_in_delta', 0) for i in items]),
+        'median_udp_worker_packets_out_delta': statistics.median([i.get('udp_worker_packets_out_delta', 0) for i in items]),
+    }
+
+grouped = {}
+for rec in records:
+    grouped.setdefault((rec['rate'], rec['packet_size'], rec['path']), []).append(rec)
+
+lines = ['=== relayd udp workerized summary ===']
+summary = {'pairs': {}}
+for rate in ['10G', '25G']:
+    keys = {
+        'direct': (rate, 1472, 'direct'),
+        'baseline': (rate, 1472, 'relay-baseline'),
+        'probe': (rate, 1472, 'relay-probe'),
+        'workerized': (rate, 1472, 'relay-workerized'),
+    }
+    if not all(key in grouped for key in keys.values()):
+        continue
+    pair = {name: summarize(grouped[key]) for name, key in keys.items()}
+    pair['probe_vs_baseline_ratio'] = pair['probe']['median_bps'] / pair['baseline']['median_bps'] if pair['baseline']['median_bps'] else None
+    pair['workerized_vs_baseline_ratio'] = pair['workerized']['median_bps'] / pair['baseline']['median_bps'] if pair['baseline']['median_bps'] else None
+    pair['workerized_vs_direct_ratio'] = pair['workerized']['median_bps'] / pair['direct']['median_bps'] if pair['direct']['median_bps'] else None
+    pair['workerized_loss_delta_pp'] = pair['baseline']['median_loss_percent'] - pair['workerized']['median_loss_percent']
+    summary['pairs'][rate] = pair
+    line = (
+        f"{rate}/1472: direct {fmt(pair['direct']['median_bps'])}, baseline {fmt(pair['baseline']['median_bps'])}, "
+        f"probe {fmt(pair['probe']['median_bps'])}, workerized {fmt(pair['workerized']['median_bps'])}, "
+        f"probe/base {pair['probe_vs_baseline_ratio']:.2f}x, worker/base {pair['workerized_vs_baseline_ratio']:.2f}x, "
+        f"worker/direct {pair['workerized_vs_direct_ratio']:.2f}x, loss delta {pair['workerized_loss_delta_pp']:.2f} pp"
+    )
+    lines.append(line)
+    (focus10 if rate == '10G' else focus25).write_text(line + '\n', encoding='utf-8')
+
+overall = 'udp workerized path did not clear the next gate'
+if '10G' in summary['pairs'] and '25G' in summary['pairs']:
+    p10 = summary['pairs']['10G']
+    p25 = summary['pairs']['25G']
+    if (
+        p10['workerized_vs_baseline_ratio'] >= 1.35 and
+        p25['workerized_vs_baseline_ratio'] >= 1.35 and
+        p10['workerized_loss_delta_pp'] >= 20.0 and
+        p25['workerized_loss_delta_pp'] >= 20.0 and
+        p10['workerized_vs_direct_ratio'] >= 0.80 and
+        p25['workerized_vs_direct_ratio'] >= 0.85
+    ):
+        overall = 'UDP structural bottleneck confirmed and workerized path justified'
+summary['overall'] = overall
+lines.extend(['', overall])
+summary_txt.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+summary_json.write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+print(summary_txt.read_text(encoding='utf-8'), end='')
+PY
+}
+
+run_udp_workerized_focus_suite() {
+  local prev_udp_session_workers=$UDP_SESSION_WORKERS
+  local rate repetition trial_dir output_prefix
+  mkdir -p "${RUN_DIR}/udp-workerized"
+  : >"$UDP_WORKERIZED_RESULTS"
+  UDP_PACKET_SIZE=1472
+
+  for rate in 10G 25G; do
+    for ((repetition = 1; repetition <= IPERF_REPETITIONS; repetition++)); do
+      trial_dir="${RUN_DIR}/udp-workerized/rate-${rate}/rep-${repetition}"
+      mkdir -p "$trial_dir"
+      output_prefix="${trial_dir}/direct"
+      run_udp_direct_trial "$rate" "$UDP_PACKET_SIZE" "$repetition" "$UDP_MATRIX_DURATION" "$output_prefix"
+    done
+  done
+
+  UDP_SESSION_WORKERS=0
+  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-worker-baseline "$TCP_SESSION_MODEL_ENABLED" "$TCP_SESSION_MODEL_WORKERS" "$TCP_SESSION_MODEL_SHARDED_ACCEPT" "$TCP_SESSION_MODEL_ACCEPT_BALANCED"
+  for rate in 10G 25G; do
+    for ((repetition = 1; repetition <= IPERF_REPETITIONS; repetition++)); do
+      trial_dir="${RUN_DIR}/udp-workerized/rate-${rate}/rep-${repetition}"
+      output_prefix="${trial_dir}/relay-baseline"
+      run_udp_relay_trial "$rate" "$UDP_PACKET_SIZE" "$repetition" "$UDP_MATRIX_DURATION" "$output_prefix" relay-baseline
+    done
+  done
+  stop_relayd
+
+  UDP_SESSION_WORKERS=1
+  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-worker-probe "$TCP_SESSION_MODEL_ENABLED" "$TCP_SESSION_MODEL_WORKERS" "$TCP_SESSION_MODEL_SHARDED_ACCEPT" "$TCP_SESSION_MODEL_ACCEPT_BALANCED"
+  for rate in 10G 25G; do
+    for ((repetition = 1; repetition <= IPERF_REPETITIONS; repetition++)); do
+      trial_dir="${RUN_DIR}/udp-workerized/rate-${rate}/rep-${repetition}"
+      output_prefix="${trial_dir}/relay-probe"
+      run_udp_relay_trial "$rate" "$UDP_PACKET_SIZE" "$repetition" "$UDP_MATRIX_DURATION" "$output_prefix" relay-probe
+    done
+  done
+  stop_relayd
+
+  UDP_SESSION_WORKERS=${prev_udp_session_workers:-2}
+  if [[ "$UDP_SESSION_WORKERS" -lt 2 ]]; then
+    UDP_SESSION_WORKERS=2
+  fi
+  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-workerized "$TCP_SESSION_MODEL_ENABLED" "$TCP_SESSION_MODEL_WORKERS" "$TCP_SESSION_MODEL_SHARDED_ACCEPT" "$TCP_SESSION_MODEL_ACCEPT_BALANCED"
+  for rate in 10G 25G; do
+    for ((repetition = 1; repetition <= IPERF_REPETITIONS; repetition++)); do
+      trial_dir="${RUN_DIR}/udp-workerized/rate-${rate}/rep-${repetition}"
+      output_prefix="${trial_dir}/relay-workerized"
+      run_udp_relay_trial "$rate" "$UDP_PACKET_SIZE" "$repetition" "$UDP_MATRIX_DURATION" "$output_prefix" relay-workerized
+    done
+  done
+  stop_relayd
+  UDP_SESSION_WORKERS=$prev_udp_session_workers
+
+  emit_udp_workerized_report "$UDP_WORKERIZED_RESULTS" "$UDP_WORKERIZED_SUMMARY_TXT" "$UDP_WORKERIZED_SUMMARY_JSON" "$UDP_WORKERIZED_FOCUS_10_TXT" "$UDP_WORKERIZED_FOCUS_25_TXT"
+}
+
+run_udp_fast_path_focus_suite() {
+  local prev_fast_path=$UDP_FAST_PATH_ENABLED
+  local prev_packet_size=$UDP_PACKET_SIZE
+  local rate repetition trial_dir output_prefix
+  mkdir -p "${RUN_DIR}/udp-fast-path"
+  : >"$UDP_FAST_PATH_RESULTS"
+  UDP_PACKET_SIZE="${UDP_FAST_PATH_SEGMENT_SIZE}"
+
+  for rate in 10G 25G; do
+    for ((repetition = 1; repetition <= IPERF_REPETITIONS; repetition++)); do
+      trial_dir="${RUN_DIR}/udp-fast-path/rate-${rate}/rep-${repetition}"
+      mkdir -p "$trial_dir"
+      output_prefix="${trial_dir}/direct"
+      run_udp_direct_trial "$rate" "$UDP_PACKET_SIZE" "$repetition" "$UDP_MATRIX_DURATION" "$output_prefix"
+    done
+  done
+
+  UDP_FAST_PATH_ENABLED=0
+  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-fast-baseline "$TCP_SESSION_MODEL_ENABLED" "$TCP_SESSION_MODEL_WORKERS" "$TCP_SESSION_MODEL_SHARDED_ACCEPT" "$TCP_SESSION_MODEL_ACCEPT_BALANCED"
+  for rate in 10G 25G; do
+    for ((repetition = 1; repetition <= IPERF_REPETITIONS; repetition++)); do
+      trial_dir="${RUN_DIR}/udp-fast-path/rate-${rate}/rep-${repetition}"
+      output_prefix="${trial_dir}/relay-baseline"
+      run_udp_relay_trial "$rate" "$UDP_PACKET_SIZE" "$repetition" "$UDP_MATRIX_DURATION" "$output_prefix" relay-baseline
+    done
+  done
+  stop_relayd
+
+  UDP_FAST_PATH_ENABLED=1
+  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-fast-path "$TCP_SESSION_MODEL_ENABLED" "$TCP_SESSION_MODEL_WORKERS" "$TCP_SESSION_MODEL_SHARDED_ACCEPT" "$TCP_SESSION_MODEL_ACCEPT_BALANCED"
+  for rate in 10G 25G; do
+    for ((repetition = 1; repetition <= IPERF_REPETITIONS; repetition++)); do
+      trial_dir="${RUN_DIR}/udp-fast-path/rate-${rate}/rep-${repetition}"
+      output_prefix="${trial_dir}/relay-fast"
+      run_udp_relay_trial "$rate" "$UDP_PACKET_SIZE" "$repetition" "$UDP_MATRIX_DURATION" "$output_prefix" relay-fast
+    done
+  done
+  stop_relayd
+
+  UDP_FAST_PATH_ENABLED=$prev_fast_path
+  UDP_PACKET_SIZE=$prev_packet_size
+  emit_udp_fast_path_report "$UDP_FAST_PATH_RESULTS" "$UDP_FAST_PATH_SUMMARY_TXT" "$UDP_FAST_PATH_SUMMARY_JSON" "$UDP_FAST_PATH_FOCUS_10_TXT" "$UDP_FAST_PATH_FOCUS_25_TXT"
+  run_udp_multiflow_workerization_suite
+  emit_udp_fast_path_overall_report "$UDP_FAST_PATH_SUMMARY_JSON" "$UDP_FAST_PATH_MULTIFLOW_SUMMARY_JSON" "$UDP_FAST_PATH_OVERALL_SUMMARY_TXT" "$UDP_FAST_PATH_OVERALL_SUMMARY_JSON"
+}
+
+run_udp_gro_focus_suite() {
+  local prev_fast_path=$UDP_FAST_PATH_ENABLED
+  local prev_gro=$UDP_GRO_ENABLED
+  local prev_packet_size=$UDP_PACKET_SIZE
+  local rate repetition trial_dir output_prefix
+  mkdir -p "${RUN_DIR}/udp-gro"
+  : >"$UDP_GRO_RESULTS"
+  UDP_PACKET_SIZE=1472
+  UDP_FAST_PATH_ENABLED=1
+
+  for rate in 10G 25G; do
+    for ((repetition = 1; repetition <= IPERF_REPETITIONS; repetition++)); do
+      trial_dir="${RUN_DIR}/udp-gro/rate-${rate}/rep-${repetition}"
+      mkdir -p "$trial_dir"
+      output_prefix="${trial_dir}/direct"
+      run_udp_direct_trial "$rate" "$UDP_PACKET_SIZE" "$repetition" "$UDP_MATRIX_DURATION" "$output_prefix"
+    done
+  done
+
+  UDP_GRO_ENABLED=0
+  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-gro-baseline "$TCP_SESSION_MODEL_ENABLED" "$TCP_SESSION_MODEL_WORKERS" "$TCP_SESSION_MODEL_SHARDED_ACCEPT" "$TCP_SESSION_MODEL_ACCEPT_BALANCED"
+  for rate in 10G 25G; do
+    for ((repetition = 1; repetition <= IPERF_REPETITIONS; repetition++)); do
+      trial_dir="${RUN_DIR}/udp-gro/rate-${rate}/rep-${repetition}"
+      output_prefix="${trial_dir}/relay-fast-baseline"
+      run_udp_relay_trial "$rate" "$UDP_PACKET_SIZE" "$repetition" "$UDP_MATRIX_DURATION" "$output_prefix" relay-fast-baseline
+    done
+  done
+  stop_relayd
+
+  UDP_GRO_ENABLED=1
+  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-gro "$TCP_SESSION_MODEL_ENABLED" "$TCP_SESSION_MODEL_WORKERS" "$TCP_SESSION_MODEL_SHARDED_ACCEPT" "$TCP_SESSION_MODEL_ACCEPT_BALANCED"
+  for rate in 10G 25G; do
+    for ((repetition = 1; repetition <= IPERF_REPETITIONS; repetition++)); do
+      trial_dir="${RUN_DIR}/udp-gro/rate-${rate}/rep-${repetition}"
+      output_prefix="${trial_dir}/relay-gro"
+      run_udp_relay_trial "$rate" "$UDP_PACKET_SIZE" "$repetition" "$UDP_MATRIX_DURATION" "$output_prefix" relay-gro
+    done
+  done
+  stop_relayd
+
+  UDP_GRO_ENABLED=$prev_gro
+  UDP_FAST_PATH_ENABLED=$prev_fast_path
+  UDP_PACKET_SIZE=$prev_packet_size
+  emit_udp_gro_report "$UDP_GRO_RESULTS" "$UDP_GRO_SUMMARY_TXT" "$UDP_GRO_SUMMARY_JSON" "$UDP_GRO_FOCUS_10_TXT" "$UDP_GRO_FOCUS_25_TXT"
+  run_udp_multiflow_workerization_suite
+  emit_udp_gro_overall_report "$UDP_GRO_SUMMARY_JSON" "$UDP_FAST_PATH_MULTIFLOW_SUMMARY_JSON" "$UDP_GRO_OVERALL_SUMMARY_TXT" "$UDP_GRO_OVERALL_SUMMARY_JSON"
+}
+
+run_udp_dataplane_redesign_suite() {
+  local prev_fast_path=$UDP_FAST_PATH_ENABLED
+  local prev_io_uring=$UDP_IO_URING_ENABLED
+  local prev_gro=$UDP_GRO_ENABLED
+  local prev_redesign=$UDP_DATAPLANE_REDESIGN_ENABLED
+  local prev_udp_workers=$UDP_SESSION_WORKERS
+  local prev_packet_size=$UDP_PACKET_SIZE
+  local rate repetition trial_dir output_prefix
+  mkdir -p "${RUN_DIR}/udp-dataplane-redesign"
+  : >"$UDP_DATAPLANE_REDESIGN_RESULTS"
+  : >"${RUN_DIR}/udp-dataplane-redesign-multiflow-results.ndjson"
+  UDP_PACKET_SIZE=1472
+  UDP_FAST_PATH_ENABLED=1
+  UDP_IO_URING_ENABLED=0
+  UDP_GRO_ENABLED=0
+
+  for rate in 10G 25G; do
+    for ((repetition = 1; repetition <= IPERF_REPETITIONS; repetition++)); do
+      trial_dir="${RUN_DIR}/udp-dataplane-redesign/rate-${rate}/rep-${repetition}"
+      mkdir -p "$trial_dir"
+      output_prefix="${trial_dir}/direct"
+      run_udp_direct_trial "$rate" "$UDP_PACKET_SIZE" "$repetition" "$UDP_MATRIX_DURATION" "$output_prefix"
+    done
+  done
+
+  UDP_DATAPLANE_REDESIGN_ENABLED=0
+  UDP_SESSION_WORKERS=0
+  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-dataplane-baseline "$TCP_SESSION_MODEL_ENABLED" "$TCP_SESSION_MODEL_WORKERS" "$TCP_SESSION_MODEL_SHARDED_ACCEPT" "$TCP_SESSION_MODEL_ACCEPT_BALANCED"
+  for rate in 10G 25G; do
+    for ((repetition = 1; repetition <= IPERF_REPETITIONS; repetition++)); do
+      trial_dir="${RUN_DIR}/udp-dataplane-redesign/rate-${rate}/rep-${repetition}"
+      output_prefix="${trial_dir}/relay-fast-baseline"
+      run_udp_relay_trial "$rate" "$UDP_PACKET_SIZE" "$repetition" "$UDP_MATRIX_DURATION" "$output_prefix" relay-fast-baseline
+    done
+  done
+  stop_relayd
+
+  UDP_DATAPLANE_REDESIGN_ENABLED=1
+  UDP_SESSION_WORKERS=1
+  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-dataplane-redesign "$TCP_SESSION_MODEL_ENABLED" "$TCP_SESSION_MODEL_WORKERS" "$TCP_SESSION_MODEL_SHARDED_ACCEPT" "$TCP_SESSION_MODEL_ACCEPT_BALANCED"
+  for rate in 10G 25G; do
+    for ((repetition = 1; repetition <= IPERF_REPETITIONS; repetition++)); do
+      trial_dir="${RUN_DIR}/udp-dataplane-redesign/rate-${rate}/rep-${repetition}"
+      output_prefix="${trial_dir}/relay-dataplane-redesign"
+      run_udp_relay_trial "$rate" "$UDP_PACKET_SIZE" "$repetition" "$UDP_MATRIX_DURATION" "$output_prefix" relay-dataplane-redesign
+    done
+  done
+  stop_relayd
+
+  emit_udp_dataplane_redesign_report "$UDP_DATAPLANE_REDESIGN_RESULTS" "$UDP_DATAPLANE_REDESIGN_SUMMARY_TXT" "$UDP_DATAPLANE_REDESIGN_SUMMARY_JSON" "$UDP_DATAPLANE_REDESIGN_FOCUS_10_TXT" "$UDP_DATAPLANE_REDESIGN_FOCUS_25_TXT"
+
+  mkdir -p "${RUN_DIR}/udp-dataplane-redesign-multiflow"
+  : >"${RUN_DIR}/udp-dataplane-redesign-multiflow-results.ndjson"
+  UDP_DATAPLANE_REDESIGN_ENABLED=1
+  UDP_SESSION_WORKERS=1
+  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-dataplane-multiflow-single "$TCP_SESSION_MODEL_ENABLED" "$TCP_SESSION_MODEL_WORKERS" "$TCP_SESSION_MODEL_SHARDED_ACCEPT" "$TCP_SESSION_MODEL_ACCEPT_BALANCED"
+  for ((repetition = 1; repetition <= IPERF_REPETITIONS; repetition++)); do
+    trial_dir="${RUN_DIR}/udp-dataplane-redesign-multiflow/rep-${repetition}"
+    mkdir -p "$trial_dir"
+    output_prefix="${trial_dir}/relay-redesign-single"
+    run_udp_relay_trial "$UDP_MULTI_FLOW_RATE" "$UDP_MULTI_FLOW_PACKET_SIZE" "$repetition" "$UDP_MULTI_FLOW_DURATION" "$output_prefix" relay-redesign-single "$UDP_MULTI_FLOW_STREAMS" "${RUN_DIR}/udp-dataplane-redesign-multiflow-results.ndjson"
+  done
+  stop_relayd
+
+  UDP_DATAPLANE_REDESIGN_ENABLED=1
+  UDP_SESSION_WORKERS=4
+  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-dataplane-multiflow-workerized "$TCP_SESSION_MODEL_ENABLED" "$TCP_SESSION_MODEL_WORKERS" "$TCP_SESSION_MODEL_SHARDED_ACCEPT" "$TCP_SESSION_MODEL_ACCEPT_BALANCED"
+  for ((repetition = 1; repetition <= IPERF_REPETITIONS; repetition++)); do
+    trial_dir="${RUN_DIR}/udp-dataplane-redesign-multiflow/rep-${repetition}"
+    output_prefix="${trial_dir}/relay-redesign-workerized"
+    run_udp_relay_trial "$UDP_MULTI_FLOW_RATE" "$UDP_MULTI_FLOW_PACKET_SIZE" "$repetition" "$UDP_MULTI_FLOW_DURATION" "$output_prefix" relay-redesign-workerized "$UDP_MULTI_FLOW_STREAMS" "${RUN_DIR}/udp-dataplane-redesign-multiflow-results.ndjson"
+  done
+  stop_relayd
+
+  emit_udp_dataplane_redesign_multiflow_report "${RUN_DIR}/udp-dataplane-redesign-multiflow-results.ndjson" "$UDP_DATAPLANE_REDESIGN_MULTIFLOW_SUMMARY_TXT" "$UDP_DATAPLANE_REDESIGN_MULTIFLOW_SUMMARY_JSON"
+  emit_udp_dataplane_redesign_overall_report "$UDP_DATAPLANE_REDESIGN_SUMMARY_JSON" "$UDP_DATAPLANE_REDESIGN_MULTIFLOW_SUMMARY_JSON" "$UDP_DATAPLANE_REDESIGN_OVERALL_SUMMARY_TXT" "$UDP_DATAPLANE_REDESIGN_OVERALL_SUMMARY_JSON"
+
+  UDP_FAST_PATH_ENABLED=$prev_fast_path
+  UDP_IO_URING_ENABLED=$prev_io_uring
+  UDP_GRO_ENABLED=$prev_gro
+  UDP_DATAPLANE_REDESIGN_ENABLED=$prev_redesign
+  UDP_SESSION_WORKERS=$prev_udp_workers
+  UDP_PACKET_SIZE=$prev_packet_size
+}
+
+run_udp_io_uring_focus_suite() {
+  local prev_fast_path=$UDP_FAST_PATH_ENABLED
+  local prev_io_uring=$UDP_IO_URING_ENABLED
+  local prev_packet_size=$UDP_PACKET_SIZE
+  local rate repetition trial_dir output_prefix
+  mkdir -p "${RUN_DIR}/udp-io-uring"
+  : >"$UDP_IO_URING_RESULTS"
+  UDP_PACKET_SIZE=1472
+  UDP_FAST_PATH_ENABLED=1
+
+  for rate in 10G 25G; do
+    for ((repetition = 1; repetition <= IPERF_REPETITIONS; repetition++)); do
+      trial_dir="${RUN_DIR}/udp-io-uring/rate-${rate}/rep-${repetition}"
+      mkdir -p "$trial_dir"
+      output_prefix="${trial_dir}/direct"
+      run_udp_direct_trial "$rate" "$UDP_PACKET_SIZE" "$repetition" "$UDP_MATRIX_DURATION" "$output_prefix"
+    done
+  done
+
+  UDP_IO_URING_ENABLED=0
+  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-io-uring-baseline "$TCP_SESSION_MODEL_ENABLED" "$TCP_SESSION_MODEL_WORKERS" "$TCP_SESSION_MODEL_SHARDED_ACCEPT" "$TCP_SESSION_MODEL_ACCEPT_BALANCED"
+  for rate in 10G 25G; do
+    for ((repetition = 1; repetition <= IPERF_REPETITIONS; repetition++)); do
+      trial_dir="${RUN_DIR}/udp-io-uring/rate-${rate}/rep-${repetition}"
+      output_prefix="${trial_dir}/relay-fast-baseline"
+      run_udp_relay_trial "$rate" "$UDP_PACKET_SIZE" "$repetition" "$UDP_MATRIX_DURATION" "$output_prefix" relay-fast-baseline
+    done
+  done
+  stop_relayd
+
+  UDP_IO_URING_ENABLED=1
+  start_relayd "$TCP_SPLICE_ENABLED" "$FORCE_TCP_COPY_FALLBACK" udp-io-uring "$TCP_SESSION_MODEL_ENABLED" "$TCP_SESSION_MODEL_WORKERS" "$TCP_SESSION_MODEL_SHARDED_ACCEPT" "$TCP_SESSION_MODEL_ACCEPT_BALANCED"
+  for rate in 10G 25G; do
+    for ((repetition = 1; repetition <= IPERF_REPETITIONS; repetition++)); do
+      trial_dir="${RUN_DIR}/udp-io-uring/rate-${rate}/rep-${repetition}"
+      output_prefix="${trial_dir}/relay-io-uring"
+      run_udp_relay_trial "$rate" "$UDP_PACKET_SIZE" "$repetition" "$UDP_MATRIX_DURATION" "$output_prefix" relay-io-uring
+    done
+  done
+  stop_relayd
+
+  UDP_IO_URING_ENABLED=$prev_io_uring
+  UDP_FAST_PATH_ENABLED=$prev_fast_path
+  UDP_PACKET_SIZE=$prev_packet_size
+  emit_udp_io_uring_report "$UDP_IO_URING_RESULTS" "$UDP_IO_URING_SUMMARY_TXT" "$UDP_IO_URING_SUMMARY_JSON" "$UDP_IO_URING_FOCUS_10_TXT" "$UDP_IO_URING_FOCUS_25_TXT"
+  run_udp_multiflow_workerization_suite
+  emit_udp_io_uring_overall_report "$UDP_IO_URING_SUMMARY_JSON" "$UDP_FAST_PATH_MULTIFLOW_SUMMARY_JSON" "$UDP_IO_URING_OVERALL_SUMMARY_TXT" "$UDP_IO_URING_OVERALL_SUMMARY_JSON"
+}
 publish_artifacts() {
   python3 - "$RUN_DIR" "$LATEST_RUN_DIR" <<'PY'
 import pathlib
@@ -1966,6 +3186,19 @@ IPERF_DURATION=${IPERF_DURATION}
 UDP_MATRIX_DURATION=${UDP_MATRIX_DURATION}
 UDP_RATE=${UDP_RATE}
 UDP_PACKET_SIZE=${UDP_PACKET_SIZE}
+UDP_STREAMS=${UDP_STREAMS}
+UDP_SESSION_WORKERS=${UDP_SESSION_WORKERS}
+UDP_IO_URING_ENABLED=${UDP_IO_URING_ENABLED}
+UDP_GRO_ENABLED=${UDP_GRO_ENABLED}
+UDP_DATAPLANE_REDESIGN_ENABLED=${UDP_DATAPLANE_REDESIGN_ENABLED}
+UDP_FAST_PATH_ENABLED=${UDP_FAST_PATH_ENABLED}
+UDP_FAST_PATH_SEGMENT_SIZE=${UDP_FAST_PATH_SEGMENT_SIZE}
+UDP_FAST_PATH_GSO_BURST=${UDP_FAST_PATH_GSO_BURST}
+UDP_MULTI_FLOW_STREAMS=${UDP_MULTI_FLOW_STREAMS}
+UDP_MULTI_FLOW_RATE=${UDP_MULTI_FLOW_RATE}
+UDP_MULTI_FLOW_PACKET_SIZE=${UDP_MULTI_FLOW_PACKET_SIZE}
+UDP_MULTI_FLOW_DURATION=${UDP_MULTI_FLOW_DURATION}
+UDP_COMPARE_MODE=${UDP_COMPARE_MODE}
 TCP_SESSION_MODEL_ENABLED=${TCP_SESSION_MODEL_ENABLED}
 TCP_SESSION_MODEL_WORKERS=${TCP_SESSION_MODEL_WORKERS}
 TCP_SESSION_MODEL_ACCEPT_BALANCED=${TCP_SESSION_MODEL_ACCEPT_BALANCED}
@@ -1992,9 +3225,13 @@ run_iperf_udp_client() {
   local packet_size=$4
   local output_json=$5
   local output_log=$6
+  local streams=${7:-1}
   local -a args
 
   args=(-c "$TARGET_HOST" -p "$target_port" -u -b "$rate" -t "$duration" -J)
+  if [[ "$streams" -gt 1 ]]; then
+    args+=(-P "$streams")
+  fi
   if [[ -n "$packet_size" ]]; then
     args+=(-l "$packet_size")
   fi
@@ -2021,6 +3258,17 @@ current_tcp_results_file() {
     session-model) printf '%s\n' "$TCP_SESSION_MODEL_RESULTS" ;;
     workerized-session) printf '%s\n' "$TCP_WORKERIZED_SESSION_RESULTS" ;;
     sharded-worker) printf '%s\n' "$TCP_SHARDED_WORKER_RESULTS" ;;
+  esac
+}
+
+current_udp_results_file() {
+  case "$UDP_COMPARE_MODE" in
+    dataplane-redesign) printf '%s\n' "$UDP_DATAPLANE_REDESIGN_RESULTS" ;;
+    fast-path) printf '%s\n' "$UDP_FAST_PATH_RESULTS" ;;
+    gro) printf '%s\n' "$UDP_GRO_RESULTS" ;;
+    io-uring) printf '%s\n' "$UDP_IO_URING_RESULTS" ;;
+    workerized) printf '%s\n' "$UDP_WORKERIZED_RESULTS" ;;
+    baseline) printf '%s\n' "$UDP_MATRIX_RESULTS" ;;
   esac
 }
 
@@ -2457,6 +3705,7 @@ run_udp_direct_trial() {
   local repetition=$3
   local duration=$4
   local output_prefix=$5
+  local path_label=${6:-direct}
   local target_port server_log client_json client_log server_pid
 
   target_port=$(pick_free_port tcp)
@@ -2480,7 +3729,7 @@ run_udp_direct_trial() {
     [[ -n "$udp_loss" ]] && log "udp direct rate=${rate} packet_size=${packet_size} repetition=${repetition} lost_percent=${udp_loss}"
   fi
   wait "$server_pid"
-  append_udp_result "$UDP_MATRIX_RESULTS" direct "$rate" "$packet_size" "$repetition" "$duration" "$client_json" "$client_log" "$server_log"
+  append_udp_result "$(current_udp_results_file)" "$path_label" "$rate" "$packet_size" "$repetition" "$duration" "$client_json" "$client_log" "$server_log"
 }
 
 run_udp_relay_trial() {
@@ -2489,7 +3738,10 @@ run_udp_relay_trial() {
   local repetition=$3
   local duration=$4
   local output_prefix=$5
-  local target_port server_log client_json client_log server_pid
+  local path_label=${6:-relay}
+  local streams=${7:-1}
+  local results_file_override=${8:-}
+  local target_port server_log client_json client_log server_pid before_metrics after_metrics
   local control_id control_port relay_id relay_port
 
   target_port=$(pick_free_port tcp)
@@ -2510,8 +3762,11 @@ run_udp_relay_trial() {
   relay_id=$CREATED_ALLOCATION_ID
   relay_port=$CREATED_RELAY_PORT
   [[ "$control_port" == "$relay_port" ]] || die "iperf3 UDP requires matching TCP control and UDP relay ports, got tcp=${control_port} udp=${relay_port}"
+  before_metrics="${output_prefix}-metrics-before.json"
+  after_metrics="${output_prefix}-metrics-after.json"
+  capture_metrics_snapshot "$before_metrics"
 
-  if ! run_iperf_udp_client "$relay_port" "$rate" "$duration" "$packet_size" "$client_json" "$client_log"; then
+  if ! run_iperf_udp_client "$relay_port" "$rate" "$duration" "$packet_size" "$client_json" "$client_log" "$streams"; then
     delete_allocation "$control_id"
     delete_allocation "$relay_id"
     wait "$server_pid" 2>/dev/null || true
@@ -2523,12 +3778,36 @@ run_udp_relay_trial() {
     [[ -n "$udp_loss" ]] && log "udp relay rate=${rate} packet_size=${packet_size} repetition=${repetition} lost_percent=${udp_loss}"
   fi
   wait "$server_pid"
+  capture_metrics_snapshot "$after_metrics"
   delete_allocation "$control_id"
   delete_allocation "$relay_id"
-  append_udp_result "$UDP_MATRIX_RESULTS" relay "$rate" "$packet_size" "$repetition" "$duration" "$client_json" "$client_log" "$server_log"
+  append_udp_result "${results_file_override:-$(current_udp_results_file)}" "$path_label" "$rate" "$packet_size" "$repetition" "$duration" "$client_json" "$client_log" "$server_log" "$before_metrics" "$after_metrics"
 }
 
 run_udp_matrix() {
+  case "$UDP_COMPARE_MODE" in
+    dataplane-redesign)
+      run_udp_dataplane_redesign_suite
+      return
+      ;;
+    fast-path)
+      run_udp_fast_path_focus_suite
+      return
+      ;;
+    gro)
+      run_udp_gro_focus_suite
+      return
+      ;;
+    io-uring)
+      run_udp_io_uring_focus_suite
+      return
+      ;;
+    workerized)
+      run_udp_workerized_focus_suite
+      return
+      ;;
+  esac
+
   local -a rates packet_sizes
   local rate packet_size repetition duration matrix_dir output_prefix
 
