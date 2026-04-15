@@ -21,6 +21,8 @@ jobs:
 
       - name: Setup Zig
         uses: https://codeberg.org/mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
 
       - name: Format check
         run: |
@@ -45,6 +47,8 @@ jobs:
 
       - name: Setup Zig
         uses: https://codeberg.org/mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
 
       - name: Build relayd
         run: zig build
