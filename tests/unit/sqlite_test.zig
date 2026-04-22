@@ -35,3 +35,36 @@ test "sqlite persists and reloads allocations" {
     try std.testing.expectEqual(@as(usize, 1), rows.items.len);
     try std.testing.expectEqualStrings("abc", rows.items[0].id);
 }
+
+test "sqlite migrates legacy allocation binding into bindings table" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        std.testing.allocator.free(path);
+    }
+
+    {
+        var db = try sqlite.Repository.open(std.testing.allocator, path);
+        defer db.close();
+        var allocation = model.Allocation{
+            .id = try std.testing.allocator.dupe(u8, "legacy"),
+            .protocol = .tcp,
+            .port = 12002,
+            .target_port = 8080,
+            .host = try std.testing.allocator.dupe(u8, "127.0.0.1"),
+            .created_at_ms = 300,
+            .updated_at_ms = 400,
+        };
+        defer allocation.deinit(std.testing.allocator);
+        try db.insertAllocation(allocation);
+    }
+
+    var reopened = try sqlite.Repository.open(std.testing.allocator, path);
+    defer reopened.close();
+
+    var binding = (try reopened.getBinding(std.testing.allocator, "legacy")).?;
+    defer binding.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("legacy", binding.allocation_id);
+    try std.testing.expectEqual(@as(u16, 8080), binding.target_port);
+    try std.testing.expectEqualStrings("127.0.0.1", binding.host.?);
+}

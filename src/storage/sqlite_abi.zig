@@ -6,6 +6,7 @@ pub const sqlite3_stmt = opaque {};
 pub const SQLITE_OK: c_int = 0;
 pub const SQLITE_ROW: c_int = 100;
 pub const SQLITE_DONE: c_int = 101;
+pub const SQLITE_NULL: c_int = 5;
 pub const SQLITE_OPEN_READWRITE: c_int = 0x00000002;
 pub const SQLITE_OPEN_CREATE: c_int = 0x00000004;
 pub const SQLITE_OPEN_FULLMUTEX: c_int = 0x00010000;
@@ -26,6 +27,8 @@ pub extern "c" fn sqlite3_bind_null(stmt: *sqlite3_stmt, idx: c_int) c_int;
 pub extern "c" fn sqlite3_column_text(stmt: *sqlite3_stmt, idx: c_int) ?[*:0]const u8;
 pub extern "c" fn sqlite3_column_int(stmt: *sqlite3_stmt, idx: c_int) c_int;
 pub extern "c" fn sqlite3_column_int64(stmt: *sqlite3_stmt, idx: c_int) i64;
+pub extern "c" fn sqlite3_column_type(stmt: *sqlite3_stmt, idx: c_int) c_int;
+pub extern "c" fn sqlite3_changes(db: *sqlite3) c_int;
 pub extern "c" fn sqlite3_busy_timeout(db: *sqlite3, ms: c_int) c_int;
 pub extern "c" fn sqlite3_libversion() [*:0]const u8;
 

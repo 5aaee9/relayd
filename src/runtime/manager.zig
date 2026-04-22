@@ -350,7 +350,7 @@ pub const RuntimeManager = struct {
         entry.desired_target_port = allocation.target_port;
         entry.updated_at_ms = allocation.updated_at_ms;
 
-        if (!model.isHostConfigured(entry.desired_host)) {
+        if (!model.isHostConfigured(entry.desired_host) or entry.desired_target_port == null) {
             closeUdpSessions(self.allocator, entry);
             replaceOptionalString(self.allocator, &entry.effective_host, null) catch {};
             entry.effective_target_port = null;
@@ -603,7 +603,7 @@ pub const RuntimeManager = struct {
             .port = allocation.port,
             .desired_target_port = allocation.target_port,
             .desired_host = if (allocation.host) |host| try self.allocator.dupe(u8, host) else null,
-            .effective_target_port = if (model.isHostConfigured(allocation.host)) allocation.target_port else null,
+            .effective_target_port = if (model.isHostConfigured(allocation.host) and allocation.target_port != null) allocation.target_port else null,
             .effective_host = if (allocation.host) |host| try self.allocator.dupe(u8, host) else null,
             .status = if (model.isHostConfigured(allocation.host)) .active else .rejecting_no_host,
             .error_kind = null,
@@ -1542,7 +1542,7 @@ const ListenerEntry = struct {
     id: []u8,
     protocol: model.Protocol,
     port: u16,
-    desired_target_port: u16,
+    desired_target_port: ?u16,
     desired_host: ?[]u8,
     effective_target_port: ?u16,
     effective_host: ?[]u8,

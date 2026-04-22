@@ -15,6 +15,13 @@ pub const Repository = struct {
         try abi.check(abi.sqlite3_busy_timeout(db, 5000), db);
         try exec(db, "PRAGMA journal_mode=WAL;");
         try exec(db, "CREATE TABLE IF NOT EXISTS allocations (id TEXT PRIMARY KEY, protocol TEXT NOT NULL, port INTEGER NOT NULL, target_port INTEGER NOT NULL, host TEXT, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL, UNIQUE(protocol, port));");
+        try exec(db, "CREATE TABLE IF NOT EXISTS bindings (allocation_id TEXT PRIMARY KEY, target_port INTEGER NOT NULL, host TEXT, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL);");
+        try exec(
+            db,
+            "INSERT INTO bindings(allocation_id, target_port, host, created_at_ms, updated_at_ms) " ++
+                "SELECT id, target_port, host, created_at_ms, updated_at_ms FROM allocations " ++
+                "WHERE target_port > 0 AND NOT EXISTS (SELECT 1 FROM bindings WHERE bindings.allocation_id = allocations.id);",
+        );
         return .{ .db = db };
     }
 
@@ -47,33 +54,71 @@ pub const Repository = struct {
         try stmt.bindText(1, allocation.id);
         try stmt.bindText(2, allocation.protocol.asString());
         try stmt.bindInt(3, allocation.port);
-        try stmt.bindInt(4, allocation.target_port);
+        try stmt.bindInt(4, allocation.target_port orelse 0);
         try stmt.bindOptionalText(5, allocation.host);
         try stmt.bindInt64(6, allocation.created_at_ms);
         try stmt.bindInt64(7, allocation.updated_at_ms);
         try stmt.done(self.db);
     }
 
-    pub fn updateAllocation(self: *Repository, id: []const u8, target_port: ?u16, host: ?[]const u8, updated_at_ms: i64) !void {
-        var stmt = try prepare(self.db, "UPDATE allocations SET target_port = COALESCE(?, target_port), host = COALESCE(?, host), updated_at_ms = ? WHERE id = ?;");
+    pub fn putBinding(self: *Repository, binding: model.Binding) !void {
+        var stmt = try prepare(
+            self.db,
+            "INSERT INTO bindings(allocation_id, target_port, host, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?) " ++
+                "ON CONFLICT(allocation_id) DO UPDATE SET target_port = excluded.target_port, host = excluded.host, updated_at_ms = excluded.updated_at_ms;",
+        );
         defer stmt.deinit();
-        if (target_port) |v| try stmt.bindInt(1, v) else try stmt.bindNull(1);
-        if (host) |v| try stmt.bindText(2, v) else try stmt.bindNull(2);
-        try stmt.bindInt64(3, updated_at_ms);
-        try stmt.bindText(4, id);
+        try stmt.bindText(1, binding.allocation_id);
+        try stmt.bindInt(2, binding.target_port);
+        try stmt.bindOptionalText(3, binding.host);
+        try stmt.bindInt64(4, binding.created_at_ms);
+        try stmt.bindInt64(5, binding.updated_at_ms);
         try stmt.done(self.db);
+
+        try self.updateLegacyBindingColumns(binding.allocation_id, binding.target_port, binding.host, binding.updated_at_ms);
+    }
+
+    pub fn deleteBinding(self: *Repository, allocation_id: []const u8, updated_at_ms: i64) !bool {
+        var stmt = try prepare(self.db, "DELETE FROM bindings WHERE allocation_id = ?;");
+        defer stmt.deinit();
+        try stmt.bindText(1, allocation_id);
+        try stmt.done(self.db);
+        const changed = abi.sqlite3_changes(self.db) > 0;
+        if (changed) {
+            try self.clearLegacyBindingColumns(allocation_id, updated_at_ms);
+        }
+        return changed;
     }
 
     pub fn deleteAllocation(self: *Repository, id: []const u8) !bool {
+        var delete_binding = try prepare(self.db, "DELETE FROM bindings WHERE allocation_id = ?;");
+        defer delete_binding.deinit();
+        try delete_binding.bindText(1, id);
+        try delete_binding.done(self.db);
+
         var stmt = try prepare(self.db, "DELETE FROM allocations WHERE id = ?;");
         defer stmt.deinit();
         try stmt.bindText(1, id);
         try stmt.done(self.db);
-        return true;
+        return abi.sqlite3_changes(self.db) > 0;
+    }
+
+    pub fn getBinding(self: *Repository, allocator: std.mem.Allocator, allocation_id: []const u8) !?model.Binding {
+        var stmt = try prepare(self.db, "SELECT allocation_id, target_port, host, created_at_ms, updated_at_ms FROM bindings WHERE allocation_id = ?;");
+        defer stmt.deinit();
+        try stmt.bindText(1, allocation_id);
+        const rc = abi.sqlite3_step(stmt.stmt);
+        if (rc == abi.SQLITE_DONE) return null;
+        try abi.check(rc, self.db);
+        return try rowToBinding(allocator, stmt.stmt);
     }
 
     pub fn getAllocation(self: *Repository, allocator: std.mem.Allocator, id: []const u8) !?model.Allocation {
-        var stmt = try prepare(self.db, "SELECT id, protocol, port, target_port, host, created_at_ms, updated_at_ms FROM allocations WHERE id = ?;");
+        var stmt = try prepare(
+            self.db,
+            "SELECT a.id, a.protocol, a.port, b.target_port, b.host, a.created_at_ms, a.updated_at_ms " ++
+                "FROM allocations a LEFT JOIN bindings b ON b.allocation_id = a.id WHERE a.id = ?;",
+        );
         defer stmt.deinit();
         try stmt.bindText(1, id);
         const rc = abi.sqlite3_step(stmt.stmt);
@@ -88,7 +133,11 @@ pub const Repository = struct {
             for (rows.items) |*item| item.deinit(allocator);
             rows.deinit(allocator);
         }
-        var stmt = try prepare(self.db, "SELECT id, protocol, port, target_port, host, created_at_ms, updated_at_ms FROM allocations ORDER BY protocol, port;");
+        var stmt = try prepare(
+            self.db,
+            "SELECT a.id, a.protocol, a.port, b.target_port, b.host, a.created_at_ms, a.updated_at_ms " ++
+                "FROM allocations a LEFT JOIN bindings b ON b.allocation_id = a.id ORDER BY a.protocol, a.port;",
+        );
         defer stmt.deinit();
         while (true) {
             const rc = abi.sqlite3_step(stmt.stmt);
@@ -97,6 +146,24 @@ pub const Repository = struct {
             try rows.append(allocator, try rowToAllocation(allocator, stmt.stmt));
         }
         return rows;
+    }
+
+    fn updateLegacyBindingColumns(self: *Repository, allocation_id: []const u8, target_port: u16, host: ?[]const u8, updated_at_ms: i64) !void {
+        var stmt = try prepare(self.db, "UPDATE allocations SET target_port = ?, host = ?, updated_at_ms = ? WHERE id = ?;");
+        defer stmt.deinit();
+        try stmt.bindInt(1, target_port);
+        try stmt.bindOptionalText(2, host);
+        try stmt.bindInt64(3, updated_at_ms);
+        try stmt.bindText(4, allocation_id);
+        try stmt.done(self.db);
+    }
+
+    fn clearLegacyBindingColumns(self: *Repository, allocation_id: []const u8, updated_at_ms: i64) !void {
+        var stmt = try prepare(self.db, "UPDATE allocations SET target_port = 0, host = NULL, updated_at_ms = ? WHERE id = ?;");
+        defer stmt.deinit();
+        try stmt.bindInt64(1, updated_at_ms);
+        try stmt.bindText(2, allocation_id);
+        try stmt.done(self.db);
     }
 };
 
@@ -154,9 +221,26 @@ fn rowToAllocation(allocator: std.mem.Allocator, stmt: *abi.sqlite3_stmt) !model
         .id = id,
         .protocol = model.Protocol.fromString(std.mem.span(abi.sqlite3_column_text(stmt, 1).?)) orelse return error.InvalidData,
         .port = @intCast(abi.sqlite3_column_int(stmt, 2)),
-        .target_port = @intCast(abi.sqlite3_column_int(stmt, 3)),
+        .target_port = if (abi.sqlite3_column_type(stmt, 3) == abi.SQLITE_NULL) null else blk: {
+            const value = abi.sqlite3_column_int(stmt, 3);
+            if (value <= 0) break :blk null;
+            break :blk @as(u16, @intCast(value));
+        },
         .host = if (host_ptr) |ptr| try allocator.dupe(u8, std.mem.span(ptr)) else null,
         .created_at_ms = abi.sqlite3_column_int64(stmt, 5),
         .updated_at_ms = abi.sqlite3_column_int64(stmt, 6),
+    };
+}
+
+fn rowToBinding(allocator: std.mem.Allocator, stmt: *abi.sqlite3_stmt) !model.Binding {
+    const allocation_id = try allocator.dupe(u8, std.mem.span(abi.sqlite3_column_text(stmt, 0).?));
+    errdefer allocator.free(allocation_id);
+    const host_ptr = abi.sqlite3_column_text(stmt, 2);
+    return .{
+        .allocation_id = allocation_id,
+        .target_port = @intCast(abi.sqlite3_column_int(stmt, 1)),
+        .host = if (host_ptr) |ptr| try allocator.dupe(u8, std.mem.span(ptr)) else null,
+        .created_at_ms = abi.sqlite3_column_int64(stmt, 3),
+        .updated_at_ms = abi.sqlite3_column_int64(stmt, 4),
     };
 }

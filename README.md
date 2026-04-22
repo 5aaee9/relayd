@@ -206,8 +206,17 @@ Quick example:
 ```bash
 curl -sS \
   -H "Authorization: Bearer ${AUTH_TOKEN}" \
-  http://127.0.0.1:8080/v1/ports
+  http://127.0.0.1:8080/v1/allocations
 ```
+
+Primary control-plane resources:
+
+- `POST /v1/allocations` — reserve a relay port without binding it yet
+- `PUT /v1/allocations/{id}/binding` — attach or replace the upstream target
+- `DELETE /v1/allocations/{id}/binding` — detach the upstream target while keeping the allocation
+- `GET /v1/ports` — compatibility / aggregate read model
+
+Legacy write endpoints under `/v1/ports*` remain available for compatibility, but new clients should prefer the allocation/binding API.
 
 ## Notes
 - `host` currently accepts IP literals only.

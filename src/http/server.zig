@@ -127,6 +127,8 @@ const ConnectionCtx = struct {
 };
 
 const CreateRequest = struct { protocol: []const u8, target_port: u16 };
+const AllocationCreateRequest = struct { protocol: []const u8 };
+const BindingPutRequest = struct { target_port: u16, host: []const u8 };
 const TargetRequest = struct { id: []const u8, host: []const u8 };
 const UpdateRequest = struct { target_port: ?u16 = null, host: ?[]const u8 = null };
 
@@ -163,10 +165,24 @@ fn handleRequest(server: *HttpServer, request: *http.Server.Request) !void {
     }
 
     const target = request.head.target;
+    if (request.head.method == .GET and std.mem.eql(u8, target, "/v1/allocations")) return handleListAllocations(server, request);
+    if (request.head.method == .POST and std.mem.eql(u8, target, "/v1/allocations")) return handleCreateAllocation(server, request);
     if (request.head.method == .GET and std.mem.eql(u8, target, "/v1/ports")) return handleList(server, request);
     if (request.head.method == .GET and std.mem.eql(u8, target, "/v1/metrics")) return handleMetrics(server, request);
     if (request.head.method == .POST and std.mem.eql(u8, target, "/v1/ports")) return handleCreate(server, request);
     if (request.head.method == .POST and std.mem.eql(u8, target, "/v1/ports/target")) return handleSetTarget(server, request);
+    if (std.mem.startsWith(u8, target, "/v1/allocations/")) {
+        const rest = target["/v1/allocations/".len..];
+        if (std.mem.endsWith(u8, rest, "/binding")) {
+            const id = rest[0 .. rest.len - "/binding".len];
+            if (request.head.method == .PUT) return handlePutBinding(server, request, id);
+            if (request.head.method == .GET) return handleGetBinding(server, request, id);
+            if (request.head.method == .DELETE) return handleDeleteBinding(server, request, id);
+        } else {
+            if (request.head.method == .GET) return handleGetAllocation(server, request, rest);
+            if (request.head.method == .DELETE) return handleDelete(server, request, rest);
+        }
+    }
     if (std.mem.startsWith(u8, target, "/v1/ports/")) {
         const id = target[10..];
         if (request.head.method == .POST) return handleUpdate(server, request, id);
@@ -193,6 +209,28 @@ fn handleCreate(server: *HttpServer, request: *http.Server.Request) !void {
     var view = (try server.service.getAllocationView(server.allocator, allocation.id)).?;
     defer service_mod.deinitView(server.allocator, &view);
     const payload = try encodeView(server.allocator, view);
+    defer server.allocator.free(payload);
+    try request.respond(payload, .{ .status = .created, .keep_alive = false, .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }} });
+}
+
+fn handleCreateAllocation(server: *HttpServer, request: *http.Server.Request) !void {
+    var body_buf: [4096]u8 = undefined;
+    const body = try readBody(server.allocator, request, &body_buf);
+    defer server.allocator.free(body);
+    var parsed = try json.parseFromSlice(AllocationCreateRequest, server.allocator, body, .{});
+    defer parsed.deinit();
+    const protocol = model.Protocol.fromString(parsed.value.protocol) orelse {
+        try request.respond("invalid protocol", .{ .status = .bad_request, .keep_alive = false });
+        return;
+    };
+    var allocation = server.service.createAllocation(protocol, null) catch |err| {
+        try respondServiceError(request, err);
+        return;
+    };
+    defer allocation.deinit(server.allocator);
+    var resource = (try server.service.getAllocationResource(server.allocator, allocation.id)).?;
+    defer service_mod.deinitAllocationResource(server.allocator, &resource);
+    const payload = try encodeAllocationResource(server.allocator, resource);
     defer server.allocator.free(payload);
     try request.respond(payload, .{ .status = .created, .keep_alive = false, .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }} });
 }
@@ -239,6 +277,65 @@ fn handleUpdate(server: *HttpServer, request: *http.Server.Request, id: []const 
 
 fn handleDelete(server: *HttpServer, request: *http.Server.Request, id: []const u8) !void {
     server.service.deleteAllocation(id) catch |err| {
+        try respondServiceError(request, err);
+        return;
+    };
+    try request.respond("", .{ .status = .no_content, .keep_alive = false });
+}
+
+fn handleListAllocations(server: *HttpServer, request: *http.Server.Request) !void {
+    var resources = try server.service.listAllocationResources(server.allocator);
+    defer {
+        for (resources.items) |*resource| service_mod.deinitAllocationResource(server.allocator, resource);
+        resources.deinit(server.allocator);
+    }
+    const payload = try encodeAllocationResources(server.allocator, resources.items);
+    defer server.allocator.free(payload);
+    try request.respond(payload, .{ .status = .ok, .keep_alive = false, .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }} });
+}
+
+fn handleGetAllocation(server: *HttpServer, request: *http.Server.Request, id: []const u8) !void {
+    var resource = (try server.service.getAllocationResource(server.allocator, id)) orelse {
+        try request.respond("NotFound", .{ .status = .not_found, .keep_alive = false });
+        return;
+    };
+    defer service_mod.deinitAllocationResource(server.allocator, &resource);
+    const payload = try encodeAllocationResource(server.allocator, resource);
+    defer server.allocator.free(payload);
+    try request.respond(payload, .{ .status = .ok, .keep_alive = false, .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }} });
+}
+
+fn handlePutBinding(server: *HttpServer, request: *http.Server.Request, id: []const u8) !void {
+    var body_buf: [4096]u8 = undefined;
+    const body = try readBody(server.allocator, request, &body_buf);
+    defer server.allocator.free(body);
+    var parsed = try json.parseFromSlice(BindingPutRequest, server.allocator, body, .{});
+    defer parsed.deinit();
+    var binding = server.service.putBinding(id, parsed.value.host, parsed.value.target_port) catch |err| {
+        try respondServiceError(request, err);
+        return;
+    };
+    defer binding.deinit(server.allocator);
+    var view = (try server.service.getBindingView(server.allocator, id)).?;
+    defer service_mod.deinitBindingView(server.allocator, &view);
+    const payload = try encodeBindingView(server.allocator, view);
+    defer server.allocator.free(payload);
+    try request.respond(payload, .{ .status = .ok, .keep_alive = false, .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }} });
+}
+
+fn handleGetBinding(server: *HttpServer, request: *http.Server.Request, id: []const u8) !void {
+    var view = (try server.service.getBindingView(server.allocator, id)) orelse {
+        try request.respond("NotFound", .{ .status = .not_found, .keep_alive = false });
+        return;
+    };
+    defer service_mod.deinitBindingView(server.allocator, &view);
+    const payload = try encodeBindingView(server.allocator, view);
+    defer server.allocator.free(payload);
+    try request.respond(payload, .{ .status = .ok, .keep_alive = false, .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }} });
+}
+
+fn handleDeleteBinding(server: *HttpServer, request: *http.Server.Request, id: []const u8) !void {
+    server.service.deleteBinding(id) catch |err| {
         try respondServiceError(request, err);
         return;
     };
@@ -374,11 +471,32 @@ const JsonView = struct {
     id: []const u8,
     protocol: []const u8,
     port: u16,
-    target_port: u16,
+    target_port: ?u16,
     host: ?[]const u8,
     effective_target_port: ?u16,
     effective_host: ?[]const u8,
     host_configured: bool,
+    runtime_status: []const u8,
+    error_kind: ?[]const u8,
+    last_error: ?[]const u8,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+};
+
+const JsonAllocationResource = struct {
+    id: []const u8,
+    protocol: []const u8,
+    port: u16,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+};
+
+const JsonBindingView = struct {
+    allocation_id: []const u8,
+    host: ?[]const u8,
+    target_port: u16,
+    effective_target_port: ?u16,
+    effective_host: ?[]const u8,
     runtime_status: []const u8,
     error_kind: ?[]const u8,
     last_error: ?[]const u8,
@@ -396,6 +514,31 @@ fn toJsonView(view: model.AllocationView) JsonView {
         .effective_target_port = view.effective_target_port,
         .effective_host = view.effective_host,
         .host_configured = view.host_configured,
+        .runtime_status = view.runtime_status.asString(),
+        .error_kind = if (view.error_kind) |kind| kind.asString() else null,
+        .last_error = view.last_error,
+        .created_at_ms = view.created_at_ms,
+        .updated_at_ms = view.updated_at_ms,
+    };
+}
+
+fn toJsonAllocationResource(resource: model.AllocationResource) JsonAllocationResource {
+    return .{
+        .id = resource.id,
+        .protocol = resource.protocol.asString(),
+        .port = resource.port,
+        .created_at_ms = resource.created_at_ms,
+        .updated_at_ms = resource.updated_at_ms,
+    };
+}
+
+fn toJsonBindingView(view: model.BindingView) JsonBindingView {
+    return .{
+        .allocation_id = view.allocation_id,
+        .host = view.host,
+        .target_port = view.target_port,
+        .effective_target_port = view.effective_target_port,
+        .effective_host = view.effective_host,
         .runtime_status = view.runtime_status.asString(),
         .error_kind = if (view.error_kind) |kind| kind.asString() else null,
         .last_error = view.last_error,
@@ -491,6 +634,21 @@ fn encodeViews(allocator: std.mem.Allocator, views: []const model.AllocationView
     defer allocator.free(payloads);
     for (views, 0..) |view, i| payloads[i] = toJsonView(view);
     return std.fmt.allocPrint(allocator, "{f}", .{json.fmt(payloads, .{})});
+}
+
+fn encodeAllocationResource(allocator: std.mem.Allocator, resource: model.AllocationResource) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{f}", .{json.fmt(toJsonAllocationResource(resource), .{})});
+}
+
+fn encodeAllocationResources(allocator: std.mem.Allocator, resources: []const model.AllocationResource) ![]u8 {
+    const payloads = try allocator.alloc(JsonAllocationResource, resources.len);
+    defer allocator.free(payloads);
+    for (resources, 0..) |resource, i| payloads[i] = toJsonAllocationResource(resource);
+    return std.fmt.allocPrint(allocator, "{f}", .{json.fmt(payloads, .{})});
+}
+
+fn encodeBindingView(allocator: std.mem.Allocator, view: model.BindingView) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{f}", .{json.fmt(toJsonBindingView(view), .{})});
 }
 
 fn encodeMetrics(allocator: std.mem.Allocator, metrics: *const Metrics) ![]u8 {

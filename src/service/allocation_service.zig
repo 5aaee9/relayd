@@ -33,7 +33,7 @@ pub const Service = struct {
         };
     }
 
-    pub fn createAllocation(self: *Service, protocol: model.Protocol, target_port: u16) !model.Allocation {
+    pub fn createAllocation(self: *Service, protocol: model.Protocol, target_port: ?u16) !model.Allocation {
         self.mutex.lock();
         defer self.mutex.unlock();
         if (self.failpoints.create_timeout) return error.Timeout;
@@ -61,16 +61,135 @@ pub const Service = struct {
                 },
                 else => return err,
             };
+
             self.repo.begin() catch {};
             errdefer self.repo.rollback();
             self.repo.insertAllocation(allocation) catch |err| {
                 self.runtime_manager.delete(allocation.id, self.apply_timeout_ms) catch {};
                 return err;
             };
+            if (target_port) |bound_port| {
+                try self.repo.putBinding(.{
+                    .allocation_id = allocation.id,
+                    .target_port = bound_port,
+                    .host = null,
+                    .created_at_ms = now,
+                    .updated_at_ms = now,
+                });
+            }
             try self.repo.commit();
             return allocation;
         }
         return error.NoAvailablePort;
+    }
+
+    pub fn getAllocation(self: *Service, allocator: std.mem.Allocator, id: []const u8) !?model.Allocation {
+        return self.repo.getAllocation(allocator, id);
+    }
+
+    pub fn listAllocationResources(self: *Service, allocator: std.mem.Allocator) !std.ArrayList(model.AllocationResource) {
+        var allocations = try self.repo.listAllocations(allocator);
+        defer {
+            for (allocations.items) |*item| item.deinit(allocator);
+            allocations.deinit(allocator);
+        }
+
+        var resources = std.ArrayList(model.AllocationResource){};
+        errdefer {
+            for (resources.items) |*resource| deinitAllocationResource(allocator, resource);
+            resources.deinit(allocator);
+        }
+        for (allocations.items) |allocation| {
+            try resources.append(allocator, try cloneAllocationResource(allocator, allocation));
+        }
+        return resources;
+    }
+
+    pub fn getAllocationResource(self: *Service, allocator: std.mem.Allocator, id: []const u8) !?model.AllocationResource {
+        var allocation = (try self.repo.getAllocation(allocator, id)) orelse return null;
+        defer allocation.deinit(allocator);
+        return try cloneAllocationResource(allocator, allocation);
+    }
+
+    pub fn getBindingView(self: *Service, allocator: std.mem.Allocator, id: []const u8) !?model.BindingView {
+        var binding = (try self.repo.getBinding(allocator, id)) orelse return null;
+        defer binding.deinit(allocator);
+        var maybe_observed = try self.runtime_manager.snapshot(allocator, id);
+        defer if (maybe_observed) |*obs| obs.deinit(allocator);
+        return .{
+            .allocation_id = try allocator.dupe(u8, binding.allocation_id),
+            .host = if (binding.host) |host| try allocator.dupe(u8, host) else null,
+            .target_port = binding.target_port,
+            .effective_target_port = if (maybe_observed) |obs| obs.effective_target_port else null,
+            .effective_host = if (maybe_observed) |obs| if (obs.effective_host) |host| try allocator.dupe(u8, host) else null else null,
+            .runtime_status = if (maybe_observed) |obs| obs.runtime_status else .degraded_bind_failed,
+            .error_kind = if (maybe_observed) |obs| obs.error_kind else .bind_failed,
+            .last_error = if (maybe_observed) |obs| if (obs.last_error) |msg| try allocator.dupe(u8, msg) else null else try allocator.dupe(u8, "missing runtime state"),
+            .created_at_ms = binding.created_at_ms,
+            .updated_at_ms = binding.updated_at_ms,
+        };
+    }
+
+    pub fn putBinding(self: *Service, id: []const u8, host: []const u8, target_port: u16) !model.Binding {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        _ = try config_mod.parseIpLiteral(host, 0);
+        var allocation = (try self.repo.getAllocation(self.allocator, id)) orelse return error.NotFound;
+        defer allocation.deinit(self.allocator);
+
+        const now = std.time.milliTimestamp();
+        const created_at_ms = if (try self.repo.getBinding(self.allocator, id)) |binding_value| blk: {
+            var existing = binding_value;
+            defer existing.deinit(self.allocator);
+            break :blk existing.created_at_ms;
+        } else now;
+
+        var binding = model.Binding{
+            .allocation_id = try self.allocator.dupe(u8, id),
+            .target_port = target_port,
+            .host = try self.allocator.dupe(u8, host),
+            .created_at_ms = created_at_ms,
+            .updated_at_ms = now,
+        };
+        errdefer binding.deinit(self.allocator);
+
+        allocation.target_port = target_port;
+        if (allocation.host) |old| self.allocator.free(old);
+        allocation.host = try self.allocator.dupe(u8, host);
+        allocation.updated_at_ms = now;
+
+        self.repo.begin() catch {};
+        errdefer self.repo.rollback();
+        try self.repo.putBinding(binding);
+        try self.repo.commit();
+
+        if (self.failpoints.update_timeout) return error.Timeout;
+        try self.runtime_manager.update(allocation, self.apply_timeout_ms);
+        return binding;
+    }
+
+    pub fn deleteBinding(self: *Service, id: []const u8) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        var allocation = (try self.repo.getAllocation(self.allocator, id)) orelse return error.NotFound;
+        defer allocation.deinit(self.allocator);
+
+        const now = std.time.milliTimestamp();
+        self.repo.begin() catch {};
+        errdefer self.repo.rollback();
+        const changed = try self.repo.deleteBinding(id, now);
+        if (!changed) return error.NotFound;
+        try self.repo.commit();
+
+        allocation.target_port = null;
+        if (allocation.host) |old| self.allocator.free(old);
+        allocation.host = null;
+        allocation.updated_at_ms = now;
+
+        if (self.failpoints.update_timeout) return error.Timeout;
+        try self.runtime_manager.update(allocation, self.apply_timeout_ms);
     }
 
     pub fn setTarget(self: *Service, id: []const u8, host: []const u8) !model.Allocation {
@@ -85,16 +204,35 @@ pub const Service = struct {
         errdefer allocation.deinit(self.allocator);
 
         if (host_value) |host| _ = try config_mod.parseIpLiteral(host, 0);
-        if (target_port) |port| allocation.target_port = port;
-        if (host_value) |host| {
-            if (allocation.host) |old| self.allocator.free(old);
-            allocation.host = try self.allocator.dupe(u8, host);
-        }
-        allocation.updated_at_ms = std.time.milliTimestamp();
+
+        const existing_binding = try self.repo.getBinding(self.allocator, id);
+        defer if (existing_binding) |binding_value| {
+            var binding = binding_value;
+            binding.deinit(self.allocator);
+        };
+
+        const next_target_port = if (target_port) |port| port else if (existing_binding) |binding| binding.target_port else return error.NotFound;
+        const next_host = if (host_value) |host| host else if (existing_binding) |binding| binding.host else null;
+        const now = std.time.milliTimestamp();
+        const created_at_ms = if (existing_binding) |binding| binding.created_at_ms else now;
+
+        var binding = model.Binding{
+            .allocation_id = try self.allocator.dupe(u8, id),
+            .target_port = next_target_port,
+            .host = if (next_host) |host| try self.allocator.dupe(u8, host) else null,
+            .created_at_ms = created_at_ms,
+            .updated_at_ms = now,
+        };
+        defer binding.deinit(self.allocator);
+
+        allocation.target_port = next_target_port;
+        if (allocation.host) |old| self.allocator.free(old);
+        allocation.host = if (next_host) |host| try self.allocator.dupe(u8, host) else null;
+        allocation.updated_at_ms = now;
 
         self.repo.begin() catch {};
         errdefer self.repo.rollback();
-        try self.repo.updateAllocation(id, target_port, host_value, allocation.updated_at_ms);
+        try self.repo.putBinding(binding);
         try self.repo.commit();
 
         if (self.failpoints.update_timeout) return error.Timeout;
@@ -192,6 +330,29 @@ pub const Service = struct {
         return false;
     }
 };
+
+pub fn deinitAllocationResource(allocator: std.mem.Allocator, resource: *model.AllocationResource) void {
+    allocator.free(resource.id);
+    resource.* = undefined;
+}
+
+fn cloneAllocationResource(allocator: std.mem.Allocator, allocation: model.Allocation) !model.AllocationResource {
+    return .{
+        .id = try allocator.dupe(u8, allocation.id),
+        .protocol = allocation.protocol,
+        .port = allocation.port,
+        .created_at_ms = allocation.created_at_ms,
+        .updated_at_ms = allocation.updated_at_ms,
+    };
+}
+
+pub fn deinitBindingView(allocator: std.mem.Allocator, view: *model.BindingView) void {
+    allocator.free(view.allocation_id);
+    if (view.host) |host| allocator.free(host);
+    if (view.effective_host) |host| allocator.free(host);
+    if (view.last_error) |msg| allocator.free(msg);
+    view.* = undefined;
+}
 
 pub fn deinitView(allocator: std.mem.Allocator, view: *model.AllocationView) void {
     allocator.free(view.id);

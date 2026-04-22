@@ -43,7 +43,7 @@ pub const Allocation = struct {
     id: []u8,
     protocol: Protocol,
     port: u16,
-    target_port: u16,
+    target_port: ?u16,
     host: ?[]u8,
     created_at_ms: i64,
     updated_at_ms: i64,
@@ -67,11 +67,56 @@ pub const Allocation = struct {
     }
 };
 
+pub const Binding = struct {
+    allocation_id: []u8,
+    target_port: u16,
+    host: ?[]u8,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+
+    pub fn clone(self: Binding, allocator: std.mem.Allocator) !Binding {
+        return .{
+            .allocation_id = try allocator.dupe(u8, self.allocation_id),
+            .target_port = self.target_port,
+            .host = if (self.host) |host| try allocator.dupe(u8, host) else null,
+            .created_at_ms = self.created_at_ms,
+            .updated_at_ms = self.updated_at_ms,
+        };
+    }
+
+    pub fn deinit(self: *Binding, allocator: std.mem.Allocator) void {
+        allocator.free(self.allocation_id);
+        if (self.host) |host| allocator.free(host);
+        self.* = undefined;
+    }
+};
+
+pub const AllocationResource = struct {
+    id: []u8,
+    protocol: Protocol,
+    port: u16,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+};
+
+pub const BindingView = struct {
+    allocation_id: []u8,
+    host: ?[]u8,
+    target_port: u16,
+    effective_target_port: ?u16,
+    effective_host: ?[]u8,
+    runtime_status: RuntimeStatus,
+    error_kind: ?ErrorKind,
+    last_error: ?[]u8,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+};
+
 pub const AllocationView = struct {
     id: []u8,
     protocol: Protocol,
     port: u16,
-    target_port: u16,
+    target_port: ?u16,
     host: ?[]u8,
     effective_target_port: ?u16,
     effective_host: ?[]u8,

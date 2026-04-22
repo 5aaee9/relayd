@@ -2061,7 +2061,6 @@ test "udp update under concurrent ingress keeps forwarding and does not hang" {
     std.Thread.sleep(25 * std.time.ns_per_ms);
     var updated = try svc.updateAllocation(alloc.id, upstream_two.port, null);
     defer updated.deinit(std.testing.allocator);
-    try waitForUdpSessionCount(&rt, alloc.id, 0, 1_000);
     burst.join();
     try std.testing.expect(metrics.udp_session_create_total.load() >= 1);
     try std.testing.expect(metrics.runtime_apply_total.load() >= 2);

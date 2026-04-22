@@ -275,6 +275,97 @@ test "http start failure does not deadlock cleanup" {
     try std.testing.expectError(error.AddressInUse, http.start());
 }
 
+test "http allocation and binding lifecycle endpoints" {
+    const harness = try Harness.init(std.testing.allocator);
+    defer harness.deinit();
+
+    var echo = try startTcpEchoServer(std.testing.allocator);
+    defer {
+        echo.server.deinit();
+        echo.thread.join();
+    }
+
+    const http_port = try harness.http.assignedPort();
+
+    const create_body = "{\"protocol\":\"tcp\"}";
+    const create_resp = try doHttp(std.testing.allocator, http_port, "POST", "/v1/allocations", create_body);
+    defer std.testing.allocator.free(create_resp.body);
+    try std.testing.expectEqual(@as(u16, 201), create_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, create_resp.body, "\"target_port\":") == null);
+    const allocation_id = try extractJsonString(std.testing.allocator, create_resp.body, "id");
+    defer std.testing.allocator.free(allocation_id);
+    const allocation_port = try extractJsonU16(create_resp.body, "port");
+
+    const get_alloc_path = try std.fmt.allocPrint(std.testing.allocator, "/v1/allocations/{s}", .{allocation_id});
+    defer std.testing.allocator.free(get_alloc_path);
+    const get_alloc_resp = try doHttp(std.testing.allocator, http_port, "GET", get_alloc_path, "");
+    defer std.testing.allocator.free(get_alloc_resp.body);
+    try std.testing.expectEqual(@as(u16, 200), get_alloc_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, get_alloc_resp.body, "\"target_port\":") == null);
+
+    const list_alloc_resp = try doHttp(std.testing.allocator, http_port, "GET", "/v1/allocations", "");
+    defer std.testing.allocator.free(list_alloc_resp.body);
+    try std.testing.expectEqual(@as(u16, 200), list_alloc_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, list_alloc_resp.body, allocation_id) != null);
+
+    const get_binding_path = try std.fmt.allocPrint(std.testing.allocator, "/v1/allocations/{s}/binding", .{allocation_id});
+    defer std.testing.allocator.free(get_binding_path);
+    const missing_binding_resp = try doHttp(std.testing.allocator, http_port, "GET", get_binding_path, "");
+    defer std.testing.allocator.free(missing_binding_resp.body);
+    try std.testing.expectEqual(@as(u16, 404), missing_binding_resp.status);
+
+    const binding_body = try std.fmt.allocPrint(std.testing.allocator, "{{\"host\":\"127.0.0.1\",\"target_port\":{d}}}", .{echo.port});
+    defer std.testing.allocator.free(binding_body);
+    const put_binding_resp = try doHttp(std.testing.allocator, http_port, "PUT", get_binding_path, binding_body);
+    defer std.testing.allocator.free(put_binding_resp.body);
+    try std.testing.expectEqual(@as(u16, 200), put_binding_resp.status);
+    const binding_allocation_id = try extractJsonString(std.testing.allocator, put_binding_resp.body, "allocation_id");
+    defer std.testing.allocator.free(binding_allocation_id);
+    try std.testing.expectEqualStrings(allocation_id, binding_allocation_id);
+    try std.testing.expect(std.mem.indexOf(u8, put_binding_resp.body, "\"runtime_status\":\"active\"") != null);
+
+    const forward_addr = try config.parseIpLiteral("127.0.0.1", allocation_port);
+    const stream = try std.net.tcpConnectToAddress(forward_addr);
+    defer stream.close();
+    _ = try std.posix.write(stream.handle, "ping");
+    var buf: [4]u8 = undefined;
+    const amt = try std.posix.read(stream.handle, &buf);
+    try std.testing.expectEqual(@as(usize, 4), amt);
+    try std.testing.expectEqualStrings("ping", &buf);
+
+    const get_binding_resp = try doHttp(std.testing.allocator, http_port, "GET", get_binding_path, "");
+    defer std.testing.allocator.free(get_binding_resp.body);
+    try std.testing.expectEqual(@as(u16, 200), get_binding_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, get_binding_resp.body, "\"effective_target_port\":") != null);
+
+    const delete_binding_resp = try doHttp(std.testing.allocator, http_port, "DELETE", get_binding_path, "");
+    defer std.testing.allocator.free(delete_binding_resp.body);
+    try std.testing.expectEqual(@as(u16, 204), delete_binding_resp.status);
+
+    const get_binding_after_delete = try doHttp(std.testing.allocator, http_port, "GET", get_binding_path, "");
+    defer std.testing.allocator.free(get_binding_after_delete.body);
+    try std.testing.expectEqual(@as(u16, 404), get_binding_after_delete.status);
+
+    const allocation_still_exists = try doHttp(std.testing.allocator, http_port, "GET", get_alloc_path, "");
+    defer std.testing.allocator.free(allocation_still_exists.body);
+    try std.testing.expectEqual(@as(u16, 200), allocation_still_exists.status);
+
+    const aggregate_after_detach = try doHttp(std.testing.allocator, http_port, "GET", "/v1/ports", "");
+    defer std.testing.allocator.free(aggregate_after_detach.body);
+    try std.testing.expectEqual(@as(u16, 200), aggregate_after_detach.status);
+    const detached_fragment = try std.fmt.allocPrint(std.testing.allocator, "\"id\":\"{s}\",\"protocol\":\"tcp\",\"port\":{d},\"target_port\":null", .{ allocation_id, allocation_port });
+    defer std.testing.allocator.free(detached_fragment);
+    try std.testing.expect(std.mem.indexOf(u8, aggregate_after_detach.body, detached_fragment) != null);
+
+    const delete_alloc_resp = try doHttp(std.testing.allocator, http_port, "DELETE", get_alloc_path, "");
+    defer std.testing.allocator.free(delete_alloc_resp.body);
+    try std.testing.expectEqual(@as(u16, 204), delete_alloc_resp.status);
+
+    const get_binding_after_allocation_delete = try doHttp(std.testing.allocator, http_port, "GET", get_binding_path, "");
+    defer std.testing.allocator.free(get_binding_after_allocation_delete.body);
+    try std.testing.expectEqual(@as(u16, 404), get_binding_after_allocation_delete.status);
+}
+
 fn extractJsonString(allocator: std.mem.Allocator, body: []const u8, key: []const u8) ![]u8 {
     const needle = try std.fmt.allocPrint(allocator, "\"{s}\":\"", .{key});
     defer allocator.free(needle);
