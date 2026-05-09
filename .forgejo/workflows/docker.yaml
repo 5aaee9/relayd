@@ -57,6 +57,8 @@ jobs:
           tags: latest ${{ steps.tags.outputs.tags }}
           containerfiles: |
             ./Dockerfile
+          extra-args: |
+            --ulimit=nofile=10000:10000
 
       - name: Push image to registry
         uses: https://github.com/redhat-actions/push-to-registry@v2

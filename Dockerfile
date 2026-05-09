@@ -33,7 +33,7 @@ WORKDIR /src
 COPY . .
 RUN python3 .forgejo/scripts/fetch-sqlite3.py
 RUN nofile_limit="$(ulimit -Hn)" \
-    && if [ "$nofile_limit" = "unlimited" ] || [ "$nofile_limit" -gt 8192 ]; then nofile_limit=8192; fi \
+    && if [ "$nofile_limit" = "unlimited" ] || [ "$nofile_limit" -gt 10000 ]; then nofile_limit=10000; fi \
     && ulimit -n "$nofile_limit" \
     && zig build -j${ZIG_BUILD_JOBS} -Doptimize=ReleaseSafe -Dtarget="$(cat /tmp/zig-target)"
 
