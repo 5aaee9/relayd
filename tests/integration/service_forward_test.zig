@@ -1,4 +1,6 @@
 const std = @import("std");
+const compat = @import("../../src/compat.zig");
+const net = @import("../../src/net_compat.zig");
 const config = @import("../../src/config.zig");
 const sqlite = @import("../../src/storage/sqlite.zig");
 const runtime = @import("../../src/runtime/manager.zig");
@@ -71,12 +73,12 @@ const DelayedUdpReplyServer = struct {
 };
 
 fn tempDbPath(allocator: std.mem.Allocator) ![]u8 {
-    try std.fs.cwd().makePath(".zig-cache/integration-tests");
-    return std.fmt.allocPrint(allocator, ".zig-cache/integration-tests/{d}.sqlite", .{std.time.nanoTimestamp()});
+    try compat.makePath(".zig-cache/integration-tests");
+    return std.fmt.allocPrint(allocator, ".zig-cache/integration-tests/{d}.sqlite", .{compat.nanoTimestamp()});
 }
 
 const TcpEchoServer = struct {
-    server: std.net.Server,
+    server: net.Server,
     port: u16,
     thread: std.Thread,
 
@@ -87,7 +89,7 @@ const TcpEchoServer = struct {
 };
 
 const TcpMultiEchoServer = struct {
-    server: std.net.Server,
+    server: net.Server,
     port: u16,
     thread: std.Thread,
 
@@ -98,7 +100,7 @@ const TcpMultiEchoServer = struct {
 };
 
 const TcpHalfCloseServer = struct {
-    server: std.net.Server,
+    server: net.Server,
     port: u16,
     thread: std.Thread,
 
@@ -124,7 +126,7 @@ const TcpForwardHarness = struct {
         self.echo.deinit();
         self.rt.deinit();
         self.repo.close();
-        std.fs.cwd().deleteFile(self.path) catch {};
+        compat.deleteFile(self.path);
         allocator.free(self.path);
         allocator.destroy(self);
     }
@@ -133,59 +135,59 @@ const TcpForwardHarness = struct {
 fn startTcpEchoServer() !TcpEchoServer {
     const addr = try config.parseIpLiteral("127.0.0.1", 0);
     const server = try addr.listen(.{ .reuse_address = true });
-    var bound: std.net.Address = undefined;
-    var len: std.posix.socklen_t = @sizeOf(std.net.Address);
-    try std.posix.getsockname(server.stream.handle, &bound.any, &len);
+    var bound: net.Address = undefined;
+    var len: std.posix.socklen_t = @sizeOf(net.Address);
+    try compat.getsockname(server.stream.handle, &bound.any, &len);
     const port = bound.getPort();
     const thread = try std.Thread.spawn(.{}, tcpEchoThread, .{server.stream.handle});
     return .{ .server = server, .port = port, .thread = thread };
 }
 
 fn tcpEchoThread(fd: std.posix.fd_t) void {
-    var server = std.net.Server{ .listen_address = undefined, .stream = .{ .handle = fd } };
+    var server = net.Server{ .listen_address = undefined, .stream = .{ .handle = fd } };
     const conn = server.accept() catch return;
     defer conn.stream.close();
     var buf: [4]u8 = undefined;
     const amt = std.posix.read(conn.stream.handle, &buf) catch return;
-    if (amt > 0) _ = std.posix.write(conn.stream.handle, buf[0..amt]) catch {};
+    if (amt > 0) _ = compat.write(conn.stream.handle, buf[0..amt]) catch {};
 }
 
 fn startTcpMultiEchoServer(expected_connections: usize) !TcpMultiEchoServer {
     const addr = try config.parseIpLiteral("127.0.0.1", 0);
     const server = try addr.listen(.{ .reuse_address = true });
-    var bound: std.net.Address = undefined;
-    var len: std.posix.socklen_t = @sizeOf(std.net.Address);
-    try std.posix.getsockname(server.stream.handle, &bound.any, &len);
+    var bound: net.Address = undefined;
+    var len: std.posix.socklen_t = @sizeOf(net.Address);
+    try compat.getsockname(server.stream.handle, &bound.any, &len);
     const port = bound.getPort();
     const thread = try std.Thread.spawn(.{}, tcpMultiEchoThread, .{ server.stream.handle, expected_connections });
     return .{ .server = server, .port = port, .thread = thread };
 }
 
 fn tcpMultiEchoThread(fd: std.posix.fd_t, expected_connections: usize) void {
-    var server = std.net.Server{ .listen_address = undefined, .stream = .{ .handle = fd } };
+    var server = net.Server{ .listen_address = undefined, .stream = .{ .handle = fd } };
     var handled: usize = 0;
     while (handled < expected_connections) : (handled += 1) {
         const conn = server.accept() catch return;
         defer conn.stream.close();
         var buf: [4]u8 = undefined;
         const amt = std.posix.read(conn.stream.handle, &buf) catch return;
-        if (amt > 0) _ = std.posix.write(conn.stream.handle, buf[0..amt]) catch {};
+        if (amt > 0) _ = compat.write(conn.stream.handle, buf[0..amt]) catch {};
     }
 }
 
 fn startTcpHalfCloseServer() !TcpHalfCloseServer {
     const addr = try config.parseIpLiteral("127.0.0.1", 0);
     const server = try addr.listen(.{ .reuse_address = true });
-    var bound: std.net.Address = undefined;
-    var len: std.posix.socklen_t = @sizeOf(std.net.Address);
-    try std.posix.getsockname(server.stream.handle, &bound.any, &len);
+    var bound: net.Address = undefined;
+    var len: std.posix.socklen_t = @sizeOf(net.Address);
+    try compat.getsockname(server.stream.handle, &bound.any, &len);
     const port = bound.getPort();
     const thread = try std.Thread.spawn(.{}, tcpHalfCloseThread, .{server.stream.handle});
     return .{ .server = server, .port = port, .thread = thread };
 }
 
 fn tcpHalfCloseThread(fd: std.posix.fd_t) void {
-    var server = std.net.Server{ .listen_address = undefined, .stream = .{ .handle = fd } };
+    var server = net.Server{ .listen_address = undefined, .stream = .{ .handle = fd } };
     const conn = server.accept() catch return;
     defer conn.stream.close();
     var buf: [256]u8 = undefined;
@@ -193,7 +195,7 @@ fn tcpHalfCloseThread(fd: std.posix.fd_t) void {
         const amt = std.posix.read(conn.stream.handle, &buf) catch return;
         if (amt == 0) break;
     }
-    _ = std.posix.write(conn.stream.handle, "ack") catch {};
+    _ = compat.write(conn.stream.handle, "ack") catch {};
 }
 
 fn startTcpForwardHarness(options: runtime.Options) !*TcpForwardHarness {
@@ -202,7 +204,7 @@ fn startTcpForwardHarness(options: runtime.Options) !*TcpForwardHarness {
     errdefer allocator.destroy(harness);
     const path = try tempDbPath(allocator);
     errdefer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         allocator.free(path);
     }
 
@@ -234,17 +236,17 @@ fn startTcpForwardHarness(options: runtime.Options) !*TcpForwardHarness {
     return harness;
 }
 
-fn connectRelayStream(port: u16) !std.net.Stream {
+fn connectRelayStream(port: u16) !net.Stream {
     const addr = try config.parseIpLiteral("127.0.0.1", port);
-    return try std.net.tcpConnectToAddress(addr);
+    return try net.tcpConnectToAddress(addr);
 }
 
-fn expectTcpReadClosed(stream: *const std.net.Stream, timeout_ms: u32) !void {
-    const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+fn expectTcpReadClosed(stream: *const net.Stream, timeout_ms: u32) !void {
+    const deadline_ms = compat.milliTimestamp() + @as(i64, @intCast(timeout_ms));
     var pollfds = [_]std.posix.pollfd{
         .{ .fd = stream.handle, .events = std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR, .revents = 0 },
     };
-    while (std.time.milliTimestamp() < deadline_ms) {
+    while (compat.milliTimestamp() < deadline_ms) {
         const ready = try std.posix.poll(&pollfds, 50);
         if (ready == 0) continue;
         var buf: [16]u8 = undefined;
@@ -259,12 +261,12 @@ fn expectTcpReadClosed(stream: *const std.net.Stream, timeout_ms: u32) !void {
 }
 
 fn startUdpEchoServer() !struct { fd: std.posix.fd_t, port: u16, thread: std.Thread } {
-    const fd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC, std.posix.IPPROTO.UDP);
+    const fd = try compat.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC, std.posix.IPPROTO.UDP);
     const addr = try config.parseIpLiteral("127.0.0.1", 0);
-    try std.posix.bind(fd, &addr.any, addr.getOsSockLen());
-    var bound: std.net.Address = undefined;
-    var len: std.posix.socklen_t = @sizeOf(std.net.Address);
-    try std.posix.getsockname(fd, &bound.any, &len);
+    try compat.bind(fd, &addr.any, addr.getOsSockLen());
+    var bound: net.Address = undefined;
+    var len: std.posix.socklen_t = @sizeOf(net.Address);
+    try compat.getsockname(fd, &bound.any, &len);
     const thread = try std.Thread.spawn(.{}, udpEchoThread, .{fd});
     return .{ .fd = fd, .port = bound.getPort(), .thread = thread };
 }
@@ -272,22 +274,22 @@ fn startUdpEchoServer() !struct { fd: std.posix.fd_t, port: u16, thread: std.Thr
 fn udpEchoThread(fd: std.posix.fd_t) void {
     defer closeIgnore(fd);
     var buf: [1024]u8 = undefined;
-    var addr: std.net.Address = undefined;
-    var len: std.posix.socklen_t = @sizeOf(std.net.Address);
-    const amt = std.posix.recvfrom(fd, &buf, 0, &addr.any, &len) catch return;
-    _ = std.posix.sendto(fd, buf[0..amt], 0, &addr.any, addr.getOsSockLen()) catch {};
+    var addr: net.Address = undefined;
+    var len: std.posix.socklen_t = @sizeOf(net.Address);
+    const amt = compat.recvfrom(fd, &buf, 0, &addr.any, &len) catch return;
+    _ = compat.sendto(fd, buf[0..amt], 0, &addr.any, addr.getOsSockLen()) catch {};
 }
 
 fn startUdpCaptureServer(allocator: std.mem.Allocator, expected_packets: usize, response_mode: UdpResponseMode, fixed_response: []const u8) !UdpCaptureServer {
-    const fd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
+    const fd = try compat.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
     errdefer closeIgnore(fd);
 
     const addr = try config.parseIpLiteral("127.0.0.1", 0);
-    try std.posix.bind(fd, &addr.any, addr.getOsSockLen());
+    try compat.bind(fd, &addr.any, addr.getOsSockLen());
 
-    var bound: std.net.Address = undefined;
-    var len: std.posix.socklen_t = @sizeOf(std.net.Address);
-    try std.posix.getsockname(fd, &bound.any, &len);
+    var bound: net.Address = undefined;
+    var len: std.posix.socklen_t = @sizeOf(net.Address);
+    try compat.getsockname(fd, &bound.any, &len);
 
     const state = try allocator.create(UdpCaptureState);
     errdefer allocator.destroy(state);
@@ -308,14 +310,14 @@ fn startUdpCaptureServer(allocator: std.mem.Allocator, expected_packets: usize, 
 }
 
 fn udpCaptureThread(state: *UdpCaptureState) void {
-    const deadline_ms = std.time.milliTimestamp() + 2_000;
-    while (state.actual_packets < state.expected_packets and std.time.milliTimestamp() < deadline_ms) {
+    const deadline_ms = compat.milliTimestamp() + 2_000;
+    while (state.actual_packets < state.expected_packets and compat.milliTimestamp() < deadline_ms) {
         var buf: [1024]u8 = undefined;
-        var addr: std.net.Address = undefined;
-        var len: std.posix.socklen_t = @sizeOf(std.net.Address);
-        const amt = std.posix.recvfrom(state.fd, &buf, 0, &addr.any, &len) catch |err| switch (err) {
+        var addr: net.Address = undefined;
+        var len: std.posix.socklen_t = @sizeOf(net.Address);
+        const amt = compat.recvfrom(state.fd, &buf, 0, &addr.any, &len) catch |err| switch (err) {
             error.WouldBlock => {
-                std.Thread.sleep(10 * std.time.ns_per_ms);
+                compat.sleep(10 * std.time.ns_per_ms);
                 continue;
             },
             else => break,
@@ -332,20 +334,20 @@ fn udpCaptureThread(state: *UdpCaptureState) void {
             .echo => buf[0..amt],
             .fixed => state.fixed_response,
         };
-        _ = std.posix.sendto(state.fd, response, 0, &addr.any, addr.getOsSockLen()) catch {};
+        _ = compat.sendto(state.fd, response, 0, &addr.any, addr.getOsSockLen()) catch {};
     }
 }
 
 fn startDelayedUdpReplyServer(allocator: std.mem.Allocator, fixed_response: []const u8) !DelayedUdpReplyServer {
-    const fd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
+    const fd = try compat.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
     errdefer closeIgnore(fd);
 
     const addr = try config.parseIpLiteral("127.0.0.1", 0);
-    try std.posix.bind(fd, &addr.any, addr.getOsSockLen());
+    try compat.bind(fd, &addr.any, addr.getOsSockLen());
 
-    var bound: std.net.Address = undefined;
-    var len: std.posix.socklen_t = @sizeOf(std.net.Address);
-    try std.posix.getsockname(fd, &bound.any, &len);
+    var bound: net.Address = undefined;
+    var len: std.posix.socklen_t = @sizeOf(net.Address);
+    try compat.getsockname(fd, &bound.any, &len);
 
     const state = try allocator.create(DelayedUdpReplyState);
     errdefer allocator.destroy(state);
@@ -359,15 +361,15 @@ fn startDelayedUdpReplyServer(allocator: std.mem.Allocator, fixed_response: []co
 }
 
 fn delayedUdpReplyThread(state: *DelayedUdpReplyState) void {
-    const recv_deadline_ms = std.time.milliTimestamp() + 2_000;
-    var peer: std.net.Address = undefined;
-    var peer_len: std.posix.socklen_t = @sizeOf(std.net.Address);
-    while (std.time.milliTimestamp() < recv_deadline_ms) {
+    const recv_deadline_ms = compat.milliTimestamp() + 2_000;
+    var peer: net.Address = undefined;
+    var peer_len: std.posix.socklen_t = @sizeOf(net.Address);
+    while (compat.milliTimestamp() < recv_deadline_ms) {
         var buf: [1024]u8 = undefined;
-        peer_len = @sizeOf(std.net.Address);
-        const amt = std.posix.recvfrom(state.fd, &buf, 0, &peer.any, &peer_len) catch |err| switch (err) {
+        peer_len = @sizeOf(net.Address);
+        const amt = compat.recvfrom(state.fd, &buf, 0, &peer.any, &peer_len) catch |err| switch (err) {
             error.WouldBlock => {
-                std.Thread.sleep(10 * std.time.ns_per_ms);
+                compat.sleep(10 * std.time.ns_per_ms);
                 continue;
             },
             else => return,
@@ -382,39 +384,39 @@ fn delayedUdpReplyThread(state: *DelayedUdpReplyState) void {
         break;
     }
 
-    const reply_deadline_ms = std.time.milliTimestamp() + 2_000;
-    while (!state.release_reply.load(.monotonic) and std.time.milliTimestamp() < reply_deadline_ms) {
-        std.Thread.sleep(10 * std.time.ns_per_ms);
+    const reply_deadline_ms = compat.milliTimestamp() + 2_000;
+    while (!state.release_reply.load(.monotonic) and compat.milliTimestamp() < reply_deadline_ms) {
+        compat.sleep(10 * std.time.ns_per_ms);
     }
     if (!state.release_reply.load(.monotonic)) return;
 
-    _ = std.posix.sendto(state.fd, state.fixed_response, 0, &peer.any, peer.getOsSockLen()) catch {};
+    _ = compat.sendto(state.fd, state.fixed_response, 0, &peer.any, peer.getOsSockLen()) catch {};
     state.reply_sent.store(true, .monotonic);
 }
 
 fn waitForAtomicTrue(flag: *const std.atomic.Value(bool), timeout_ms: u32) !void {
-    const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
-    while (std.time.milliTimestamp() < deadline_ms) {
+    const deadline_ms = compat.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+    while (compat.milliTimestamp() < deadline_ms) {
         if (flag.load(.monotonic)) return;
-        std.Thread.sleep(5 * std.time.ns_per_ms);
+        compat.sleep(5 * std.time.ns_per_ms);
     }
     return error.Timeout;
 }
 
 fn waitForCounterValue(counter: *const metrics_mod.Counter, expected: u64, timeout_ms: u32) !void {
-    const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
-    while (std.time.milliTimestamp() < deadline_ms) {
+    const deadline_ms = compat.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+    while (compat.milliTimestamp() < deadline_ms) {
         if (counter.load() == expected) return;
-        std.Thread.sleep(5 * std.time.ns_per_ms);
+        compat.sleep(5 * std.time.ns_per_ms);
     }
     return error.Timeout;
 }
 
 fn waitForCounterAtLeast(counter: *const metrics_mod.Counter, minimum: u64, timeout_ms: u32) !void {
-    const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
-    while (std.time.milliTimestamp() < deadline_ms) {
+    const deadline_ms = compat.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+    while (compat.milliTimestamp() < deadline_ms) {
         if (counter.load() >= minimum) return;
-        std.Thread.sleep(5 * std.time.ns_per_ms);
+        compat.sleep(5 * std.time.ns_per_ms);
     }
     return error.Timeout;
 }
@@ -429,17 +431,17 @@ fn expectUdpReplyCountersIfActive(metrics: *const metrics_mod.Metrics, expected_
 }
 
 fn createUdpClient() !std.posix.fd_t {
-    return std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
+    return compat.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
 }
 
 const UdpBurstSenderCtx = struct {
-    target: std.net.Address,
+    target: net.Address,
     payload: []const u8,
     count: usize,
     sleep_ms: u64,
 };
 
-fn sendUdpSegmentBurst(client: std.posix.fd_t, target: std.net.Address, payload: []const u8, count: usize, segment_size: u16) !void {
+fn sendUdpSegmentBurst(client: std.posix.fd_t, target: net.Address, payload: []const u8, count: usize, segment_size: u16) !void {
     const combined = try std.testing.allocator.alloc(u8, payload.len * count);
     defer std.testing.allocator.free(combined);
     var offset: usize = 0;
@@ -461,7 +463,7 @@ fn sendUdpSegmentBurst(client: std.posix.fd_t, target: std.net.Address, payload:
         .controllen = control_len,
         .flags = 0,
     };
-    _ = try std.posix.sendmsg(client, &msg, 0);
+    _ = try compat.sendmsg(client, &msg, 0);
 }
 
 fn udpBurstSender(ctx: UdpBurstSenderCtx) void {
@@ -469,13 +471,13 @@ fn udpBurstSender(ctx: UdpBurstSenderCtx) void {
     defer closeIgnore(client);
     var idx: usize = 0;
     while (idx < ctx.count) : (idx += 1) {
-        _ = std.posix.sendto(client, ctx.payload, 0, &ctx.target.any, ctx.target.getOsSockLen()) catch {};
-        if (ctx.sleep_ms > 0) std.Thread.sleep(ctx.sleep_ms * std.time.ns_per_ms);
+        _ = compat.sendto(client, ctx.payload, 0, &ctx.target.any, ctx.target.getOsSockLen()) catch {};
+        if (ctx.sleep_ms > 0) compat.sleep(ctx.sleep_ms * std.time.ns_per_ms);
     }
 }
 
-fn sendUdpAndExpect(client_fd: std.posix.fd_t, target: std.net.Address, payload: []const u8, expected: []const u8, timeout_ms: u32) !void {
-    _ = try std.posix.sendto(client_fd, payload, 0, &target.any, target.getOsSockLen());
+fn sendUdpAndExpect(client_fd: std.posix.fd_t, target: net.Address, payload: []const u8, expected: []const u8, timeout_ms: u32) !void {
+    _ = try compat.sendto(client_fd, payload, 0, &target.any, target.getOsSockLen());
     var buf: [128]u8 = undefined;
     const amt = (try recvUdpWithTimeout(client_fd, &buf, timeout_ms)) orelse return error.Timeout;
     try std.testing.expectEqualStrings(expected, buf[0..amt]);
@@ -487,11 +489,11 @@ fn expectNoUdpResponse(client_fd: std.posix.fd_t, timeout_ms: u32) !void {
 }
 
 fn recvUdpWithTimeout(fd: std.posix.fd_t, buf: []u8, timeout_ms: u32) !?usize {
-    const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
-    while (std.time.milliTimestamp() < deadline_ms) {
-        const amt = std.posix.recv(fd, buf, 0) catch |err| switch (err) {
+    const deadline_ms = compat.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+    while (compat.milliTimestamp() < deadline_ms) {
+        const amt = compat.recv(fd, buf, 0) catch |err| switch (err) {
             error.WouldBlock => {
-                std.Thread.sleep(5 * std.time.ns_per_ms);
+                compat.sleep(5 * std.time.ns_per_ms);
                 continue;
             },
             else => return err,
@@ -526,21 +528,21 @@ fn currentUdpSessionCount(rt: *runtime.RuntimeManager, id: []const u8) ?usize {
 }
 
 fn waitForUdpSessionCount(rt: *runtime.RuntimeManager, id: []const u8, expected: usize, timeout_ms: u32) !void {
-    const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
-    while (std.time.milliTimestamp() < deadline_ms) {
+    const deadline_ms = compat.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+    while (compat.milliTimestamp() < deadline_ms) {
         if (currentUdpSessionCount(rt, id)) |count| {
             if (count == expected) return;
         }
-        std.Thread.sleep(10 * std.time.ns_per_ms);
+        compat.sleep(10 * std.time.ns_per_ms);
     }
     return error.Timeout;
 }
 
 fn waitForAllocationRemoval(rt: *runtime.RuntimeManager, id: []const u8, timeout_ms: u32) !void {
-    const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
-    while (std.time.milliTimestamp() < deadline_ms) {
+    const deadline_ms = compat.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+    while (compat.milliTimestamp() < deadline_ms) {
         if (currentUdpSessionCount(rt, id) == null) return;
-        std.Thread.sleep(10 * std.time.ns_per_ms);
+        compat.sleep(10 * std.time.ns_per_ms);
     }
     return error.Timeout;
 }
@@ -567,7 +569,7 @@ test "service forwards tcp traffic after target is configured" {
 
     const stream = try connectRelayStream(harness.alloc.port);
     defer closeIgnore(stream.handle);
-    _ = try std.posix.write(stream.handle, "ping");
+    _ = try compat.write(stream.handle, "ping");
     var buf: [4]u8 = undefined;
     const amt = try std.posix.read(stream.handle, &buf);
     try std.testing.expectEqual(@as(usize, 4), amt);
@@ -585,7 +587,7 @@ test "tcp session-model forwards traffic and cleans up counters" {
     defer harness.deinit(std.testing.allocator);
 
     const stream = try connectRelayStream(harness.alloc.port);
-    _ = try std.posix.write(stream.handle, "ping");
+    _ = try compat.write(stream.handle, "ping");
     var buf: [4]u8 = undefined;
     const amt = try std.posix.read(stream.handle, &buf);
     try std.testing.expectEqual(@as(usize, 4), amt);
@@ -602,7 +604,7 @@ test "tcp session-model forwards traffic and cleans up counters" {
 test "tcp session-model propagates client half-close" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -626,8 +628,8 @@ test "tcp session-model propagates client half-close" {
 
     const stream = try connectRelayStream(alloc.port);
     defer closeIgnore(stream.handle);
-    _ = try std.posix.write(stream.handle, "ping");
-    try std.posix.shutdown(stream.handle, .send);
+    _ = try compat.write(stream.handle, "ping");
+    try compat.shutdown(stream.handle, .send);
     var buf: [8]u8 = undefined;
     const amt = try std.posix.read(stream.handle, &buf);
     try std.testing.expectEqualStrings("ack", buf[0..amt]);
@@ -645,7 +647,7 @@ test "tcp workerized session-model forwards traffic and cleans up counters" {
     defer harness.deinit(std.testing.allocator);
 
     const stream = try connectRelayStream(harness.alloc.port);
-    _ = try std.posix.write(stream.handle, "ping");
+    _ = try compat.write(stream.handle, "ping");
     var buf: [4]u8 = undefined;
     const amt = try std.posix.read(stream.handle, &buf);
     try std.testing.expectEqual(@as(usize, 4), amt);
@@ -661,7 +663,7 @@ test "tcp workerized session-model forwards traffic and cleans up counters" {
 test "tcp workerized session-model distributes sessions across workers" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -686,8 +688,8 @@ test "tcp workerized session-model distributes sessions across workers" {
 
     var stream_a = try connectRelayStream(alloc.port);
     var stream_b = try connectRelayStream(alloc.port);
-    _ = try std.posix.write(stream_a.handle, "ping");
-    _ = try std.posix.write(stream_b.handle, "ping");
+    _ = try compat.write(stream_a.handle, "ping");
+    _ = try compat.write(stream_b.handle, "ping");
     var buf: [4]u8 = undefined;
     _ = try std.posix.read(stream_a.handle, &buf);
     _ = try std.posix.read(stream_b.handle, &buf);
@@ -708,7 +710,7 @@ test "tcp sharded-worker forwards traffic and cleans up counters" {
     defer harness.deinit(std.testing.allocator);
 
     const stream = try connectRelayStream(harness.alloc.port);
-    _ = try std.posix.write(stream.handle, "ping");
+    _ = try compat.write(stream.handle, "ping");
     var buf: [4]u8 = undefined;
     const amt = try std.posix.read(stream.handle, &buf);
     try std.testing.expectEqual(@as(usize, 4), amt);
@@ -725,7 +727,7 @@ test "tcp sharded-worker forwards traffic and cleans up counters" {
 test "tcp sharded-worker accept counters cover all workers" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -752,7 +754,7 @@ test "tcp sharded-worker accept counters cover all workers" {
     var idx: usize = 0;
     while (idx < 16) : (idx += 1) {
         var stream = try connectRelayStream(alloc.port);
-        _ = try std.posix.write(stream.handle, "ping");
+        _ = try compat.write(stream.handle, "ping");
         var buf: [4]u8 = undefined;
         _ = try std.posix.read(stream.handle, &buf);
         stream.close();
@@ -782,7 +784,7 @@ test "tcp accept-balanced forwards traffic and cleans up counters" {
     defer harness.deinit(std.testing.allocator);
 
     const stream = try connectRelayStream(harness.alloc.port);
-    _ = try std.posix.write(stream.handle, "ping");
+    _ = try compat.write(stream.handle, "ping");
     var buf: [4]u8 = undefined;
     const amt = try std.posix.read(stream.handle, &buf);
     try std.testing.expectEqual(@as(usize, 4), amt);
@@ -799,7 +801,7 @@ test "tcp accept-balanced forwards traffic and cleans up counters" {
 test "tcp accept-balanced handoff counters cover all workers" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -826,7 +828,7 @@ test "tcp accept-balanced handoff counters cover all workers" {
     var idx: usize = 0;
     while (idx < 16) : (idx += 1) {
         var stream = try connectRelayStream(alloc.port);
-        _ = try std.posix.write(stream.handle, "ping");
+        _ = try compat.write(stream.handle, "ping");
         var buf: [4]u8 = undefined;
         _ = try std.posix.read(stream.handle, &buf);
         stream.close();
@@ -848,7 +850,7 @@ test "tcp forced-copy override wins over splice-enabled mode" {
 
     const stream = try connectRelayStream(harness.alloc.port);
     defer closeIgnore(stream.handle);
-    _ = try std.posix.write(stream.handle, "ping");
+    _ = try compat.write(stream.handle, "ping");
     var buf: [4]u8 = undefined;
     const amt = try std.posix.read(stream.handle, &buf);
     try std.testing.expectEqual(@as(usize, 4), amt);
@@ -867,7 +869,7 @@ test "tcp splice-enabled mode records splice success" {
     defer harness.deinit(std.testing.allocator);
 
     const stream = try connectRelayStream(harness.alloc.port);
-    _ = try std.posix.write(stream.handle, "ping");
+    _ = try compat.write(stream.handle, "ping");
     var buf: [4]u8 = undefined;
     const amt = try std.posix.read(stream.handle, &buf);
     try std.testing.expectEqual(@as(usize, 4), amt);
@@ -890,7 +892,7 @@ test "tcp splice recoverable setup failure falls back to copy" {
 
     const stream = try connectRelayStream(harness.alloc.port);
     defer closeIgnore(stream.handle);
-    _ = try std.posix.write(stream.handle, "ping");
+    _ = try compat.write(stream.handle, "ping");
     var buf: [4]u8 = undefined;
     const amt = try std.posix.read(stream.handle, &buf);
     try std.testing.expectEqual(@as(usize, 4), amt);
@@ -912,7 +914,7 @@ test "tcp splice recoverable runtime failure increments runtime fallback bucket"
 
     const stream = try connectRelayStream(harness.alloc.port);
     defer closeIgnore(stream.handle);
-    _ = try std.posix.write(stream.handle, "ping");
+    _ = try compat.write(stream.handle, "ping");
     var buf: [4]u8 = undefined;
     const amt = try std.posix.read(stream.handle, &buf);
     try std.testing.expectEqual(@as(usize, 4), amt);
@@ -934,7 +936,7 @@ test "tcp splice hard failure aborts session predictably" {
 
     const stream = try connectRelayStream(harness.alloc.port);
     defer closeIgnore(stream.handle);
-    _ = std.posix.write(stream.handle, "ping") catch {};
+    _ = compat.write(stream.handle, "ping") catch {};
     try expectTcpReadClosed(&stream, 500);
     try std.testing.expectEqual(@as(u64, 1), harness.metrics.tcp_splice_attempt_total.load());
     try std.testing.expectEqual(@as(u64, 0), harness.metrics.tcp_splice_success_total.load());
@@ -946,7 +948,7 @@ test "tcp splice hard failure aborts session predictably" {
 test "runtime deinit does not hang with active tcp session" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -969,7 +971,7 @@ test "runtime deinit does not hang with active tcp session" {
     defer updated.deinit(std.testing.allocator);
 
     const addr = try config.parseIpLiteral("127.0.0.1", alloc.port);
-    const stream = try std.net.tcpConnectToAddress(addr);
+    const stream = try net.tcpConnectToAddress(addr);
     defer closeIgnore(stream.handle);
 
     rt.deinit();
@@ -978,7 +980,7 @@ test "runtime deinit does not hang with active tcp session" {
 test "runtime deinit does not hang with active tcp session in session-model mode" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -1011,7 +1013,7 @@ test "runtime deinit does not hang with active tcp session in session-model mode
 test "runtime deinit does not hang with active tcp session in workerized session-model mode" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -1045,7 +1047,7 @@ test "runtime deinit does not hang with active tcp session in workerized session
 test "runtime deinit does not hang with active tcp session in sharded-worker mode" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -1080,7 +1082,7 @@ test "runtime deinit does not hang with active tcp session in sharded-worker mod
 test "runtime deinit does not hang with active tcp session in accept-balanced mode" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -1115,7 +1117,7 @@ test "runtime deinit does not hang with active tcp session in accept-balanced mo
 test "service forwards udp traffic after target is configured" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -1153,7 +1155,7 @@ test "service forwards udp traffic after target is configured" {
 test "udp io_uring path forwards traffic and records activation counters" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -1190,7 +1192,7 @@ test "udp io_uring path forwards traffic and records activation counters" {
 test "udp io_uring forced fallback preserves forwarding" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -1224,7 +1226,7 @@ test "udp io_uring forced fallback preserves forwarding" {
 test "udp GRO receive path coalesces segmented ingress without regressing forwarding" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -1271,7 +1273,7 @@ test "udp GRO receive path coalesces segmented ingress without regressing forwar
 test "udp fast path batches same-session ingress without regressing forwarding" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -1301,7 +1303,7 @@ test "udp fast path batches same-session ingress without regressing forwarding" 
 
     var idx: usize = 0;
     while (idx < 8) : (idx += 1) {
-        _ = try std.posix.sendto(client, "fastpath", 0, &target.any, target.getOsSockLen());
+        _ = try compat.sendto(client, "fastpath", 0, &target.any, target.getOsSockLen());
     }
     idx = 0;
     while (idx < 8) : (idx += 1) {
@@ -1320,7 +1322,7 @@ test "udp fast path batches same-session ingress without regressing forwarding" 
 test "udp fast path forced fallback preserves forwarding" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -1351,7 +1353,7 @@ test "udp fast path forced fallback preserves forwarding" {
 
     var idx: usize = 0;
     while (idx < 8) : (idx += 1) {
-        _ = try std.posix.sendto(client, "fallback", 0, &target.any, target.getOsSockLen());
+        _ = try compat.sendto(client, "fallback", 0, &target.any, target.getOsSockLen());
     }
     idx = 0;
     while (idx < 8) : (idx += 1) {
@@ -1369,7 +1371,7 @@ test "udp fast path forced fallback preserves forwarding" {
 test "udp dataplane redesign mode forwards traffic and records redesign counters" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -1404,7 +1406,7 @@ test "udp dataplane redesign mode forwards traffic and records redesign counters
 test "udp workerized mode distributes sessions across workers and preserves forwarding" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -1448,7 +1450,7 @@ test "udp workerized mode distributes sessions across workers and preserves forw
 test "udp workerized delete clears active sessions and resets the active-session gauge" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -1489,7 +1491,7 @@ test "udp workerized delete clears active sessions and resets the active-session
 test "udp workerized mode forwards traffic and cleans up counters" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -1530,7 +1532,7 @@ test "udp workerized mode forwards traffic and cleans up counters" {
 test "udp workerized mode distributes multi-client traffic across workers" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -1582,7 +1584,7 @@ test "udp workerized mode distributes multi-client traffic across workers" {
 test "udp runtime reuses a session for repeat packets from one client and creates a second session for another client" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -1633,7 +1635,7 @@ test "udp runtime reuses a session for repeat packets from one client and create
 test "udp session cleanup expires idle sessions after ttl" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -1680,7 +1682,7 @@ test "udp session cleanup expires idle sessions after ttl" {
 test "udp update replaces the active session and forwards to the new target" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -1734,7 +1736,7 @@ test "udp update replaces the active session and forwards to the new target" {
 test "udp delayed reply from replaced target is dropped and the new target still replies" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -1760,7 +1762,7 @@ test "udp delayed reply from replaced target is dropped and the new target still
     const client = try createUdpClient();
     defer closeIgnore(client);
 
-    _ = try std.posix.sendto(client, "before-update", 0, &target.any, target.getOsSockLen());
+    _ = try compat.sendto(client, "before-update", 0, &target.any, target.getOsSockLen());
     try waitForAtomicTrue(&upstream_old.state.packet_received, 500);
     try waitForUdpSessionCount(&rt, alloc.id, 1, 500);
 
@@ -1793,7 +1795,7 @@ test "udp delayed reply from replaced target is dropped and the new target still
 test "udp delayed reply from deleted target is dropped without leaking the session" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -1817,7 +1819,7 @@ test "udp delayed reply from deleted target is dropped without leaking the sessi
     const client = try createUdpClient();
     defer closeIgnore(client);
 
-    _ = try std.posix.sendto(client, "before-delete", 0, &target.any, target.getOsSockLen());
+    _ = try compat.sendto(client, "before-delete", 0, &target.any, target.getOsSockLen());
     try waitForAtomicTrue(&upstream.state.packet_received, 500);
     try waitForUdpSessionCount(&rt, alloc.id, 1, 500);
 
@@ -1853,7 +1855,7 @@ fn runtimeDeinitThread(ctx: RuntimeDeinitCtx) void {
 test "udp delayed reply during runtime deinit is dropped and shutdown completes" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -1876,7 +1878,7 @@ test "udp delayed reply during runtime deinit is dropped and shutdown completes"
     const client = try createUdpClient();
     defer closeIgnore(client);
 
-    _ = try std.posix.sendto(client, "before-stop", 0, &target.any, target.getOsSockLen());
+    _ = try compat.sendto(client, "before-stop", 0, &target.any, target.getOsSockLen());
     try waitForAtomicTrue(&upstream.state.packet_received, 500);
     try waitForUdpSessionCount(&rt, alloc.id, 1, 500);
 
@@ -1903,7 +1905,7 @@ test "udp delayed reply during runtime deinit is dropped and shutdown completes"
 test "udp delete closes the active session and stops forwarding" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -1933,7 +1935,7 @@ test "udp delete closes the active session and stops forwarding" {
     try svc.deleteAllocation(alloc.id);
     try waitForAllocationRemoval(&rt, alloc.id, 500);
 
-    _ = try std.posix.sendto(client, "after-delete", 0, &target.any, target.getOsSockLen());
+    _ = try compat.sendto(client, "after-delete", 0, &target.any, target.getOsSockLen());
     try expectNoUdpResponse(client, 150);
 
     upstream.thread.join();
@@ -1947,7 +1949,7 @@ test "udp delete closes the active session and stops forwarding" {
 test "udp delete clears two active sessions and resets the active-session gauge" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -1989,7 +1991,7 @@ test "udp delete clears two active sessions and resets the active-session gauge"
 test "runtime deinit does not hang with an active udp session" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -2017,7 +2019,7 @@ test "runtime deinit does not hang with an active udp session" {
 
     rt.deinit();
 
-    _ = try std.posix.sendto(client, "after-stop", 0, &target.any, target.getOsSockLen());
+    _ = try compat.sendto(client, "after-stop", 0, &target.any, target.getOsSockLen());
     try expectNoUdpResponse(client, 150);
     try std.testing.expectEqual(@as(u64, 1), metrics.udp_packets_in_total.load());
     try std.testing.expectEqual(@as(u64, 1), metrics.udp_packets_out_total.load());
@@ -2028,7 +2030,7 @@ test "runtime deinit does not hang with an active udp session" {
 test "udp update under concurrent ingress keeps forwarding and does not hang" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 
@@ -2058,7 +2060,7 @@ test "udp update under concurrent ingress keeps forwarding and does not hang" {
         .sleep_ms = 1,
     }});
 
-    std.Thread.sleep(25 * std.time.ns_per_ms);
+    compat.sleep(25 * std.time.ns_per_ms);
     var updated = try svc.updateAllocation(alloc.id, upstream_two.port, null);
     defer updated.deinit(std.testing.allocator);
     burst.join();

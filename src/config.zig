@@ -1,4 +1,5 @@
 const std = @import("std");
+const net = @import("net_compat.zig");
 
 pub const HttpListen = struct {
     host: []u8,
@@ -44,7 +45,7 @@ pub const Config = struct {
         const listen = try parseHttpListen(allocator, raw_listen);
         const raw_range = try envOwned(allocator, "PORT_RANGE", "10000-30000");
         defer allocator.free(raw_range);
-        const token = try std.process.getEnvVarOwned(allocator, "AUTH_TOKEN");
+        const token = try getEnvVarOwned(allocator, "AUTH_TOKEN");
         if (token.len == 0) return error.EmptyAuthToken;
         return .{
             .http_listen_host = listen.host,
@@ -80,21 +81,28 @@ pub const Config = struct {
     }
 };
 
+fn getEnvVarOwned(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    const name_z = try allocator.dupeZ(u8, name);
+    defer allocator.free(name_z);
+    const raw = std.c.getenv(name_z.ptr) orelse return error.EnvironmentVariableNotFound;
+    return try allocator.dupe(u8, std.mem.span(raw));
+}
+
 fn envOwned(allocator: std.mem.Allocator, name: []const u8, default_value: []const u8) ![]u8 {
-    return std.process.getEnvVarOwned(allocator, name) catch |err| switch (err) {
+    return getEnvVarOwned(allocator, name) catch |err| switch (err) {
         error.EnvironmentVariableNotFound => try allocator.dupe(u8, default_value),
         else => err,
     };
 }
 
 fn envBool(name: []const u8) bool {
-    const value = std.process.getEnvVarOwned(std.heap.page_allocator, name) catch return false;
+    const value = getEnvVarOwned(std.heap.page_allocator, name) catch return false;
     defer std.heap.page_allocator.free(value);
     return std.ascii.eqlIgnoreCase(value, "1") or std.ascii.eqlIgnoreCase(value, "true") or std.ascii.eqlIgnoreCase(value, "yes") or std.ascii.eqlIgnoreCase(value, "on");
 }
 
 fn envU32(name: []const u8, default_value: u32) !u32 {
-    const value = std.process.getEnvVarOwned(std.heap.page_allocator, name) catch |err| switch (err) {
+    const value = getEnvVarOwned(std.heap.page_allocator, name) catch |err| switch (err) {
         error.EnvironmentVariableNotFound => return default_value,
         else => return err,
     };
@@ -136,8 +144,8 @@ pub fn parsePort(raw: []const u8) !u16 {
     return @intCast(parsed);
 }
 
-pub fn parseIpLiteral(host: []const u8, port: u16) !std.net.Address {
-    if (std.net.Address.parseIp4(host, port)) |addr| return addr else |_| {}
-    if (std.net.Address.parseIp6(host, port)) |addr| return addr else |_| {}
+pub fn parseIpLiteral(host: []const u8, port: u16) !net.Address {
+    if (net.Address.parseIp4(host, port)) |addr| return addr else |_| {}
+    if (net.Address.parseIp6(host, port)) |addr| return addr else |_| {}
     return error.InvalidHost;
 }

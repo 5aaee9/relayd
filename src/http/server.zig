@@ -1,5 +1,6 @@
 const std = @import("std");
-const net = std.net;
+const compat = @import("../compat.zig");
+const net = @import("../net_compat.zig");
 const http = std.http;
 const json = std.json;
 const config_mod = @import("../config.zig");
@@ -17,9 +18,9 @@ pub const HttpServer = struct {
     auth_token: []const u8,
     thread: ?std.Thread = null,
     server: ?net.Server = null,
-    server_mutex: std.Thread.Mutex = .{},
-    active_mutex: std.Thread.Mutex = .{},
-    active_cond: std.Thread.Condition = .{},
+    server_mutex: compat.Mutex = .{},
+    active_mutex: compat.Mutex = .{},
+    active_cond: compat.Condition = .{},
     active_count: usize = 0,
 
     pub fn start(self: *HttpServer) !void {
@@ -66,7 +67,7 @@ pub const HttpServer = struct {
         const server = self.server orelse return error.NotListening;
         var addr: net.Address = undefined;
         var len: std.posix.socklen_t = @sizeOf(net.Address);
-        try std.posix.getsockname(server.stream.handle, &addr.any, &len);
+        try compat.getsockname(server.stream.handle, &addr.any, &len);
         return addr.getPort();
     }
 
@@ -83,7 +84,7 @@ pub const HttpServer = struct {
             switch (posix.errno(rc)) {
                 .SUCCESS => {},
                 .AGAIN => {
-                    std.Thread.sleep(10 * std.time.ns_per_ms);
+                    compat.sleep(10 * std.time.ns_per_ms);
                     continue;
                 },
                 .BADF => break,

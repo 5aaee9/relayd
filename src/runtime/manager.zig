@@ -1,6 +1,7 @@
 const std = @import("std");
+const compat = @import("../compat.zig");
 const posix = std.posix;
-const net = std.net;
+const net = @import("../net_compat.zig");
 const model = @import("../model/allocation.zig");
 const config_mod = @import("../config.zig");
 const Metrics = @import("../metrics.zig").Metrics;
@@ -73,12 +74,12 @@ pub const RuntimeManager = struct {
     epoll_fd: posix.fd_t,
     thread: ?std.Thread,
     stop_flag: bool,
-    stop_mutex: std.Thread.Mutex,
-    registry_mutex: std.Thread.Mutex,
+    stop_mutex: compat.Mutex,
+    registry_mutex: compat.Mutex,
     listeners: std.StringHashMap(*ListenerEntry),
     listener_fds: std.AutoHashMap(posix.fd_t, *ListenerEntry),
     udp_reply_fds: std.AutoHashMap(posix.fd_t, UdpReplyDispatch),
-    tcp_sessions_mutex: std.Thread.Mutex,
+    tcp_sessions_mutex: compat.Mutex,
     tcp_sessions: std.ArrayList(*TcpSessionCtx),
     tcp_runtime_sessions: std.ArrayList(*TcpRuntimeSession),
     tcp_runtime_session_fds: std.AutoHashMap(posix.fd_t, *TcpRuntimeSession),
@@ -86,7 +87,7 @@ pub const RuntimeManager = struct {
     next_tcp_session_worker: usize,
 
     pub fn init(allocator: std.mem.Allocator, metrics: *Metrics, options: Options) !RuntimeManager {
-        const epoll_fd = try posix.epoll_create1(0);
+        const epoll_fd = try compat.epoll_create1(0);
         const tcp_worker_count: u32 = if (options.tcp_session_model_enabled and options.tcp_session_model_workers > 1) @min(options.tcp_session_model_workers, 4) else 0;
         const udp_worker_count: u32 = if (options.udp_dataplane_redesign_enabled)
             @max(@as(u32, 1), @min(options.udp_session_workers, 4))
@@ -113,7 +114,7 @@ pub const RuntimeManager = struct {
             if (udp_io_uring) |*ring| ring.deinit();
             deinitUdpSessionWorkers(allocator, udp_session_workers);
             deinitTcpSessionWorkers(allocator, tcp_session_workers);
-            posix.close(epoll_fd);
+            compat.close(epoll_fd);
         }
         return .{
             .allocator = allocator,
@@ -147,8 +148,8 @@ pub const RuntimeManager = struct {
             .listener_fds = std.AutoHashMap(posix.fd_t, *ListenerEntry).init(allocator),
             .udp_reply_fds = std.AutoHashMap(posix.fd_t, UdpReplyDispatch).init(allocator),
             .tcp_sessions_mutex = .{},
-            .tcp_sessions = .{},
-            .tcp_runtime_sessions = .{},
+            .tcp_sessions = .empty,
+            .tcp_runtime_sessions = .empty,
             .tcp_runtime_session_fds = std.AutoHashMap(posix.fd_t, *TcpRuntimeSession).init(allocator),
             .tcp_session_workers = tcp_session_workers,
             .next_tcp_session_worker = 0,
@@ -252,7 +253,7 @@ pub const RuntimeManager = struct {
         if (self.udp_io_uring) |*ring| ring.deinit();
         deinitUdpSessionWorkers(self.allocator, self.udp_session_workers);
         deinitTcpSessionWorkers(self.allocator, self.tcp_session_workers);
-        posix.close(self.epoll_fd);
+        compat.close(self.epoll_fd);
     }
 
     pub fn create(self: *RuntimeManager, allocation: model.Allocation, timeout_ms: u32) !void {
@@ -421,7 +422,7 @@ pub const RuntimeManager = struct {
                 self.drainUdpIoUringCompletions();
             }
             const timeout_ms: i32 = if (self.udp_io_uring_enabled and !self.udp_io_uring_test_force_fallback and self.udp_session_workers.len == 0 and self.udp_io_uring != null and self.udp_io_uring_buffer_group != null) 0 else 100;
-            const count = posix.epoll_wait(self.epoll_fd, events[0..], timeout_ms);
+            const count = compat.epoll_wait(self.epoll_fd, events[0..], timeout_ms);
             for (events[0..count]) |event| {
                 self.handleFd(@intCast(event.data.fd));
             }
@@ -519,7 +520,7 @@ pub const RuntimeManager = struct {
         self.registry_mutex.lock();
         defer self.registry_mutex.unlock();
         var it = self.listeners.iterator();
-        const now_ms = std.time.milliTimestamp();
+        const now_ms = compat.milliTimestamp();
         while (it.next()) |kv| {
             const entry = kv.value_ptr.*;
             if (entry.protocol != .udp) continue;
@@ -792,8 +793,8 @@ pub const RuntimeManager = struct {
     fn removeTcpRuntimeSession(self: *RuntimeManager, session: *TcpRuntimeSession) void {
         _ = self.tcp_runtime_session_fds.remove(session.client_fd);
         _ = self.tcp_runtime_session_fds.remove(session.upstream_fd);
-        posix.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_DEL, session.client_fd, null) catch {};
-        posix.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_DEL, session.upstream_fd, null) catch {};
+        compat.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_DEL, session.client_fd, null) catch {};
+        compat.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_DEL, session.upstream_fd, null) catch {};
         closeIgnoreBadFd(session.client_fd);
         closeIgnoreBadFd(session.upstream_fd);
 
@@ -846,9 +847,9 @@ fn updateTcpRuntimeSessionInterest(epoll_fd: posix.fd_t, session: *TcpRuntimeSes
     }
 
     var client_event = std.os.linux.epoll_event{ .events = client_events, .data = .{ .fd = session.client_fd } };
-    posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_MOD, session.client_fd, &client_event) catch {};
+    compat.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_MOD, session.client_fd, &client_event) catch {};
     var upstream_event = std.os.linux.epoll_event{ .events = upstream_events, .data = .{ .fd = session.upstream_fd } };
-    posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_MOD, session.upstream_fd, &upstream_event) catch {};
+    compat.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_MOD, session.upstream_fd, &upstream_event) catch {};
 }
 
 fn dispatchTcpRuntimeSessionToWorker(manager: *RuntimeManager, session: *TcpRuntimeSession) !void {
@@ -896,13 +897,13 @@ fn dispatchAcceptedTcpSessionToWorker(manager: *RuntimeManager, entry: *Listener
 
 fn wakeTcpSessionWorker(worker: *TcpSessionWorker) void {
     const one = [_]u8{1};
-    _ = posix.write(worker.wake_write_fd, &one) catch {};
+    _ = compat.write(worker.wake_write_fd, &one) catch {};
 }
 
 fn drainTcpSessionWorkerWakePipe(worker: *TcpSessionWorker) void {
     var buffer: [64]u8 = undefined;
     while (true) {
-        const amt = posix.read(worker.wake_read_fd, &buffer) catch |err| switch (err) {
+        const amt = compat.read(worker.wake_read_fd, &buffer) catch |err| switch (err) {
             error.WouldBlock => return,
             else => return,
         };
@@ -912,13 +913,13 @@ fn drainTcpSessionWorkerWakePipe(worker: *TcpSessionWorker) void {
 
 fn wakeUdpSessionWorker(worker: *UdpSessionWorker) void {
     const one = [_]u8{1};
-    _ = posix.write(worker.wake_write_fd, &one) catch {};
+    _ = compat.write(worker.wake_write_fd, &one) catch {};
 }
 
 fn drainUdpSessionWorkerWakePipe(worker: *UdpSessionWorker) void {
     var buffer: [64]u8 = undefined;
     while (true) {
-        const amt = posix.read(worker.wake_read_fd, &buffer) catch |err| switch (err) {
+        const amt = compat.read(worker.wake_read_fd, &buffer) catch |err| switch (err) {
             error.WouldBlock => return,
             else => return,
         };
@@ -928,12 +929,12 @@ fn drainUdpSessionWorkerWakePipe(worker: *UdpSessionWorker) void {
 
 fn tcpSessionWorkerThread(worker: *TcpSessionWorker) void {
     var wake_event = std.os.linux.epoll_event{ .events = std.os.linux.EPOLL.IN, .data = .{ .fd = worker.wake_read_fd } };
-    posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, worker.wake_read_fd, &wake_event) catch return;
+    compat.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, worker.wake_read_fd, &wake_event) catch return;
     var events: [64]std.os.linux.epoll_event = undefined;
     while (!worker.stop_flag.load(.monotonic)) {
         attachPendingAcceptedTcpSessions(worker);
         attachPendingTcpRuntimeSessions(worker);
-        const count = posix.epoll_wait(worker.epoll_fd, events[0..], 100);
+        const count = compat.epoll_wait(worker.epoll_fd, events[0..], 100);
         for (events[0..count]) |event| {
             const fd: posix.fd_t = @intCast(event.data.fd);
             if (fd == worker.wake_read_fd) {
@@ -969,7 +970,7 @@ fn tcpSessionWorkerThread(worker: *TcpSessionWorker) void {
     attachPendingAcceptedTcpSessions(worker);
     attachPendingTcpRuntimeSessions(worker);
     shutdownTcpRuntimeSessionsInWorker(worker);
-    posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_DEL, worker.wake_read_fd, null) catch {};
+    compat.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_DEL, worker.wake_read_fd, null) catch {};
 }
 
 fn attachPendingAcceptedTcpSessions(worker: *TcpSessionWorker) void {
@@ -1018,12 +1019,12 @@ fn attachPendingTcpRuntimeSessions(worker: *TcpSessionWorker) void {
             continue;
         };
         var client_event = std.os.linux.epoll_event{ .events = 0, .data = .{ .fd = session.client_fd } };
-        posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, session.client_fd, &client_event) catch {
+        compat.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, session.client_fd, &client_event) catch {
             removeTcpRuntimeSessionFromWorker(worker, session);
             continue;
         };
         var upstream_event = std.os.linux.epoll_event{ .events = 0, .data = .{ .fd = session.upstream_fd } };
-        posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, session.upstream_fd, &upstream_event) catch {
+        compat.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, session.upstream_fd, &upstream_event) catch {
             removeTcpRuntimeSessionFromWorker(worker, session);
             continue;
         };
@@ -1034,8 +1035,8 @@ fn attachPendingTcpRuntimeSessions(worker: *TcpSessionWorker) void {
 fn removeTcpRuntimeSessionFromWorker(worker: *TcpSessionWorker, session: *TcpRuntimeSession) void {
     _ = worker.session_fds.remove(session.client_fd);
     _ = worker.session_fds.remove(session.upstream_fd);
-    posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_DEL, session.client_fd, null) catch {};
-    posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_DEL, session.upstream_fd, null) catch {};
+    compat.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_DEL, session.client_fd, null) catch {};
+    compat.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_DEL, session.upstream_fd, null) catch {};
     closeIgnoreBadFd(session.client_fd);
     closeIgnoreBadFd(session.upstream_fd);
     var idx: usize = 0;
@@ -1075,7 +1076,7 @@ fn handleTcpWorkerAccept(worker: *TcpSessionWorker, entry: *ListenerEntry, liste
     while (true) {
         var addr: net.Address = undefined;
         var len: posix.socklen_t = @sizeOf(net.Address);
-        const conn_fd = posix.accept(listen_fd, &addr.any, &len, posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK) catch |err| switch (err) {
+        const conn_fd = compat.accept(listen_fd, &addr.any, &len, posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK) catch |err| switch (err) {
             error.WouldBlock => break,
             else => break,
         };
@@ -1112,12 +1113,12 @@ fn startTcpRuntimeSessionOnWorker(worker: *TcpSessionWorker, entry: *ListenerEnt
         std.posix.AF.INET6 => std.posix.AF.INET6,
         else => return error.AddressFamilyNotSupported,
     };
-    const upstream_fd = try posix.socket(family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, posix.IPPROTO.TCP);
+    const upstream_fd = try compat.socket(family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, posix.IPPROTO.TCP);
     errdefer closeIgnoreBadFd(upstream_fd);
     worker.metrics.tcp_upstream_connect_total.inc();
 
     const upstream_connected = blk: {
-        posix.connect(upstream_fd, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
+        compat.connect(upstream_fd, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
             error.WouldBlock, error.ConnectionPending => break :blk false,
             else => {
                 worker.metrics.tcp_upstream_connect_fail_total.inc();
@@ -1147,10 +1148,10 @@ fn startTcpRuntimeSessionOnWorker(worker: *TcpSessionWorker, entry: *ListenerEnt
     errdefer _ = worker.session_fds.remove(upstream_fd);
 
     var client_event = std.os.linux.epoll_event{ .events = 0, .data = .{ .fd = client_fd } };
-    try posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, client_fd, &client_event);
-    errdefer posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_DEL, client_fd, null) catch {};
+    try compat.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, client_fd, &client_event);
+    errdefer compat.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_DEL, client_fd, null) catch {};
     var upstream_event = std.os.linux.epoll_event{ .events = 0, .data = .{ .fd = upstream_fd } };
-    try posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, upstream_fd, &upstream_event);
+    try compat.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, upstream_fd, &upstream_event);
     updateTcpRuntimeSessionInterest(worker.epoll_fd, session);
     worker.metrics.tcp_session_create_total.inc();
     worker.metrics.tcp_active_sessions.inc();
@@ -1164,12 +1165,12 @@ fn startTcpAcceptedRuntimeSessionOnWorker(worker: *TcpSessionWorker, pending: Pe
         std.posix.AF.INET6 => std.posix.AF.INET6,
         else => return error.AddressFamilyNotSupported,
     };
-    const upstream_fd = try posix.socket(family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, posix.IPPROTO.TCP);
+    const upstream_fd = try compat.socket(family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, posix.IPPROTO.TCP);
     errdefer closeIgnoreBadFd(upstream_fd);
     worker.metrics.tcp_upstream_connect_total.inc();
 
     const upstream_connected = blk: {
-        posix.connect(upstream_fd, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
+        compat.connect(upstream_fd, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
             error.WouldBlock, error.ConnectionPending => break :blk false,
             else => {
                 worker.metrics.tcp_upstream_connect_fail_total.inc();
@@ -1199,10 +1200,10 @@ fn startTcpAcceptedRuntimeSessionOnWorker(worker: *TcpSessionWorker, pending: Pe
     errdefer _ = worker.session_fds.remove(upstream_fd);
 
     var client_event = std.os.linux.epoll_event{ .events = 0, .data = .{ .fd = pending.client_fd } };
-    try posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, pending.client_fd, &client_event);
-    errdefer posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_DEL, pending.client_fd, null) catch {};
+    try compat.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, pending.client_fd, &client_event);
+    errdefer compat.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_DEL, pending.client_fd, null) catch {};
     var upstream_event = std.os.linux.epoll_event{ .events = 0, .data = .{ .fd = upstream_fd } };
-    try posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, upstream_fd, &upstream_event);
+    try compat.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, upstream_fd, &upstream_event);
     updateTcpRuntimeSessionInterest(worker.epoll_fd, session);
     worker.metrics.tcp_session_create_total.inc();
     worker.metrics.tcp_active_sessions.inc();
@@ -1210,13 +1211,13 @@ fn startTcpAcceptedRuntimeSessionOnWorker(worker: *TcpSessionWorker, pending: Pe
 
 fn udpSessionWorkerThread(worker: *UdpSessionWorker) void {
     var wake_event = std.os.linux.epoll_event{ .events = std.os.linux.EPOLL.IN, .data = .{ .fd = worker.wake_read_fd } };
-    posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, worker.wake_read_fd, &wake_event) catch return;
+    compat.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, worker.wake_read_fd, &wake_event) catch return;
     var events: [64]std.os.linux.epoll_event = undefined;
     while (!worker.stop_flag.load(.monotonic)) {
         worker.mutex.lock();
         cleanupExpiredUdpSessionsInWorker(worker);
         worker.mutex.unlock();
-        const count = posix.epoll_wait(worker.epoll_fd, events[0..], 100);
+        const count = compat.epoll_wait(worker.epoll_fd, events[0..], 100);
         for (events[0..count]) |event| {
             const fd: posix.fd_t = @intCast(event.data.fd);
             if (fd == worker.wake_read_fd) {
@@ -1237,11 +1238,11 @@ fn udpSessionWorkerThread(worker: *UdpSessionWorker) void {
             worker.mutex.unlock();
         }
     }
-    posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_DEL, worker.wake_read_fd, null) catch {};
+    compat.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_DEL, worker.wake_read_fd, null) catch {};
 }
 
 fn cleanupExpiredUdpSessionsInWorker(worker: *UdpSessionWorker) void {
-    const now_ms = std.time.milliTimestamp();
+    const now_ms = compat.milliTimestamp();
     var shard_it = worker.listener_fds.iterator();
     while (shard_it.next()) |kv| {
         const shard = kv.value_ptr.*;
@@ -1356,7 +1357,7 @@ fn handleUdpReadableOnWorker(worker: *UdpSessionWorker, shard: *UdpWorkerShard) 
                 sessions[idx] = null;
                 continue;
             };
-            session.last_seen_ms.store(std.time.milliTimestamp(), .monotonic);
+            session.last_seen_ms.store(compat.milliTimestamp(), .monotonic);
             sessions[idx] = session;
         }
 
@@ -1403,7 +1404,7 @@ fn getOrCreateUdpSessionOnWorker(worker: *UdpSessionWorker, shard: *UdpWorkerSha
         worker.metrics.udp_send_errors_total.inc();
         return null;
     };
-    const upstream_fd = posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, posix.IPPROTO.UDP) catch {
+    const upstream_fd = compat.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, posix.IPPROTO.UDP) catch {
         worker.metrics.udp_send_errors_total.inc();
         return null;
     };
@@ -1419,14 +1420,14 @@ fn getOrCreateUdpSessionOnWorker(worker: *UdpSessionWorker, shard: *UdpWorkerSha
         var segment_value: c_int = @intCast(@min(shard.entry.manager.udp_fast_path_segment_size, std.math.maxInt(c_int)));
         posix.setsockopt(upstream_fd, posix.IPPROTO.UDP, udp_segment_opt, std.mem.asBytes(&segment_value)) catch {};
     }
-    posix.connect(upstream_fd, &upstream_addr.any, upstream_addr.getOsSockLen()) catch {
-        posix.close(upstream_fd);
+    compat.connect(upstream_fd, &upstream_addr.any, upstream_addr.getOsSockLen()) catch {
+        compat.close(upstream_fd);
         worker.metrics.udp_send_errors_total.inc();
         return null;
     };
 
     const session = shard.allocator.create(UdpSession) catch {
-        posix.close(upstream_fd);
+        compat.close(upstream_fd);
         worker.metrics.udp_drop_total.inc();
         return null;
     };
@@ -1436,14 +1437,14 @@ fn getOrCreateUdpSessionOnWorker(worker: *UdpSessionWorker, shard: *UdpWorkerSha
         .client_addr = addr,
         .client_addr_len = addr.getOsSockLen(),
         .upstream_fd = upstream_fd,
-        .last_seen_ms = std.atomic.Value(i64).init(std.time.milliTimestamp()),
+        .last_seen_ms = std.atomic.Value(i64).init(compat.milliTimestamp()),
         .fast_path_enabled = shard.entry.manager.udp_fast_path_enabled,
         .fast_path_segment_size = @intCast(@min(shard.entry.manager.udp_fast_path_segment_size, std.math.maxInt(u16))),
         .fast_path_gso_burst = @intCast(@min(shard.entry.manager.udp_fast_path_gso_burst, std.math.maxInt(u16))),
         .fast_path_test_force_fallback = shard.entry.manager.udp_fast_path_test_force_fallback,
     };
     shard.sessions.put(key, session) catch {
-        posix.close(upstream_fd);
+        compat.close(upstream_fd);
         shard.allocator.destroy(session);
         worker.metrics.udp_drop_total.inc();
         return null;
@@ -1451,17 +1452,17 @@ fn getOrCreateUdpSessionOnWorker(worker: *UdpSessionWorker, shard: *UdpWorkerSha
     worker.metrics.udp_session_create_total.inc();
     worker.metrics.udp_active_sessions.inc();
     var event = std.os.linux.epoll_event{ .events = std.os.linux.EPOLL.IN, .data = .{ .fd = upstream_fd } };
-    posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, upstream_fd, &event) catch {
+    compat.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, upstream_fd, &event) catch {
         _ = shard.sessions.remove(key);
-        posix.close(upstream_fd);
+        compat.close(upstream_fd);
         shard.allocator.destroy(session);
         worker.metrics.udp_active_sessions.dec();
         return null;
     };
     worker.reply_fds.put(upstream_fd, .{ .shard = shard, .key = key }) catch {
-        posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_DEL, upstream_fd, &event) catch {};
+        compat.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_DEL, upstream_fd, &event) catch {};
         _ = shard.sessions.remove(key);
-        posix.close(upstream_fd);
+        compat.close(upstream_fd);
         shard.allocator.destroy(session);
         worker.metrics.udp_active_sessions.dec();
         return null;
@@ -1479,7 +1480,7 @@ fn handleUdpReplyReadableOnWorker(worker: *UdpSessionWorker, shard: *UdpWorkerSh
 
     var buffer: [64 * 1024]u8 = undefined;
     while (true) {
-        const amt = posix.recv(session.upstream_fd, &buffer, 0) catch |err| switch (err) {
+        const amt = compat.recv(session.upstream_fd, &buffer, 0) catch |err| switch (err) {
             error.WouldBlock => break,
             else => {
                 worker.metrics.udp_recv_errors_total.inc();
@@ -1492,7 +1493,7 @@ fn handleUdpReplyReadableOnWorker(worker: *UdpSessionWorker, shard: *UdpWorkerSh
             removeUdpSessionFromWorkerShardLocked(worker, shard, key, session, false);
             break;
         }
-        _ = posix.sendto(shard.listener_fd, buffer[0..amt], 0, &session.client_addr.any, session.client_addr_len) catch {
+        _ = compat.sendto(shard.listener_fd, buffer[0..amt], 0, &session.client_addr.any, session.client_addr_len) catch {
             worker.metrics.udp_send_errors_total.inc();
             worker.metrics.udp_reply_drop_total.inc();
             removeUdpSessionFromWorkerShardLocked(worker, shard, key, session, false);
@@ -1503,13 +1504,13 @@ fn handleUdpReplyReadableOnWorker(worker: *UdpSessionWorker, shard: *UdpWorkerSh
         worker.metrics.udp_bytes_out_total.add(@intCast(amt));
         incUdpWorkerPacketsOut(worker.metrics, worker.index, 1);
         incUdpDataplaneRedesignPacketsOut(worker.metrics, shard.entry.manager.udp_dataplane_redesign_enabled, 1);
-        session.last_seen_ms.store(std.time.milliTimestamp(), .monotonic);
+        session.last_seen_ms.store(compat.milliTimestamp(), .monotonic);
     }
 }
 
 fn removeUdpSessionFromWorkerShardLocked(worker: *UdpSessionWorker, shard: *UdpWorkerShard, key: ClientKey, session: *UdpSession, count_as_reply_drop: bool) void {
     var event = std.os.linux.epoll_event{ .events = 0, .data = .{ .fd = session.upstream_fd } };
-    posix.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_DEL, session.upstream_fd, &event) catch {};
+    compat.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_DEL, session.upstream_fd, &event) catch {};
     _ = worker.reply_fds.remove(session.upstream_fd);
     _ = shard.sessions.remove(key);
     if (shard.cached_key) |cached_key| {
@@ -1557,7 +1558,7 @@ const ListenerEntry = struct {
     udp_io_uring_payload_buffer: [64 * 1024]u8,
     udp_io_uring_iov: posix.iovec,
     udp_io_uring_msg: posix.msghdr,
-    mutex: std.Thread.Mutex,
+    mutex: compat.Mutex,
     udp_sessions: std.AutoHashMap(ClientKey, *UdpSession),
     udp_cached_key: ?ClientKey,
     udp_cached_session: ?*UdpSession,
@@ -1673,24 +1674,24 @@ fn replaceOptionalString(allocator: std.mem.Allocator, target: *?[]u8, value: ?[
 }
 
 fn bindTcpListener(port: u16, epoll_fd: posix.fd_t, reuse_port: bool) !posix.fd_t {
-    const fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, posix.IPPROTO.TCP);
-    errdefer posix.close(fd);
+    const fd = try compat.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, posix.IPPROTO.TCP);
+    errdefer compat.close(fd);
     var one: c_int = 1;
     try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&one));
     if (reuse_port) {
         try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEPORT, std.mem.asBytes(&one));
     }
     const addr = try net.Address.parseIp4("0.0.0.0", port);
-    try posix.bind(fd, &addr.any, addr.getOsSockLen());
-    try posix.listen(fd, 128);
+    try compat.bind(fd, &addr.any, addr.getOsSockLen());
+    try compat.listen(fd, 128);
     var event = std.os.linux.epoll_event{ .events = std.os.linux.EPOLL.IN, .data = .{ .fd = fd } };
-    try posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_ADD, fd, &event);
+    try compat.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_ADD, fd, &event);
     return fd;
 }
 
 fn bindUdpSocket(port: u16, epoll_fd: posix.fd_t, recv_buf_bytes: u32, send_buf_bytes: u32, reuse_port: bool, enable_gro: bool) !posix.fd_t {
-    const fd = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, posix.IPPROTO.UDP);
-    errdefer posix.close(fd);
+    const fd = try compat.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, posix.IPPROTO.UDP);
+    errdefer compat.close(fd);
     var one: c_int = 1;
     try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&one));
     if (reuse_port) {
@@ -1708,9 +1709,9 @@ fn bindUdpSocket(port: u16, epoll_fd: posix.fd_t, recv_buf_bytes: u32, send_buf_
         posix.setsockopt(fd, sol_udp, udp_gro_opt, std.mem.asBytes(&one)) catch {};
     }
     const addr = try net.Address.parseIp4("0.0.0.0", port);
-    try posix.bind(fd, &addr.any, addr.getOsSockLen());
+    try compat.bind(fd, &addr.any, addr.getOsSockLen());
     var event = std.os.linux.epoll_event{ .events = std.os.linux.EPOLL.IN, .data = .{ .fd = fd } };
-    try posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_ADD, fd, &event);
+    try compat.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_ADD, fd, &event);
     return fd;
 }
 
@@ -1819,7 +1820,7 @@ const TcpSessionWorker = struct {
     wake_write_fd: posix.fd_t,
     thread: ?std.Thread = null,
     stop_flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    mutex: std.Thread.Mutex = .{},
+    mutex: compat.Mutex = .{},
     pending_accepts: std.ArrayList(PendingAcceptedTcpSession),
     pending_sessions: std.ArrayList(*TcpRuntimeSession),
     sessions: std.ArrayList(*TcpRuntimeSession),
@@ -1836,7 +1837,7 @@ const UdpSessionWorker = struct {
     wake_write_fd: posix.fd_t,
     thread: ?std.Thread = null,
     stop_flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    mutex: std.Thread.Mutex = .{},
+    mutex: compat.Mutex = .{},
     listener_fds: std.AutoHashMap(posix.fd_t, *UdpWorkerShard),
     reply_fds: std.AutoHashMap(posix.fd_t, UdpWorkerReplyDispatch),
 };
@@ -1852,9 +1853,9 @@ fn initTcpSessionWorkers(allocator: std.mem.Allocator, metrics: *Metrics, worker
         }
     }
     while (initialized < worker_count) : (initialized += 1) {
-        const epoll_fd = try posix.epoll_create1(0);
-        errdefer posix.close(epoll_fd);
-        const wake_pipe = try posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+        const epoll_fd = try compat.epoll_create1(0);
+        errdefer compat.close(epoll_fd);
+        const wake_pipe = try compat.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
         errdefer {
             closeIgnoreBadFd(wake_pipe[0]);
             closeIgnoreBadFd(wake_pipe[1]);
@@ -1866,9 +1867,9 @@ fn initTcpSessionWorkers(allocator: std.mem.Allocator, metrics: *Metrics, worker
             .epoll_fd = epoll_fd,
             .wake_read_fd = wake_pipe[0],
             .wake_write_fd = wake_pipe[1],
-            .pending_accepts = .{},
-            .pending_sessions = .{},
-            .sessions = .{},
+            .pending_accepts = .empty,
+            .pending_sessions = .empty,
+            .sessions = .empty,
             .session_fds = std.AutoHashMap(posix.fd_t, *TcpRuntimeSession).init(allocator),
             .listener_fds = std.AutoHashMap(posix.fd_t, *ListenerEntry).init(allocator),
         };
@@ -1909,9 +1910,9 @@ fn initUdpSessionWorkers(allocator: std.mem.Allocator, metrics: *Metrics, worker
         }
     }
     while (initialized < worker_count) : (initialized += 1) {
-        const epoll_fd = try posix.epoll_create1(0);
-        errdefer posix.close(epoll_fd);
-        const wake_pipe = try posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+        const epoll_fd = try compat.epoll_create1(0);
+        errdefer compat.close(epoll_fd);
+        const wake_pipe = try compat.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
         errdefer {
             closeIgnoreBadFd(wake_pipe[0]);
             closeIgnoreBadFd(wake_pipe[1]);
@@ -1979,13 +1980,13 @@ fn handleTcpAccept(manager: *RuntimeManager, entry: *ListenerEntry) void {
             posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK
         else
             posix.SOCK.CLOEXEC;
-        const conn_fd = posix.accept(listen_fd, &addr.any, &len, accept_flags) catch |err| switch (err) {
+        const conn_fd = compat.accept(listen_fd, &addr.any, &len, accept_flags) catch |err| switch (err) {
             error.WouldBlock => break,
             else => break,
         };
         if (entry.status != .active or entry.effective_host == null or entry.effective_target_port == null) {
             manager.metrics.rejected_no_host_total.inc();
-            posix.close(conn_fd);
+            compat.close(conn_fd);
             continue;
         }
 
@@ -2005,7 +2006,7 @@ fn handleTcpAccept(manager: *RuntimeManager, entry: *ListenerEntry) void {
 
         const allocator = manager.allocator;
         const ctx = allocator.create(TcpSessionCtx) catch {
-            posix.close(conn_fd);
+            compat.close(conn_fd);
             continue;
         };
         ctx.* = .{
@@ -2013,7 +2014,7 @@ fn handleTcpAccept(manager: *RuntimeManager, entry: *ListenerEntry) void {
             .manager = null,
             .client_fd = conn_fd,
             .host = allocator.dupe(u8, entry.effective_host.?) catch {
-                posix.close(conn_fd);
+                compat.close(conn_fd);
                 allocator.destroy(ctx);
                 continue;
             },
@@ -2032,7 +2033,7 @@ fn handleTcpAccept(manager: *RuntimeManager, entry: *ListenerEntry) void {
             manager.tcp_sessions_mutex.unlock();
             allocator.free(ctx.host);
             allocator.destroy(ctx);
-            posix.close(conn_fd);
+            compat.close(conn_fd);
             continue;
         };
         manager.tcp_sessions_mutex.unlock();
@@ -2048,7 +2049,7 @@ fn handleTcpAccept(manager: *RuntimeManager, entry: *ListenerEntry) void {
             manager.tcp_sessions_mutex.unlock();
             allocator.free(ctx.host);
             allocator.destroy(ctx);
-            posix.close(conn_fd);
+            compat.close(conn_fd);
             continue;
         };
         ctx.thread = thread;
@@ -2065,11 +2066,11 @@ fn startTcpRuntimeSession(manager: *RuntimeManager, entry: *ListenerEntry, clien
         std.posix.AF.INET6 => std.posix.AF.INET6,
         else => return error.AddressFamilyNotSupported,
     };
-    const upstream_fd = try posix.socket(family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, posix.IPPROTO.TCP);
+    const upstream_fd = try compat.socket(family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, posix.IPPROTO.TCP);
     errdefer closeIgnoreBadFd(upstream_fd);
 
     const upstream_connected = blk: {
-        posix.connect(upstream_fd, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
+        compat.connect(upstream_fd, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
             error.WouldBlock, error.ConnectionPending => break :blk false,
             else => return err,
         };
@@ -2103,17 +2104,17 @@ fn startTcpRuntimeSession(manager: *RuntimeManager, entry: *ListenerEntry, clien
     errdefer _ = manager.tcp_runtime_session_fds.remove(upstream_fd);
 
     var client_event = std.os.linux.epoll_event{ .events = 0, .data = .{ .fd = client_fd } };
-    try posix.epoll_ctl(manager.epoll_fd, std.os.linux.EPOLL.CTL_ADD, client_fd, &client_event);
-    errdefer posix.epoll_ctl(manager.epoll_fd, std.os.linux.EPOLL.CTL_DEL, client_fd, null) catch {};
+    try compat.epoll_ctl(manager.epoll_fd, std.os.linux.EPOLL.CTL_ADD, client_fd, &client_event);
+    errdefer compat.epoll_ctl(manager.epoll_fd, std.os.linux.EPOLL.CTL_DEL, client_fd, null) catch {};
     var upstream_event = std.os.linux.epoll_event{ .events = 0, .data = .{ .fd = upstream_fd } };
-    try posix.epoll_ctl(manager.epoll_fd, std.os.linux.EPOLL.CTL_ADD, upstream_fd, &upstream_event);
+    try compat.epoll_ctl(manager.epoll_fd, std.os.linux.EPOLL.CTL_ADD, upstream_fd, &upstream_event);
     updateTcpRuntimeSessionInterest(manager.epoll_fd, session);
     manager.metrics.tcp_session_create_total.inc();
     manager.metrics.tcp_active_sessions.inc();
 }
 
 fn finishTcpRuntimeConnect(session: *TcpRuntimeSession) !void {
-    try posix.getsockoptError(session.upstream_fd);
+    try compat.getsockoptError(session.upstream_fd);
     session.upstream_connected = true;
 }
 
@@ -2147,7 +2148,7 @@ fn shouldCloseTcpRuntimeSession(session: *const TcpRuntimeSession) bool {
 
 fn fillTcpRuntimeBuffer(fd: posix.fd_t, buffer: *TcpRuntimeBuffer, read_closed: *bool) void {
     while (!read_closed.* and buffer.writableLen() > 0) {
-        const amt = posix.read(fd, buffer.writableSlice()) catch |err| switch (err) {
+        const amt = compat.read(fd, buffer.writableSlice()) catch |err| switch (err) {
             error.WouldBlock => return,
             error.ConnectionResetByPeer, error.BrokenPipe, error.NotOpenForReading => {
                 read_closed.* = true;
@@ -2169,7 +2170,7 @@ fn fillTcpRuntimeBuffer(fd: posix.fd_t, buffer: *TcpRuntimeBuffer, read_closed: 
 
 fn flushTcpRuntimeBuffer(fd: posix.fd_t, buffer: *TcpRuntimeBuffer, peer_read_closed: *bool) void {
     while (buffer.readableLen() > 0) {
-        const written = posix.write(fd, buffer.readableSlice()) catch |err| switch (err) {
+        const written = compat.write(fd, buffer.readableSlice()) catch |err| switch (err) {
             error.WouldBlock => return,
             error.ConnectionResetByPeer, error.BrokenPipe, error.NotOpenForWriting => {
                 peer_read_closed.* = true;
@@ -2199,7 +2200,7 @@ const TcpSessionCtx = struct {
     metrics: *Metrics,
     upstream_fd: ?posix.fd_t,
     thread: ?std.Thread,
-    mutex: std.Thread.Mutex,
+    mutex: compat.Mutex,
     finished: bool,
 };
 
@@ -2257,7 +2258,7 @@ fn runTcpCopy(client_fd: posix.fd_t, upstream_fd: posix.fd_t) void {
     const CopyCtx = struct {
         src: posix.fd_t,
         dst: posix.fd_t,
-        how: posix.ShutdownHow,
+        how: compat.ShutdownHow,
     };
     var reverse = CopyCtx{ .src = upstream_fd, .dst = client_fd, .how = .send };
     const thread = std.Thread.spawn(.{}, copyPumpThread, .{&reverse}) catch return;
@@ -2269,11 +2270,11 @@ fn runTcpCopy(client_fd: posix.fd_t, upstream_fd: posix.fd_t) void {
 fn copyPumpThread(ctx: anytype) void {
     var buffer: [16 * 1024]u8 = undefined;
     while (true) {
-        const amt = posix.read(ctx.src, &buffer) catch break;
+        const amt = compat.read(ctx.src, &buffer) catch break;
         if (amt == 0) break;
         var offset: usize = 0;
         while (offset < amt) {
-            const written = posix.write(ctx.dst, buffer[offset..amt]) catch break;
+            const written = compat.write(ctx.dst, buffer[offset..amt]) catch break;
             offset += written;
         }
     }
@@ -2286,12 +2287,12 @@ fn runTcpSplice(client_fd: posix.fd_t, upstream_fd: posix.fd_t, test_mode: TcpSp
     if (test_mode == .recoverable_setup_failure) return .{ .fallback = .unsupported };
     if (test_mode == .hard_failure) return .hard_failure;
 
-    const forward_pipe = posix.pipe2(.{ .CLOEXEC = true }) catch return .{ .fallback = .unsupported };
+    const forward_pipe = compat.pipe2(.{ .CLOEXEC = true }) catch return .{ .fallback = .unsupported };
     defer {
         closeIgnoreBadFd(forward_pipe[0]);
         closeIgnoreBadFd(forward_pipe[1]);
     }
-    const reverse_pipe = posix.pipe2(.{ .CLOEXEC = true }) catch return .{ .fallback = .unsupported };
+    const reverse_pipe = compat.pipe2(.{ .CLOEXEC = true }) catch return .{ .fallback = .unsupported };
     defer {
         closeIgnoreBadFd(reverse_pipe[0]);
         closeIgnoreBadFd(reverse_pipe[1]);
@@ -2374,7 +2375,7 @@ fn processUdpSegmentsSameClient(allocator: std.mem.Allocator, metrics: *Metrics,
         metrics.udp_drop_total.add(packet_count);
         return;
     };
-    session.last_seen_ms.store(std.time.milliTimestamp(), .monotonic);
+    session.last_seen_ms.store(compat.milliTimestamp(), .monotonic);
 
     var offset: usize = 0;
     while (offset < buffer.len) {
@@ -2487,7 +2488,7 @@ fn handleUdpReadable(allocator: std.mem.Allocator, metrics: *Metrics, entry: *Li
                 sessions[idx] = null;
                 continue;
             };
-            session.last_seen_ms.store(std.time.milliTimestamp(), .monotonic);
+            session.last_seen_ms.store(compat.milliTimestamp(), .monotonic);
             sessions[idx] = session;
         }
 
@@ -2536,7 +2537,7 @@ fn getOrCreateUdpSession(allocator: std.mem.Allocator, metrics: *Metrics, entry:
         metrics.udp_send_errors_total.inc();
         return null;
     };
-    const upstream_fd = posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, posix.IPPROTO.UDP) catch {
+    const upstream_fd = compat.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, posix.IPPROTO.UDP) catch {
         metrics.udp_send_errors_total.inc();
         return null;
     };
@@ -2552,14 +2553,14 @@ fn getOrCreateUdpSession(allocator: std.mem.Allocator, metrics: *Metrics, entry:
         var segment_value: c_int = @intCast(@min(entry.manager.udp_fast_path_segment_size, std.math.maxInt(c_int)));
         posix.setsockopt(upstream_fd, posix.IPPROTO.UDP, udp_segment_opt, std.mem.asBytes(&segment_value)) catch {};
     }
-    posix.connect(upstream_fd, &upstream_addr.any, upstream_addr.getOsSockLen()) catch {
-        posix.close(upstream_fd);
+    compat.connect(upstream_fd, &upstream_addr.any, upstream_addr.getOsSockLen()) catch {
+        compat.close(upstream_fd);
         metrics.udp_send_errors_total.inc();
         return null;
     };
 
     const session = allocator.create(UdpSession) catch {
-        posix.close(upstream_fd);
+        compat.close(upstream_fd);
         metrics.udp_drop_total.inc();
         return null;
     };
@@ -2569,14 +2570,14 @@ fn getOrCreateUdpSession(allocator: std.mem.Allocator, metrics: *Metrics, entry:
         .client_addr = addr,
         .client_addr_len = addr.getOsSockLen(),
         .upstream_fd = upstream_fd,
-        .last_seen_ms = std.atomic.Value(i64).init(std.time.milliTimestamp()),
+        .last_seen_ms = std.atomic.Value(i64).init(compat.milliTimestamp()),
         .fast_path_enabled = entry.manager.udp_fast_path_enabled,
         .fast_path_segment_size = @intCast(@min(entry.manager.udp_fast_path_segment_size, std.math.maxInt(u16))),
         .fast_path_gso_burst = @intCast(@min(entry.manager.udp_fast_path_gso_burst, std.math.maxInt(u16))),
         .fast_path_test_force_fallback = entry.manager.udp_fast_path_test_force_fallback,
     };
     entry.udp_sessions.put(key, session) catch {
-        posix.close(upstream_fd);
+        compat.close(upstream_fd);
         allocator.destroy(session);
         metrics.udp_drop_total.inc();
         return null;
@@ -2584,17 +2585,17 @@ fn getOrCreateUdpSession(allocator: std.mem.Allocator, metrics: *Metrics, entry:
     metrics.udp_session_create_total.inc();
     metrics.udp_active_sessions.inc();
     var event = std.os.linux.epoll_event{ .events = std.os.linux.EPOLL.IN, .data = .{ .fd = upstream_fd } };
-    posix.epoll_ctl(entry.manager.epoll_fd, std.os.linux.EPOLL.CTL_ADD, upstream_fd, &event) catch {
+    compat.epoll_ctl(entry.manager.epoll_fd, std.os.linux.EPOLL.CTL_ADD, upstream_fd, &event) catch {
         _ = entry.udp_sessions.remove(key);
-        posix.close(upstream_fd);
+        compat.close(upstream_fd);
         allocator.destroy(session);
         metrics.udp_active_sessions.dec();
         return null;
     };
     entry.manager.udp_reply_fds.put(upstream_fd, .{ .entry = entry, .key = key }) catch {
-        posix.epoll_ctl(entry.manager.epoll_fd, std.os.linux.EPOLL.CTL_DEL, upstream_fd, &event) catch {};
+        compat.epoll_ctl(entry.manager.epoll_fd, std.os.linux.EPOLL.CTL_DEL, upstream_fd, &event) catch {};
         _ = entry.udp_sessions.remove(key);
-        posix.close(upstream_fd);
+        compat.close(upstream_fd);
         allocator.destroy(session);
         metrics.udp_active_sessions.dec();
         return null;
@@ -2734,7 +2735,7 @@ fn flushUdpConnectedBatch(metrics: *Metrics, session: *UdpSession, buffers: *con
     if (session.fast_path_enabled) metrics.udp_fast_path_fallback_total.inc();
 
     var iovecs: [16]posix.iovec_const = undefined;
-    var msgvec: [16]std.os.linux.mmsghdr_const = undefined;
+    var msgvec: [16]std.os.linux.mmsghdr = undefined;
     for (0..count) |idx| {
         iovecs[idx] = .{ .base = &buffers[idx], .len = lengths[idx] };
         msgvec[idx] = .{
@@ -2786,7 +2787,7 @@ fn handleUdpReplyReadable(metrics: *Metrics, entry: *ListenerEntry, key: ClientK
 
     var buffer: [64 * 1024]u8 = undefined;
     while (true) {
-        const amt = posix.recv(session.upstream_fd, &buffer, 0) catch |err| switch (err) {
+        const amt = compat.recv(session.upstream_fd, &buffer, 0) catch |err| switch (err) {
             error.WouldBlock => break,
             else => {
                 metrics.udp_recv_errors_total.inc();
@@ -2799,7 +2800,7 @@ fn handleUdpReplyReadable(metrics: *Metrics, entry: *ListenerEntry, key: ClientK
             removeUdpSessionLocked(entry, key, session, false);
             break;
         }
-        _ = posix.sendto(entry.fd orelse break, buffer[0..amt], 0, &session.client_addr.any, session.client_addr_len) catch {
+        _ = compat.sendto(entry.fd orelse break, buffer[0..amt], 0, &session.client_addr.any, session.client_addr_len) catch {
             metrics.udp_send_errors_total.inc();
             metrics.udp_reply_drop_total.inc();
             removeUdpSessionLocked(entry, key, session, false);
@@ -2808,13 +2809,13 @@ fn handleUdpReplyReadable(metrics: *Metrics, entry: *ListenerEntry, key: ClientK
         metrics.udp_reply_primary_total.inc();
         metrics.udp_packets_out_total.inc();
         metrics.udp_bytes_out_total.add(@intCast(amt));
-        session.last_seen_ms.store(std.time.milliTimestamp(), .monotonic);
+        session.last_seen_ms.store(compat.milliTimestamp(), .monotonic);
     }
 }
 
 fn removeUdpSessionLocked(entry: *ListenerEntry, key: ClientKey, session: *UdpSession, count_as_reply_drop: bool) void {
     var event = std.os.linux.epoll_event{ .events = 0, .data = .{ .fd = session.upstream_fd } };
-    posix.epoll_ctl(entry.manager.epoll_fd, std.os.linux.EPOLL.CTL_DEL, session.upstream_fd, &event) catch {};
+    compat.epoll_ctl(entry.manager.epoll_fd, std.os.linux.EPOLL.CTL_DEL, session.upstream_fd, &event) catch {};
     _ = entry.manager.udp_reply_fds.remove(session.upstream_fd);
     _ = entry.udp_sessions.remove(key);
     if (entry.udp_cached_key) |cached_key| {
@@ -2977,7 +2978,7 @@ fn handleUdpIoUringCompletion(manager: *RuntimeManager, buffer_group: *std.os.li
         manager.metrics.udp_drop_total.inc();
         return;
     };
-    session.last_seen_ms.store(std.time.milliTimestamp(), .monotonic);
+    session.last_seen_ms.store(compat.milliTimestamp(), .monotonic);
 
     var single_lengths = [_]usize{payload.len} ++ ([_]usize{0} ** 15);
     var single_buffers: [16][64 * 1024]u8 = undefined;
@@ -2993,14 +2994,14 @@ fn closeIgnoreBadFd(fd: posix.fd_t) void {
 }
 
 fn shutdownIgnoreBadFd(fd: posix.fd_t) void {
-    switch (posix.errno(posix.system.shutdown(fd, @intFromEnum(posix.ShutdownHow.both)))) {
+    switch (posix.errno(std.os.linux.shutdown(fd, @intFromEnum(compat.ShutdownHow.both)))) {
         .SUCCESS, .BADF, .NOTCONN => {},
         else => {},
     }
 }
 
-fn shutdownIgnore(fd: posix.fd_t, how: posix.ShutdownHow) void {
-    switch (posix.errno(posix.system.shutdown(fd, @intFromEnum(how)))) {
+fn shutdownIgnore(fd: posix.fd_t, how: compat.ShutdownHow) void {
+    switch (posix.errno(std.os.linux.shutdown(fd, @intFromEnum(how)))) {
         .SUCCESS, .BADF, .NOTCONN => {},
         else => {},
     }

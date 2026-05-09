@@ -1,4 +1,6 @@
 const std = @import("std");
+const compat = @import("../../src/compat.zig");
+const net = @import("../../src/net_compat.zig");
 const config = @import("../../src/config.zig");
 const metrics_mod = @import("../../src/metrics.zig");
 const sqlite = @import("../../src/storage/sqlite.zig");
@@ -12,8 +14,8 @@ const HttpResponse = struct {
 };
 
 fn tempDbPath(allocator: std.mem.Allocator) ![]u8 {
-    try std.fs.cwd().makePath(".zig-cache/integration-tests");
-    return std.fmt.allocPrint(allocator, ".zig-cache/integration-tests/{d}.sqlite", .{std.time.nanoTimestamp()});
+    try compat.makePath(".zig-cache/integration-tests");
+    return std.fmt.allocPrint(allocator, ".zig-cache/integration-tests/{d}.sqlite", .{compat.nanoTimestamp()});
 }
 
 const Harness = struct {
@@ -39,7 +41,7 @@ const Harness = struct {
         };
         self.runtime_manager = try runtime.RuntimeManager.init(allocator, &self.metrics, .{});
         try self.runtime_manager.start();
-        const base: u16 = @intCast(56000 + @as(u16, @intCast(@mod(std.time.nanoTimestamp(), 500))));
+        const base: u16 = @intCast(56000 + @as(u16, @intCast(@mod(compat.nanoTimestamp(), 500))));
         self.service = service_mod.Service.init(allocator, &self.repo, &self.runtime_manager, .{ .start = base, .end = base + 50 }, 2000);
         self.http = .{
             .allocator = allocator,
@@ -59,7 +61,7 @@ const Harness = struct {
         self.allocator.free(self.http.auth_token);
         self.runtime_manager.deinit();
         self.repo.close();
-        std.fs.cwd().deleteFile(self.db_path) catch {};
+        compat.deleteFile(self.db_path);
         self.allocator.free(self.db_path);
         self.allocator.destroy(self);
     }
@@ -67,7 +69,7 @@ const Harness = struct {
 
 fn doHttp(allocator: std.mem.Allocator, port: u16, method: []const u8, path: []const u8, body: []const u8) !HttpResponse {
     const addr = try config.parseIpLiteral("127.0.0.1", port);
-    const stream = try std.net.tcpConnectToAddress(addr);
+    const stream = try net.tcpConnectToAddress(addr);
     defer stream.close();
 
     const request = try std.fmt.allocPrint(
@@ -76,10 +78,10 @@ fn doHttp(allocator: std.mem.Allocator, port: u16, method: []const u8, path: []c
         .{ method, path, body.len, body },
     );
     defer allocator.free(request);
-    _ = try std.posix.write(stream.handle, request);
-    try std.posix.shutdown(stream.handle, .send);
+    _ = try compat.write(stream.handle, request);
+    try compat.shutdown(stream.handle, .send);
 
-    var header_buf = std.ArrayList(u8){};
+    var header_buf = std.ArrayList(u8).empty;
     defer header_buf.deinit(allocator);
     var byte: [1]u8 = undefined;
     while (std.mem.indexOf(u8, header_buf.items, "\r\n\r\n") == null) {
@@ -117,26 +119,26 @@ fn doHttp(allocator: std.mem.Allocator, port: u16, method: []const u8, path: []c
     return .{ .status = status, .body = body_copy };
 }
 
-fn startTcpEchoServer(_: std.mem.Allocator) !struct { server: std.net.Server, port: u16, thread: std.Thread } {
+fn startTcpEchoServer(_: std.mem.Allocator) !struct { server: net.Server, port: u16, thread: std.Thread } {
     const addr = try config.parseIpLiteral("127.0.0.1", 0);
     const server = try addr.listen(.{ .reuse_address = true });
-    var bound: std.net.Address = undefined;
-    var len: std.posix.socklen_t = @sizeOf(std.net.Address);
-    try std.posix.getsockname(server.stream.handle, &bound.any, &len);
+    var bound: net.Address = undefined;
+    var len: std.posix.socklen_t = @sizeOf(net.Address);
+    try compat.getsockname(server.stream.handle, &bound.any, &len);
     const port = bound.getPort();
     const thread = try std.Thread.spawn(.{}, tcpEchoThread, .{server.stream.handle});
     return .{ .server = server, .port = port, .thread = thread };
 }
 
 fn tcpEchoThread(server_fd: std.posix.fd_t) void {
-    var server = std.net.Server{ .listen_address = undefined, .stream = .{ .handle = server_fd } };
+    var server = net.Server{ .listen_address = undefined, .stream = .{ .handle = server_fd } };
     const conn = server.accept() catch return;
     defer conn.stream.close();
     var buf: [1024]u8 = undefined;
     while (true) {
         const amt = std.posix.read(conn.stream.handle, &buf) catch break;
         if (amt == 0) break;
-        _ = std.posix.write(conn.stream.handle, buf[0..amt]) catch break;
+        _ = compat.write(conn.stream.handle, buf[0..amt]) catch break;
     }
 }
 
@@ -170,9 +172,9 @@ test "http create target forward delete tcp" {
     try std.testing.expectEqual(@as(u16, 200), target_resp.status);
 
     const forward_addr = try config.parseIpLiteral("127.0.0.1", created_port);
-    const stream = try std.net.tcpConnectToAddress(forward_addr);
+    const stream = try net.tcpConnectToAddress(forward_addr);
     defer stream.close();
-    _ = try std.posix.write(stream.handle, "ping");
+    _ = try compat.write(stream.handle, "ping");
     var buf: [4]u8 = undefined;
     const amt = try std.posix.read(stream.handle, &buf);
     try std.testing.expectEqual(@as(usize, 4), amt);
@@ -241,13 +243,13 @@ test "http start failure does not deadlock cleanup" {
     var occupied = try addr.listen(.{});
     defer occupied.deinit();
 
-    var bound: std.net.Address = undefined;
-    var len: std.posix.socklen_t = @sizeOf(std.net.Address);
-    try std.posix.getsockname(occupied.stream.handle, &bound.any, &len);
+    var bound: net.Address = undefined;
+    var len: std.posix.socklen_t = @sizeOf(net.Address);
+    try compat.getsockname(occupied.stream.handle, &bound.any, &len);
 
     const db_path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(db_path) catch {};
+        compat.deleteFile(db_path);
         std.testing.allocator.free(db_path);
     }
 
@@ -325,9 +327,9 @@ test "http allocation and binding lifecycle endpoints" {
     try std.testing.expect(std.mem.indexOf(u8, put_binding_resp.body, "\"runtime_status\":\"active\"") != null);
 
     const forward_addr = try config.parseIpLiteral("127.0.0.1", allocation_port);
-    const stream = try std.net.tcpConnectToAddress(forward_addr);
+    const stream = try net.tcpConnectToAddress(forward_addr);
     defer stream.close();
-    _ = try std.posix.write(stream.handle, "ping");
+    _ = try compat.write(stream.handle, "ping");
     var buf: [4]u8 = undefined;
     const amt = try std.posix.read(stream.handle, &buf);
     try std.testing.expectEqual(@as(usize, 4), amt);

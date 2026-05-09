@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("../compat.zig");
 const config_mod = @import("../config.zig");
 const model = @import("../model/allocation.zig");
 const uuidv7 = @import("../util/uuidv7.zig");
@@ -19,7 +20,7 @@ pub const Service = struct {
     port_range: config_mod.PortRange,
     apply_timeout_ms: u32,
     failpoints: Failpoints = .{},
-    mutex: std.Thread.Mutex = .{},
+    mutex: compat.Mutex = .{},
     prng: std.Random.DefaultPrng,
 
     pub fn init(allocator: std.mem.Allocator, repo: *storage.Repository, runtime_manager: *runtime.RuntimeManager, port_range: config_mod.PortRange, apply_timeout_ms: u32) Service {
@@ -29,7 +30,7 @@ pub const Service = struct {
             .runtime_manager = runtime_manager,
             .port_range = port_range,
             .apply_timeout_ms = apply_timeout_ms,
-            .prng = std.Random.DefaultPrng.init(@intCast(std.time.nanoTimestamp())),
+            .prng = std.Random.DefaultPrng.init(@intCast(compat.nanoTimestamp())),
         };
     }
 
@@ -41,7 +42,7 @@ pub const Service = struct {
         var port: u16 = self.port_range.start;
         while (port <= self.port_range.end) : (port += 1) {
             if (try self.exists(protocol, port)) continue;
-            const now = std.time.milliTimestamp();
+            const now = compat.milliTimestamp();
             const id_arr = uuidv7.generateUuidV7(self.prng.random(), @intCast(now));
             var allocation = model.Allocation{
                 .id = try self.allocator.dupe(u8, id_arr[0..]),
@@ -94,7 +95,7 @@ pub const Service = struct {
             allocations.deinit(allocator);
         }
 
-        var resources = std.ArrayList(model.AllocationResource){};
+        var resources = std.ArrayList(model.AllocationResource).empty;
         errdefer {
             for (resources.items) |*resource| deinitAllocationResource(allocator, resource);
             resources.deinit(allocator);
@@ -138,7 +139,7 @@ pub const Service = struct {
         var allocation = (try self.repo.getAllocation(self.allocator, id)) orelse return error.NotFound;
         defer allocation.deinit(self.allocator);
 
-        const now = std.time.milliTimestamp();
+        const now = compat.milliTimestamp();
         const created_at_ms = if (try self.repo.getBinding(self.allocator, id)) |binding_value| blk: {
             var existing = binding_value;
             defer existing.deinit(self.allocator);
@@ -176,7 +177,7 @@ pub const Service = struct {
         var allocation = (try self.repo.getAllocation(self.allocator, id)) orelse return error.NotFound;
         defer allocation.deinit(self.allocator);
 
-        const now = std.time.milliTimestamp();
+        const now = compat.milliTimestamp();
         self.repo.begin() catch {};
         errdefer self.repo.rollback();
         const changed = try self.repo.deleteBinding(id, now);
@@ -213,7 +214,7 @@ pub const Service = struct {
 
         const next_target_port = if (target_port) |port| port else if (existing_binding) |binding| binding.target_port else return error.NotFound;
         const next_host = if (host_value) |host| host else if (existing_binding) |binding| binding.host else null;
-        const now = std.time.milliTimestamp();
+        const now = compat.milliTimestamp();
         const created_at_ms = if (existing_binding) |binding| binding.created_at_ms else now;
 
         var binding = model.Binding{
@@ -274,7 +275,7 @@ pub const Service = struct {
             allocations.deinit(allocator);
         }
 
-        var views = std.ArrayList(model.AllocationView){};
+        var views = std.ArrayList(model.AllocationView).empty;
         errdefer {
             for (views.items) |*view| deinitView(allocator, view);
             views.deinit(allocator);

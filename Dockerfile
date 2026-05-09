@@ -1,6 +1,6 @@
 FROM alpine:3.20 AS builder
 
-ARG ZIG_VERSION=0.15.2
+ARG ZIG_VERSION=0.16.0
 ARG TARGETARCH
 
 RUN apk add --no-cache \

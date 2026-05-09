@@ -1,16 +1,17 @@
 const std = @import("std");
+const compat = @import("../../src/compat.zig");
 const sqlite = @import("../../src/storage/sqlite.zig");
 const model = @import("../../src/model/allocation.zig");
 
 fn tempDbPath(allocator: std.mem.Allocator) ![]u8 {
-    try std.fs.cwd().makePath(".zig-cache/sqlite-tests");
-    return std.fmt.allocPrint(allocator, ".zig-cache/sqlite-tests/{d}.sqlite", .{std.time.nanoTimestamp()});
+    try compat.makePath(".zig-cache/sqlite-tests");
+    return std.fmt.allocPrint(allocator, ".zig-cache/sqlite-tests/{d}.sqlite", .{compat.nanoTimestamp()});
 }
 
 test "sqlite persists and reloads allocations" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
     var db = try sqlite.Repository.open(std.testing.allocator, path);
@@ -39,7 +40,7 @@ test "sqlite persists and reloads allocations" {
 test "sqlite migrates legacy allocation binding into bindings table" {
     const path = try tempDbPath(std.testing.allocator);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        compat.deleteFile(path);
         std.testing.allocator.free(path);
     }
 

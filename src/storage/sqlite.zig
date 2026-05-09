@@ -128,7 +128,7 @@ pub const Repository = struct {
     }
 
     pub fn listAllocations(self: *Repository, allocator: std.mem.Allocator) !std.ArrayList(model.Allocation) {
-        var rows = std.ArrayList(model.Allocation){};
+        var rows = std.ArrayList(model.Allocation).empty;
         errdefer {
             for (rows.items) |*item| item.deinit(allocator);
             rows.deinit(allocator);
