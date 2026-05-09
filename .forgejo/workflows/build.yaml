@@ -2,6 +2,9 @@ name: build
 
 env:
   ZIG_VERSION: 0.16.0
+  SQLITE_AMALGAMATION_YEAR: 2026
+  SQLITE_AMALGAMATION_VERSION: 3530100
+  SQLITE_AMALGAMATION_SHA3: 3c07136e4f6b5dd0c395be86455014039597bc65b6851f7111e88f71b6e06114
 
 on:
   push:
@@ -11,7 +14,7 @@ on:
   pull_request:
 
 jobs:
-  compile:
+  compile-amd64:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -20,7 +23,26 @@ jobs:
       - name: Install dependencies
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl xz-utils libsqlite3-dev
+          apt-get install -y --no-install-recommends ca-certificates curl xz-utils unzip python3
+
+      - name: Download SQLite amalgamation
+        run: |
+          curl -fsSLo /tmp/sqlite-amalgamation.zip \
+            "https://sqlite.org/${SQLITE_AMALGAMATION_YEAR}/sqlite-amalgamation-${SQLITE_AMALGAMATION_VERSION}.zip"
+          python3 - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+          actual = hashlib.sha3_256(Path('/tmp/sqlite-amalgamation.zip').read_bytes()).hexdigest()
+          expected = os.environ['SQLITE_AMALGAMATION_SHA3']
+          if actual != expected:
+              raise SystemExit(f'SQLite amalgamation checksum mismatch: {actual} != {expected}')
+          PY
+          rm -rf lib
+          mkdir -p lib
+          unzip -q /tmp/sqlite-amalgamation.zip -d /tmp/sqlite-amalgamation
+          cp /tmp/sqlite-amalgamation/sqlite-amalgamation-${SQLITE_AMALGAMATION_VERSION}/sqlite3.c lib/sqlite3.c
+          cp /tmp/sqlite-amalgamation/sqlite-amalgamation-${SQLITE_AMALGAMATION_VERSION}/sqlite3.h lib/sqlite3.h
 
       - name: Setup Zig
         uses: https://codeberg.org/mlugg/setup-zig@v2
@@ -36,5 +58,52 @@ jobs:
       - name: Upload binary
         uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
-            name: relayd-amd64-linux
-            path: zig-out/bin/relayd
+          name: relayd-amd64-linux
+          path: zig-out/bin/relayd
+
+  compile-aarch64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: https://data.forgejo.org/actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl xz-utils unzip python3
+
+      - name: Download SQLite amalgamation
+        run: |
+          curl -fsSLo /tmp/sqlite-amalgamation.zip \
+            "https://sqlite.org/${SQLITE_AMALGAMATION_YEAR}/sqlite-amalgamation-${SQLITE_AMALGAMATION_VERSION}.zip"
+          python3 - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+          actual = hashlib.sha3_256(Path('/tmp/sqlite-amalgamation.zip').read_bytes()).hexdigest()
+          expected = os.environ['SQLITE_AMALGAMATION_SHA3']
+          if actual != expected:
+              raise SystemExit(f'SQLite amalgamation checksum mismatch: {actual} != {expected}')
+          PY
+          rm -rf lib
+          mkdir -p lib
+          unzip -q /tmp/sqlite-amalgamation.zip -d /tmp/sqlite-amalgamation
+          cp /tmp/sqlite-amalgamation/sqlite-amalgamation-${SQLITE_AMALGAMATION_VERSION}/sqlite3.c lib/sqlite3.c
+          cp /tmp/sqlite-amalgamation/sqlite-amalgamation-${SQLITE_AMALGAMATION_VERSION}/sqlite3.h lib/sqlite3.h
+
+      - name: Setup Zig
+        uses: https://codeberg.org/mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Verify Zig version
+        run: test "$(zig version)" = "$ZIG_VERSION"
+
+      - name: Compile release-safe aarch64 binary
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=aarch64-linux-gnu
+
+      - name: Upload binary
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: relayd-aarch64-linux
+          path: zig-out/bin/relayd
