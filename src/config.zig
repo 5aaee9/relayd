@@ -43,33 +43,54 @@ pub const Config = struct {
         const raw_listen = try envOwned(allocator, "HTTP_LISTEN", ":8080");
         defer allocator.free(raw_listen);
         const listen = try parseHttpListen(allocator, raw_listen);
+        errdefer allocator.free(listen.host);
+
         const raw_range = try envOwned(allocator, "PORT_RANGE", "10000-30000");
         defer allocator.free(raw_range);
-        const token = try getEnvVarOwned(allocator, "AUTH_TOKEN");
-        if (token.len == 0) return error.EmptyAuthToken;
+        const port_range = try parsePortRange(raw_range);
+
+        const token = try getRequiredEnvVarOwned(allocator, "AUTH_TOKEN");
+        errdefer allocator.free(token);
+        if (token.len == 0) {
+            std.log.err("required environment variable {s} must not be empty", .{"AUTH_TOKEN"});
+            return error.EmptyAuthToken;
+        }
+
+        const tcp_session_model_workers = try envU32("TCP_SESSION_MODEL_WORKERS", 0);
+        const udp_session_workers = try envU32("UDP_SESSION_WORKERS", 0);
+        const udp_fast_path_segment_size = try envU32("UDP_FAST_PATH_SEGMENT_SIZE", 1472);
+        const udp_fast_path_gso_burst = try envU32("UDP_FAST_PATH_GSO_BURST", 16);
+        const udp_socket_recv_buffer_bytes = try envU32("UDP_SOCKET_RCVBUF_BYTES", 8 * 1024 * 1024);
+        const udp_socket_send_buffer_bytes = try envU32("UDP_SOCKET_SNDBUF_BYTES", 8 * 1024 * 1024);
+        const runtime_apply_timeout_ms = try envU32("RUNTIME_APPLY_TIMEOUT_MS", 2000);
+        const restore_sweep_timeout_ms = try envU32("RESTORE_SWEEP_TIMEOUT_MS", 30000);
+
+        const db_path = try envOwned(allocator, "SQLITE_PATH", "relayd.sqlite3");
+        errdefer allocator.free(db_path);
+
         return .{
             .http_listen_host = listen.host,
             .http_listen_port = listen.port,
-            .port_range = try parsePortRange(raw_range),
+            .port_range = port_range,
             .auth_token = token,
             .tcp_session_model_enabled = envBool("TCP_SESSION_MODEL_ENABLED"),
-            .tcp_session_model_workers = try envU32("TCP_SESSION_MODEL_WORKERS", 0),
+            .tcp_session_model_workers = tcp_session_model_workers,
             .tcp_session_model_accept_balanced = envBool("TCP_SESSION_MODEL_ACCEPT_BALANCED"),
             .tcp_session_model_sharded_accept = envBool("TCP_SESSION_MODEL_SHARDED_ACCEPT"),
             .tcp_splice_enabled = envBool("TCP_SPLICE_ENABLED"),
             .force_tcp_copy_fallback = envBool("FORCE_TCP_COPY_FALLBACK"),
-            .udp_session_workers = try envU32("UDP_SESSION_WORKERS", 0),
+            .udp_session_workers = udp_session_workers,
             .udp_io_uring_enabled = envBool("UDP_IO_URING_ENABLED"),
             .udp_gro_enabled = envBool("UDP_GRO_ENABLED"),
             .udp_dataplane_redesign_enabled = envBool("UDP_DATAPLANE_REDESIGN_ENABLED"),
             .udp_fast_path_enabled = envBool("UDP_FAST_PATH_ENABLED"),
-            .udp_fast_path_segment_size = try envU32("UDP_FAST_PATH_SEGMENT_SIZE", 1472),
-            .udp_fast_path_gso_burst = try envU32("UDP_FAST_PATH_GSO_BURST", 16),
-            .udp_socket_recv_buffer_bytes = try envU32("UDP_SOCKET_RCVBUF_BYTES", 8 * 1024 * 1024),
-            .udp_socket_send_buffer_bytes = try envU32("UDP_SOCKET_SNDBUF_BYTES", 8 * 1024 * 1024),
-            .runtime_apply_timeout_ms = try envU32("RUNTIME_APPLY_TIMEOUT_MS", 2000),
-            .restore_sweep_timeout_ms = try envU32("RESTORE_SWEEP_TIMEOUT_MS", 30000),
-            .db_path = try envOwned(allocator, "SQLITE_PATH", "relayd.sqlite3"),
+            .udp_fast_path_segment_size = udp_fast_path_segment_size,
+            .udp_fast_path_gso_burst = udp_fast_path_gso_burst,
+            .udp_socket_recv_buffer_bytes = udp_socket_recv_buffer_bytes,
+            .udp_socket_send_buffer_bytes = udp_socket_send_buffer_bytes,
+            .runtime_apply_timeout_ms = runtime_apply_timeout_ms,
+            .restore_sweep_timeout_ms = restore_sweep_timeout_ms,
+            .db_path = db_path,
         };
     }
 
@@ -86,6 +107,16 @@ fn getEnvVarOwned(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     defer allocator.free(name_z);
     const raw = std.c.getenv(name_z.ptr) orelse return error.EnvironmentVariableNotFound;
     return try allocator.dupe(u8, std.mem.span(raw));
+}
+
+fn getRequiredEnvVarOwned(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    return getEnvVarOwned(allocator, name) catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => {
+            std.log.err("missing required environment variable: {s}", .{name});
+            return err;
+        },
+        else => err,
+    };
 }
 
 fn envOwned(allocator: std.mem.Allocator, name: []const u8, default_value: []const u8) ![]u8 {
