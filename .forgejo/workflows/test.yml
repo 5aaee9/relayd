@@ -1,5 +1,8 @@
 name: test
 
+env:
+  ZIG_VERSION: 0.15.2
+
 on:
   push:
     branches:
@@ -8,6 +11,31 @@ on:
   pull_request:
 
 jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: https://data.forgejo.org/actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl xz-utils libsqlite3-dev
+
+      - name: Setup Zig
+        uses: https://codeberg.org/mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Verify Zig version
+        run: test "$(zig version)" = "$ZIG_VERSION"
+
+      - name: Compile debug binary
+        run: zig build
+
+      - name: Compile release-safe binary
+        run: zig build -Doptimize=ReleaseSafe
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -22,19 +50,22 @@ jobs:
       - name: Setup Zig
         uses: https://codeberg.org/mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Verify Zig version
+        run: test "$(zig version)" = "$ZIG_VERSION"
 
       - name: Format check
         run: |
           zig fmt --check $(find src tests -type f -name '*.zig' -print) test_root.zig build.zig
 
-      - name: Build and test
-        run: |
-          zig build test
-          zig build
+      - name: Run tests
+        run: zig build test
 
   e2e-bandwidth:
-    needs: test
+    needs:
+      - compile
+      - test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -48,7 +79,10 @@ jobs:
       - name: Setup Zig
         uses: https://codeberg.org/mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Verify Zig version
+        run: test "$(zig version)" = "$ZIG_VERSION"
 
       - name: Build relayd
         run: zig build
