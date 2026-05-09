@@ -3,6 +3,8 @@ const compat = @import("compat.zig");
 const App = @import("app.zig").App;
 
 pub fn main() !void {
+    compat.ignoreSigpipe();
+
     var gpa = std.heap.DebugAllocator(.{}){};
     defer {
         const status = gpa.deinit();

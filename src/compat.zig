@@ -4,6 +4,15 @@ pub fn io() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 
+pub fn ignoreSigpipe() void {
+    const sigact: std.posix.Sigaction = .{
+        .handler = .{ .handler = std.posix.SIG.IGN },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(.PIPE, &sigact, null);
+}
+
 pub const Mutex = struct {
     inner: std.atomic.Mutex = .unlocked,
 
