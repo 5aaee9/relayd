@@ -4,6 +4,7 @@ ARG ZIG_VERSION=0.16.0
 ARG SQLITE_AMALGAMATION_YEAR=2026
 ARG SQLITE_AMALGAMATION_VERSION=3530100
 ARG SQLITE_AMALGAMATION_SHA3=3c07136e4f6b5dd0c395be86455014039597bc65b6851f7111e88f71b6e06114
+ARG ZIG_BUILD_JOBS=1
 ARG TARGETARCH
 
 RUN apk add --no-cache \
@@ -31,7 +32,7 @@ RUN arch="${TARGETARCH}" \
 WORKDIR /src
 COPY . .
 RUN python3 .forgejo/scripts/fetch-sqlite3.py
-RUN zig build -Doptimize=ReleaseSafe -Dtarget="$(cat /tmp/zig-target)"
+RUN zig build -j${ZIG_BUILD_JOBS} -Doptimize=ReleaseSafe -Dtarget="$(cat /tmp/zig-target)"
 
 FROM alpine:3.20 AS runtime
 
