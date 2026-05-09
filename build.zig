@@ -29,6 +29,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .link_libc = true,
+        .strip = optimize != .Debug,
     });
     linkSqlite(b, exe_module, has_bundled_sqlite, sqlite_flags);
 
