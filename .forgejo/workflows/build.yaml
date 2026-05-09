@@ -23,26 +23,10 @@ jobs:
       - name: Install dependencies
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl xz-utils unzip python3
+          apt-get install -y --no-install-recommends ca-certificates python3
 
       - name: Download SQLite amalgamation
-        run: |
-          curl -fsSLo /tmp/sqlite-amalgamation.zip \
-            "https://sqlite.org/${SQLITE_AMALGAMATION_YEAR}/sqlite-amalgamation-${SQLITE_AMALGAMATION_VERSION}.zip"
-          python3 - <<'PY'
-          import hashlib
-          import os
-          from pathlib import Path
-          actual = hashlib.sha3_256(Path('/tmp/sqlite-amalgamation.zip').read_bytes()).hexdigest()
-          expected = os.environ['SQLITE_AMALGAMATION_SHA3']
-          if actual != expected:
-              raise SystemExit(f'SQLite amalgamation checksum mismatch: {actual} != {expected}')
-          PY
-          rm -rf lib
-          mkdir -p lib
-          unzip -q /tmp/sqlite-amalgamation.zip -d /tmp/sqlite-amalgamation
-          cp /tmp/sqlite-amalgamation/sqlite-amalgamation-${SQLITE_AMALGAMATION_VERSION}/sqlite3.c lib/sqlite3.c
-          cp /tmp/sqlite-amalgamation/sqlite-amalgamation-${SQLITE_AMALGAMATION_VERSION}/sqlite3.h lib/sqlite3.h
+        run: python3 .forgejo/scripts/fetch-sqlite3.py
 
       - name: Setup Zig
         uses: https://codeberg.org/mlugg/setup-zig@v2
@@ -70,26 +54,10 @@ jobs:
       - name: Install dependencies
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl xz-utils unzip python3
+          apt-get install -y --no-install-recommends ca-certificates python3
 
       - name: Download SQLite amalgamation
-        run: |
-          curl -fsSLo /tmp/sqlite-amalgamation.zip \
-            "https://sqlite.org/${SQLITE_AMALGAMATION_YEAR}/sqlite-amalgamation-${SQLITE_AMALGAMATION_VERSION}.zip"
-          python3 - <<'PY'
-          import hashlib
-          import os
-          from pathlib import Path
-          actual = hashlib.sha3_256(Path('/tmp/sqlite-amalgamation.zip').read_bytes()).hexdigest()
-          expected = os.environ['SQLITE_AMALGAMATION_SHA3']
-          if actual != expected:
-              raise SystemExit(f'SQLite amalgamation checksum mismatch: {actual} != {expected}')
-          PY
-          rm -rf lib
-          mkdir -p lib
-          unzip -q /tmp/sqlite-amalgamation.zip -d /tmp/sqlite-amalgamation
-          cp /tmp/sqlite-amalgamation/sqlite-amalgamation-${SQLITE_AMALGAMATION_VERSION}/sqlite3.c lib/sqlite3.c
-          cp /tmp/sqlite-amalgamation/sqlite-amalgamation-${SQLITE_AMALGAMATION_VERSION}/sqlite3.h lib/sqlite3.h
+        run: python3 .forgejo/scripts/fetch-sqlite3.py
 
       - name: Setup Zig
         uses: https://codeberg.org/mlugg/setup-zig@v2

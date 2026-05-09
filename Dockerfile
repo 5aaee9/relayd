@@ -10,7 +10,6 @@ RUN apk add --no-cache \
     ca-certificates \
     curl \
     python3 \
-    unzip \
     xz \
     libc6-compat \
     libstdc++ \
@@ -30,14 +29,7 @@ RUN arch="${TARGETARCH}" \
 
 WORKDIR /src
 COPY . .
-RUN curl -fsSLo /tmp/sqlite-amalgamation.zip \
-      "https://sqlite.org/${SQLITE_AMALGAMATION_YEAR}/sqlite-amalgamation-${SQLITE_AMALGAMATION_VERSION}.zip" \
-    && python3 -c 'import hashlib, pathlib, sys; actual = hashlib.sha3_256(pathlib.Path("/tmp/sqlite-amalgamation.zip").read_bytes()).hexdigest(); expected = sys.argv[1]; assert actual == expected, f"SQLite amalgamation checksum mismatch: {actual} != {expected}"' "$SQLITE_AMALGAMATION_SHA3" \
-    && rm -rf lib \
-    && mkdir -p lib \
-    && unzip -q /tmp/sqlite-amalgamation.zip -d /tmp/sqlite-amalgamation \
-    && cp "/tmp/sqlite-amalgamation/sqlite-amalgamation-${SQLITE_AMALGAMATION_VERSION}/sqlite3.c" lib/sqlite3.c \
-    && cp "/tmp/sqlite-amalgamation/sqlite-amalgamation-${SQLITE_AMALGAMATION_VERSION}/sqlite3.h" lib/sqlite3.h
+RUN python3 .forgejo/scripts/fetch-sqlite3.py
 RUN zig build -Doptimize=ReleaseSafe
 
 FROM alpine:3.20 AS runtime
