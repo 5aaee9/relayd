@@ -52,8 +52,8 @@ jobs:
       - name: Verify Zig version
         run: test "$(zig version)" = "$ZIG_VERSION"
 
-      - name: Compile release-safe binary
-        run: zig build -Doptimize=ReleaseSafe
+      - name: Compile amd64 binary
+        run: zig build -Doptimize=ReleaseFast
 
       - name: Upload binary
         uses: https://data.forgejo.org/forgejo/upload-artifact@v4
@@ -99,8 +99,8 @@ jobs:
       - name: Verify Zig version
         run: test "$(zig version)" = "$ZIG_VERSION"
 
-      - name: Compile release-safe aarch64 binary
-        run: zig build -Doptimize=ReleaseSafe -Dtarget=aarch64-linux-gnu
+      - name: Compile aarch64 binary
+        run: zig build -Doptimize=ReleaseFast -Dtarget=aarch64-linux-gnu
 
       - name: Upload binary
         uses: https://data.forgejo.org/forgejo/upload-artifact@v4
