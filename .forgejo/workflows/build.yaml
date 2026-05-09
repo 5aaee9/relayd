@@ -14,8 +14,19 @@ on:
   pull_request:
 
 jobs:
-  compile-amd64:
+  compile:
+    name: compile-${{ matrix.arch }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            artifact: relayd-amd64-linux
+            target_args: ""
+          - arch: aarch64
+            artifact: relayd-aarch64-linux
+            target_args: -Dtarget=aarch64-linux-gnu
     steps:
       - name: Checkout
         uses: https://data.forgejo.org/actions/checkout@v4
@@ -36,42 +47,11 @@ jobs:
       - name: Verify Zig version
         run: test "$(zig version)" = "$ZIG_VERSION"
 
-      - name: Compile amd64 binary
-        run: zig build -Doptimize=ReleaseFast
+      - name: Compile ${{ matrix.arch }} binary
+        run: zig build -Doptimize=ReleaseFast ${{ matrix.target_args }}
 
       - name: Upload binary
         uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
-          name: relayd-amd64-linux
-          path: zig-out/bin/relayd
-
-  compile-aarch64:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: https://data.forgejo.org/actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends ca-certificates python3
-
-      - name: Download SQLite amalgamation
-        run: python3 .forgejo/scripts/fetch-sqlite3.py
-
-      - name: Setup Zig
-        uses: https://codeberg.org/mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-
-      - name: Verify Zig version
-        run: test "$(zig version)" = "$ZIG_VERSION"
-
-      - name: Compile aarch64 binary
-        run: zig build -Doptimize=ReleaseFast -Dtarget=aarch64-linux-gnu
-
-      - name: Upload binary
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
-        with:
-          name: relayd-aarch64-linux
+          name: ${{ matrix.artifact }}
           path: zig-out/bin/relayd
