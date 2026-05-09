@@ -25,12 +25,13 @@ RUN arch="${TARGETARCH}" \
     && curl -L "https://ziglang.org/download/${ZIG_VERSION}/zig-${zig_arch}-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz \
     && tar -C /opt -xf /tmp/zig.tar.xz \
     && mv "/opt/zig-${zig_arch}-linux-${ZIG_VERSION}" /opt/zig \
-    && ln -s /opt/zig/zig /usr/local/bin/zig
+    && ln -s /opt/zig/zig /usr/local/bin/zig \
+    && echo "${zig_arch}-linux-musl" > /tmp/zig-target
 
 WORKDIR /src
 COPY . .
 RUN python3 .forgejo/scripts/fetch-sqlite3.py
-RUN zig build -Doptimize=ReleaseSafe
+RUN zig build -Doptimize=ReleaseSafe -Dtarget="$(cat /tmp/zig-target)"
 
 FROM alpine:3.20 AS runtime
 

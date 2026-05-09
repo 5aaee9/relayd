@@ -22,11 +22,11 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            artifact: relayd-amd64-linux
-            target_args: ""
+            artifact: relayd-amd64-linux-musl
+            target_args: -Dtarget=x86_64-linux-musl
           - arch: aarch64
-            artifact: relayd-aarch64-linux
-            target_args: -Dtarget=aarch64-linux-gnu
+            artifact: relayd-aarch64-linux-musl
+            target_args: -Dtarget=aarch64-linux-musl
     steps:
       - name: Checkout
         uses: https://data.forgejo.org/actions/checkout@v4
