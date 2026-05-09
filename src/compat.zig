@@ -307,7 +307,7 @@ pub fn getsockname(fd: std.posix.fd_t, addr: *std.posix.sockaddr, len: *std.posi
     }
 }
 
-pub fn sendmsg(fd: std.posix.fd_t, msg: *const std.posix.msghdr_const, flags: u32) PosixIoError!usize {
+pub fn sendmsg(fd: std.posix.fd_t, msg: *const std.os.linux.msghdr_const, flags: u32) PosixIoError!usize {
     const rc = std.os.linux.sendmsg(fd, msg, flags);
     return switch (std.os.linux.errno(rc)) {
         .SUCCESS => @intCast(rc),

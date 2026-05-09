@@ -1,13 +1,17 @@
 FROM alpine:3.20 AS builder
 
 ARG ZIG_VERSION=0.16.0
+ARG SQLITE_AMALGAMATION_YEAR=2026
+ARG SQLITE_AMALGAMATION_VERSION=3530100
+ARG SQLITE_AMALGAMATION_SHA3=3c07136e4f6b5dd0c395be86455014039597bc65b6851f7111e88f71b6e06114
 ARG TARGETARCH
 
 RUN apk add --no-cache \
     ca-certificates \
     curl \
+    python3 \
+    unzip \
     xz \
-    sqlite-dev \
     libc6-compat \
     libstdc++ \
     build-base
@@ -26,13 +30,20 @@ RUN arch="${TARGETARCH}" \
 
 WORKDIR /src
 COPY . .
+RUN curl -fsSLo /tmp/sqlite-amalgamation.zip \
+      "https://sqlite.org/${SQLITE_AMALGAMATION_YEAR}/sqlite-amalgamation-${SQLITE_AMALGAMATION_VERSION}.zip" \
+    && python3 -c 'import hashlib, pathlib, sys; actual = hashlib.sha3_256(pathlib.Path("/tmp/sqlite-amalgamation.zip").read_bytes()).hexdigest(); expected = sys.argv[1]; assert actual == expected, f"SQLite amalgamation checksum mismatch: {actual} != {expected}"' "$SQLITE_AMALGAMATION_SHA3" \
+    && rm -rf lib \
+    && mkdir -p lib \
+    && unzip -q /tmp/sqlite-amalgamation.zip -d /tmp/sqlite-amalgamation \
+    && cp "/tmp/sqlite-amalgamation/sqlite-amalgamation-${SQLITE_AMALGAMATION_VERSION}/sqlite3.c" lib/sqlite3.c \
+    && cp "/tmp/sqlite-amalgamation/sqlite-amalgamation-${SQLITE_AMALGAMATION_VERSION}/sqlite3.h" lib/sqlite3.h
 RUN zig build -Doptimize=ReleaseSafe
 
 FROM alpine:3.20 AS runtime
 
 RUN apk add --no-cache \
-    ca-certificates \
-    sqlite-libs
+    ca-certificates
 
 WORKDIR /app
 COPY --from=builder /src/zig-out/bin/relayd /usr/local/bin/relayd

@@ -1557,7 +1557,7 @@ const ListenerEntry = struct {
     udp_io_uring_active: bool,
     udp_io_uring_payload_buffer: [64 * 1024]u8,
     udp_io_uring_iov: posix.iovec,
-    udp_io_uring_msg: posix.msghdr,
+    udp_io_uring_msg: std.os.linux.msghdr,
     mutex: compat.Mutex,
     udp_sessions: std.AutoHashMap(ClientKey, *UdpSession),
     udp_cached_key: ?ClientKey,
@@ -2398,7 +2398,7 @@ fn handleUdpReadableGro(allocator: std.mem.Allocator, metrics: *Metrics, entry: 
         var control: [128]u8 = undefined;
         var addr: net.Address = undefined;
         var iov = posix.iovec{ .base = &buffer, .len = buffer.len };
-        var msg = posix.msghdr{
+        var msg = std.os.linux.msghdr{
             .name = &addr.any,
             .namelen = @sizeOf(net.Address),
             .iov = @ptrCast(&iov),
@@ -2698,7 +2698,7 @@ fn trySendConnectedUdpGso(session: *const UdpSession, buffers: *const [16][64 * 
     var control: [32]u8 align(@alignOf(usize)) = undefined;
     const control_len = encodeUdpSegmentControlMessage(&control, segment_size) orelse return false;
     const iov = [1]posix.iovec_const{.{ .base = payload[0..total_len].ptr, .len = total_len }};
-    const msg: posix.msghdr_const = .{
+    const msg: std.os.linux.msghdr_const = .{
         .name = null,
         .namelen = 0,
         .iov = @ptrCast(&iov[0]),

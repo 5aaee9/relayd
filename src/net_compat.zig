@@ -2243,7 +2243,7 @@ pub const Stream = struct {
                 return .{ .handle = w.file_writer.file.handle };
             }
 
-            fn addBuf(v: []posix.iovec_const, i: *@FieldType(posix.msghdr_const, "iovlen"), bytes: []const u8) void {
+            fn addBuf(v: []posix.iovec_const, i: *@FieldType(std.os.linux.msghdr_const, "iovlen"), bytes: []const u8) void {
                 // OS checks ptr addr before length so zero length vectors must be omitted.
                 if (bytes.len == 0) return;
                 if (v.len - i.* == 0) return;
@@ -2255,7 +2255,7 @@ pub const Stream = struct {
                 const w: *Writer = @alignCast(@fieldParentPtr("interface", io_w));
                 const buffered = io_w.buffered();
                 var iovecs: [max_buffers_len]posix.iovec_const = undefined;
-                var msg: posix.msghdr_const = .{
+                var msg: std.os.linux.msghdr_const = .{
                     .name = null,
                     .namelen = 0,
                     .iov = &iovecs,
