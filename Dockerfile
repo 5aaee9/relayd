@@ -32,7 +32,10 @@ RUN arch="${TARGETARCH}" \
 WORKDIR /src
 COPY . .
 RUN python3 .forgejo/scripts/fetch-sqlite3.py
-RUN zig build -j${ZIG_BUILD_JOBS} -Doptimize=ReleaseSafe -Dtarget="$(cat /tmp/zig-target)"
+RUN nofile_limit="$(ulimit -Hn)" \
+    && if [ "$nofile_limit" = "unlimited" ] || [ "$nofile_limit" -gt 8192 ]; then nofile_limit=8192; fi \
+    && ulimit -n "$nofile_limit" \
+    && zig build -j${ZIG_BUILD_JOBS} -Doptimize=ReleaseSafe -Dtarget="$(cat /tmp/zig-target)"
 
 FROM alpine:3.20 AS runtime
 
