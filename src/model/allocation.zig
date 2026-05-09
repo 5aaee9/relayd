@@ -3,10 +3,12 @@ const std = @import("std");
 pub const Protocol = enum {
     tcp,
     udp,
+    both,
 
     pub fn fromString(text: []const u8) ?Protocol {
         if (std.ascii.eqlIgnoreCase(text, "tcp")) return .tcp;
         if (std.ascii.eqlIgnoreCase(text, "udp")) return .udp;
+        if (std.ascii.eqlIgnoreCase(text, "both")) return .both;
         return null;
     }
 

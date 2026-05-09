@@ -116,7 +116,7 @@ pub const Repository = struct {
     pub fn getAllocation(self: *Repository, allocator: std.mem.Allocator, id: []const u8) !?model.Allocation {
         var stmt = try prepare(
             self.db,
-            "SELECT a.id, a.protocol, a.port, b.target_port, b.host, a.created_at_ms, a.updated_at_ms " ++
+            "SELECT a.id, a.protocol, a.port, COALESCE(b.target_port, NULLIF(a.target_port, 0)), COALESCE(b.host, a.host), a.created_at_ms, a.updated_at_ms " ++
                 "FROM allocations a LEFT JOIN bindings b ON b.allocation_id = a.id WHERE a.id = ?;",
         );
         defer stmt.deinit();
@@ -135,7 +135,7 @@ pub const Repository = struct {
         }
         var stmt = try prepare(
             self.db,
-            "SELECT a.id, a.protocol, a.port, b.target_port, b.host, a.created_at_ms, a.updated_at_ms " ++
+            "SELECT a.id, a.protocol, a.port, COALESCE(b.target_port, NULLIF(a.target_port, 0)), COALESCE(b.host, a.host), a.created_at_ms, a.updated_at_ms " ++
                 "FROM allocations a LEFT JOIN bindings b ON b.allocation_id = a.id ORDER BY a.protocol, a.port;",
         );
         defer stmt.deinit();

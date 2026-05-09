@@ -368,6 +368,72 @@ test "http allocation and binding lifecycle endpoints" {
     try std.testing.expectEqual(@as(u16, 404), get_binding_after_allocation_delete.status);
 }
 
+test "http dual protocol allocation endpoints return one aggregate row" {
+    const harness = try Harness.init(std.testing.allocator);
+    defer harness.deinit();
+
+    const http_port = try harness.http.assignedPort();
+
+    const create_resp = try doHttp(std.testing.allocator, http_port, "POST", "/v1/allocations", "{\"protocol\":\"both\"}");
+    defer std.testing.allocator.free(create_resp.body);
+    try std.testing.expectEqual(@as(u16, 201), create_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, create_resp.body, "\"protocol\":\"both\"") != null);
+    const allocation_id = try extractJsonString(std.testing.allocator, create_resp.body, "id");
+    defer std.testing.allocator.free(allocation_id);
+    const allocation_port = try extractJsonU16(create_resp.body, "port");
+
+    const get_alloc_path = try std.fmt.allocPrint(std.testing.allocator, "/v1/allocations/{s}", .{allocation_id});
+    defer std.testing.allocator.free(get_alloc_path);
+    const get_alloc_resp = try doHttp(std.testing.allocator, http_port, "GET", get_alloc_path, "");
+    defer std.testing.allocator.free(get_alloc_resp.body);
+    try std.testing.expectEqual(@as(u16, 200), get_alloc_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, get_alloc_resp.body, "\"protocol\":\"both\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, get_alloc_resp.body, allocation_id) != null);
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(get_alloc_resp.body, allocation_id));
+
+    const list_alloc_resp = try doHttp(std.testing.allocator, http_port, "GET", "/v1/allocations", "");
+    defer std.testing.allocator.free(list_alloc_resp.body);
+    try std.testing.expectEqual(@as(u16, 200), list_alloc_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, list_alloc_resp.body, "\"protocol\":\"both\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, list_alloc_resp.body, allocation_id) != null);
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(list_alloc_resp.body, allocation_id));
+
+    const list_ports_resp = try doHttp(std.testing.allocator, http_port, "GET", "/v1/ports", "");
+    defer std.testing.allocator.free(list_ports_resp.body);
+    try std.testing.expectEqual(@as(u16, 200), list_ports_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, list_ports_resp.body, "\"protocol\":\"both\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, list_ports_resp.body, allocation_id) != null);
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(list_ports_resp.body, allocation_id));
+
+    const compat_body = try std.fmt.allocPrint(std.testing.allocator, "{{\"protocol\":\"both\",\"target_port\":{d}}}", .{allocation_port});
+    defer std.testing.allocator.free(compat_body);
+    const compat_create_resp = try doHttp(std.testing.allocator, http_port, "POST", "/v1/ports", compat_body);
+    defer std.testing.allocator.free(compat_create_resp.body);
+    try std.testing.expectEqual(@as(u16, 201), compat_create_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, compat_create_resp.body, "\"protocol\":\"both\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, compat_create_resp.body, "\"target_port\":") != null);
+    try std.testing.expectEqual(allocation_port, try extractJsonU16(compat_create_resp.body, "target_port"));
+    const compat_id = try extractJsonString(std.testing.allocator, compat_create_resp.body, "id");
+    defer std.testing.allocator.free(compat_id);
+
+    const compat_list_resp = try doHttp(std.testing.allocator, http_port, "GET", "/v1/ports", "");
+    defer std.testing.allocator.free(compat_list_resp.body);
+    try std.testing.expectEqual(@as(u16, 200), compat_list_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, compat_list_resp.body, compat_id) != null);
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(compat_list_resp.body, compat_id));
+    try std.testing.expect(countOccurrences(compat_list_resp.body, "\"protocol\":\"both\"") >= 2);
+}
+
+fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
+    var count: usize = 0;
+    var rest = haystack;
+    while (std.mem.indexOf(u8, rest, needle)) |idx| {
+        count += 1;
+        rest = rest[idx + needle.len ..];
+    }
+    return count;
+}
+
 fn extractJsonString(allocator: std.mem.Allocator, body: []const u8, key: []const u8) ![]u8 {
     const needle = try std.fmt.allocPrint(allocator, "\"{s}\":\"", .{key});
     defer allocator.free(needle);

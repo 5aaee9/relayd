@@ -272,12 +272,107 @@ fn startUdpEchoServer() !struct { fd: std.posix.fd_t, port: u16, thread: std.Thr
 }
 
 fn udpEchoThread(fd: std.posix.fd_t) void {
-    defer closeIgnore(fd);
     var buf: [1024]u8 = undefined;
     var addr: net.Address = undefined;
     var len: std.posix.socklen_t = @sizeOf(net.Address);
     const amt = compat.recvfrom(fd, &buf, 0, &addr.any, &len) catch return;
     _ = compat.sendto(fd, buf[0..amt], 0, &addr.any, addr.getOsSockLen()) catch {};
+}
+
+const DualProtocolEchoServer = struct {
+    server: net.Server,
+    udp_fd: std.posix.fd_t,
+    port: u16,
+    tcp_thread: std.Thread,
+    udp_thread: std.Thread,
+
+    fn deinit(self: *DualProtocolEchoServer) void {
+        wakeTcpEchoPort(self.port);
+        wakeUdpEchoPort(self.port);
+        self.tcp_thread.join();
+        self.udp_thread.join();
+        self.server.deinit();
+        closeIgnore(self.udp_fd);
+    }
+};
+
+fn wakeTcpEchoPort(port: u16) void {
+    const addr = config.parseIpLiteral("127.0.0.1", port) catch return;
+    const stream = net.tcpConnectToAddress(addr) catch return;
+    defer stream.close();
+    _ = compat.write(stream.handle, "x") catch {};
+}
+
+fn wakeUdpEchoPort(port: u16) void {
+    const client = createUdpClient() catch return;
+    defer closeIgnore(client);
+    const addr = config.parseIpLiteral("127.0.0.1", port) catch return;
+    _ = compat.sendto(client, "x", 0, &addr.any, addr.getOsSockLen()) catch {};
+}
+
+fn findUnusedDualProtocolPort() !u16 {
+    var attempts: usize = 0;
+    while (attempts < 32) : (attempts += 1) {
+        const tcp_addr = try config.parseIpLiteral("127.0.0.1", 0);
+        var server = try tcp_addr.listen(.{ .reuse_address = true });
+        errdefer server.deinit();
+
+        var bound: net.Address = undefined;
+        var len: std.posix.socklen_t = @sizeOf(net.Address);
+        try compat.getsockname(server.stream.handle, &bound.any, &len);
+        const port = bound.getPort();
+
+        const udp_fd = try compat.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC, std.posix.IPPROTO.UDP);
+        errdefer closeIgnore(udp_fd);
+        const udp_addr = try config.parseIpLiteral("127.0.0.1", port);
+        compat.bind(udp_fd, &udp_addr.any, udp_addr.getOsSockLen()) catch {
+            closeIgnore(udp_fd);
+            server.deinit();
+            continue;
+        };
+
+        closeIgnore(udp_fd);
+        server.deinit();
+        return port;
+    }
+    return error.AddressInUse;
+}
+
+fn startDualProtocolEchoServer() !DualProtocolEchoServer {
+    var attempts: usize = 0;
+    while (attempts < 32) : (attempts += 1) {
+        const tcp_addr = try config.parseIpLiteral("127.0.0.1", 0);
+        var server = try tcp_addr.listen(.{ .reuse_address = true });
+        errdefer server.deinit();
+
+        var bound: net.Address = undefined;
+        var len: std.posix.socklen_t = @sizeOf(net.Address);
+        try compat.getsockname(server.stream.handle, &bound.any, &len);
+        const port = bound.getPort();
+
+        const udp_fd = try compat.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC, std.posix.IPPROTO.UDP);
+        var close_udp_on_error = true;
+        errdefer if (close_udp_on_error) closeIgnore(udp_fd);
+        const udp_addr = try config.parseIpLiteral("127.0.0.1", port);
+        compat.bind(udp_fd, &udp_addr.any, udp_addr.getOsSockLen()) catch {
+            close_udp_on_error = false;
+            closeIgnore(udp_fd);
+            server.deinit();
+            continue;
+        };
+
+        const udp_thread = std.Thread.spawn(.{}, udpEchoThread, .{udp_fd}) catch |err| return err;
+        const tcp_thread = std.Thread.spawn(.{}, tcpEchoThread, .{server.stream.handle}) catch |err| {
+            close_udp_on_error = false;
+            wakeUdpEchoPort(port);
+            udp_thread.join();
+            closeIgnore(udp_fd);
+            return err;
+        };
+        close_udp_on_error = false;
+        return .{ .server = server, .udp_fd = udp_fd, .port = port, .tcp_thread = tcp_thread, .udp_thread = udp_thread };
+    }
+    return error.AddressInUse;
 }
 
 fn startUdpCaptureServer(allocator: std.mem.Allocator, expected_packets: usize, response_mode: UdpResponseMode, fixed_response: []const u8) !UdpCaptureServer {
@@ -561,6 +656,199 @@ fn closeIgnore(fd: std.posix.fd_t) void {
         .SUCCESS, .BADF => {},
         else => {},
     }
+}
+
+test "service dual protocol allocation conflicts with single protocol allocations" {
+    {
+        const path = try tempDbPath(std.testing.allocator);
+        defer {
+            compat.deleteFile(path);
+            std.testing.allocator.free(path);
+        }
+        var repo = try sqlite.Repository.open(std.testing.allocator, path);
+        defer repo.close();
+        var metrics = metrics_mod.Metrics{};
+        var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{});
+        defer rt.deinit();
+        try rt.start();
+        const relay_port = try findUnusedDualProtocolPort();
+        var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = relay_port, .end = relay_port }, 2000);
+
+        var both_alloc = try svc.createAllocation(.both, null);
+        defer both_alloc.deinit(std.testing.allocator);
+        try std.testing.expectError(error.NoAvailablePort, svc.createAllocation(.tcp, null));
+        try std.testing.expectError(error.NoAvailablePort, svc.createAllocation(.udp, null));
+        try std.testing.expectError(error.NoAvailablePort, svc.createAllocation(.both, null));
+    }
+
+    {
+        const path = try tempDbPath(std.testing.allocator);
+        defer {
+            compat.deleteFile(path);
+            std.testing.allocator.free(path);
+        }
+        var repo = try sqlite.Repository.open(std.testing.allocator, path);
+        defer repo.close();
+        var metrics = metrics_mod.Metrics{};
+        var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{});
+        defer rt.deinit();
+        try rt.start();
+        const relay_port = try findUnusedDualProtocolPort();
+        var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = relay_port, .end = relay_port }, 2000);
+
+        var tcp_alloc = try svc.createAllocation(.tcp, null);
+        defer tcp_alloc.deinit(std.testing.allocator);
+        try std.testing.expectError(error.NoAvailablePort, svc.createAllocation(.both, null));
+    }
+
+    {
+        const path = try tempDbPath(std.testing.allocator);
+        defer {
+            compat.deleteFile(path);
+            std.testing.allocator.free(path);
+        }
+        var repo = try sqlite.Repository.open(std.testing.allocator, path);
+        defer repo.close();
+        var metrics = metrics_mod.Metrics{};
+        var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{});
+        defer rt.deinit();
+        try rt.start();
+        const relay_port = try findUnusedDualProtocolPort();
+        var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = relay_port, .end = relay_port }, 2000);
+
+        var udp_alloc = try svc.createAllocation(.udp, null);
+        defer udp_alloc.deinit(std.testing.allocator);
+        try std.testing.expectError(error.NoAvailablePort, svc.createAllocation(.both, null));
+    }
+}
+
+test "service forwards tcp and udp for dual protocol allocation on same port" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        compat.deleteFile(path);
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{});
+    defer rt.deinit();
+    try rt.start();
+    const relay_port = try findUnusedDualProtocolPort();
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = relay_port, .end = relay_port }, 2000);
+
+    var dual_echo = try startDualProtocolEchoServer();
+    defer dual_echo.deinit();
+
+    var alloc = try svc.createAllocation(.both, null);
+    defer alloc.deinit(std.testing.allocator);
+    var binding = try svc.putBinding(alloc.id, "127.0.0.1", dual_echo.port);
+    defer binding.deinit(std.testing.allocator);
+
+    const stream = try connectRelayStream(alloc.port);
+    defer stream.close();
+    _ = try compat.write(stream.handle, "ping");
+    var tcp_buf: [4]u8 = undefined;
+    const tcp_amt = try std.posix.read(stream.handle, &tcp_buf);
+    try std.testing.expectEqual(@as(usize, 4), tcp_amt);
+    try std.testing.expectEqualStrings("ping", &tcp_buf);
+
+    const client = try createUdpClient();
+    defer closeIgnore(client);
+    const target = try config.parseIpLiteral("127.0.0.1", alloc.port);
+    try sendUdpAndExpect(client, target, "pong", "pong", 250);
+}
+
+test "service dual protocol delete releases both protocol listeners" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        compat.deleteFile(path);
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{});
+    defer rt.deinit();
+    try rt.start();
+    const relay_port = try findUnusedDualProtocolPort();
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = relay_port, .end = relay_port }, 2000);
+
+    var both_alloc = try svc.createAllocation(.both, null);
+    const both_id = try std.testing.allocator.dupe(u8, both_alloc.id);
+    defer std.testing.allocator.free(both_id);
+    both_alloc.deinit(std.testing.allocator);
+    try svc.deleteAllocation(both_id);
+
+    var tcp_alloc = try svc.createAllocation(.tcp, null);
+    const tcp_id = try std.testing.allocator.dupe(u8, tcp_alloc.id);
+    defer std.testing.allocator.free(tcp_id);
+    tcp_alloc.deinit(std.testing.allocator);
+    try svc.deleteAllocation(tcp_id);
+
+    var udp_alloc = try svc.createAllocation(.udp, null);
+    defer udp_alloc.deinit(std.testing.allocator);
+    try std.testing.expectEqual(relay_port, udp_alloc.port);
+}
+
+test "service restore recreates tcp and udp listeners for dual protocol allocation" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        compat.deleteFile(path);
+        std.testing.allocator.free(path);
+    }
+
+    var dual_echo = try startDualProtocolEchoServer();
+    defer dual_echo.deinit();
+
+    const relay_port = try findUnusedDualProtocolPort();
+    var allocation_id: ?[]u8 = null;
+    defer if (allocation_id) |id| std.testing.allocator.free(id);
+
+    {
+        var repo = try sqlite.Repository.open(std.testing.allocator, path);
+        defer repo.close();
+        var metrics = metrics_mod.Metrics{};
+        var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{});
+        defer rt.deinit();
+        try rt.start();
+        var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = relay_port, .end = relay_port }, 2000);
+
+        var alloc = try svc.createAllocation(.both, dual_echo.port);
+        defer alloc.deinit(std.testing.allocator);
+        allocation_id = try std.testing.allocator.dupe(u8, alloc.id);
+        var updated = try svc.setTarget(alloc.id, "127.0.0.1");
+        defer updated.deinit(std.testing.allocator);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{});
+    defer rt.deinit();
+    try rt.start();
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = relay_port, .end = relay_port }, 2000);
+    try svc.restoreAll(2000);
+
+    var restored = (try svc.getAllocation(std.testing.allocator, allocation_id.?)).?;
+    defer restored.deinit(std.testing.allocator);
+    try std.testing.expectEqual(.both, restored.protocol);
+    try std.testing.expectEqual(relay_port, restored.port);
+
+    const stream = try connectRelayStream(restored.port);
+    defer stream.close();
+    _ = try compat.write(stream.handle, "ping");
+    var tcp_buf: [4]u8 = undefined;
+    const tcp_amt = try std.posix.read(stream.handle, &tcp_buf);
+    try std.testing.expectEqual(@as(usize, 4), tcp_amt);
+    try std.testing.expectEqualStrings("ping", &tcp_buf);
+
+    const client = try createUdpClient();
+    defer closeIgnore(client);
+    const target = try config.parseIpLiteral("127.0.0.1", restored.port);
+    try sendUdpAndExpect(client, target, "pong", "pong", 250);
 }
 
 test "service forwards tcp traffic after target is configured" {
@@ -1673,6 +1961,50 @@ test "udp session cleanup expires idle sessions after ttl" {
     try std.testing.expectEqual(@as(u64, 2), metrics.udp_packets_out_total.load());
     try std.testing.expect(metrics.udp_bytes_in_total.load() >= 10);
     try std.testing.expect(metrics.udp_bytes_out_total.load() >= 10);
+    try std.testing.expectEqual(@as(u64, 2), metrics.udp_session_create_total.load());
+    try std.testing.expect(metrics.udp_session_expire_total.load() >= 1);
+    try std.testing.expectEqual(@as(u64, 1), metrics.udp_active_sessions.load());
+    upstream.joined = true;
+}
+
+test "dual protocol udp session cleanup expires idle sessions after ttl" {
+    const path = try tempDbPath(std.testing.allocator);
+    defer {
+        compat.deleteFile(path);
+        std.testing.allocator.free(path);
+    }
+
+    var repo = try sqlite.Repository.open(std.testing.allocator, path);
+    defer repo.close();
+    var metrics = metrics_mod.Metrics{};
+    var rt = try runtime.RuntimeManager.init(std.testing.allocator, &metrics, .{});
+    defer rt.deinit();
+    try rt.start();
+    const relay_port = try findUnusedDualProtocolPort();
+    var svc = service_mod.Service.init(std.testing.allocator, &repo, &rt, .{ .start = relay_port, .end = relay_port }, 2000);
+
+    var upstream = try startUdpCaptureServer(std.testing.allocator, 2, .echo, "");
+    defer upstream.deinit(std.testing.allocator);
+
+    var alloc = try svc.createAllocation(model.Protocol.both, upstream.port);
+    defer alloc.deinit(std.testing.allocator);
+    var updated = try svc.setTarget(alloc.id, "127.0.0.1");
+    defer updated.deinit(std.testing.allocator);
+    try setUdpSessionTtlMs(&rt, alloc.id, 25);
+
+    const target = try config.parseIpLiteral("127.0.0.1", alloc.port);
+    const client = try createUdpClient();
+    defer closeIgnore(client);
+
+    try sendUdpAndExpect(client, target, "ttl-1", "ttl-1", 250);
+    try waitForUdpSessionCount(&rt, alloc.id, 1, 500);
+    try waitForUdpSessionCount(&rt, alloc.id, 0, 1_000);
+
+    try sendUdpAndExpect(client, target, "ttl-2", "ttl-2", 250);
+    try waitForUdpSessionCount(&rt, alloc.id, 1, 500);
+
+    upstream.thread.join();
+    try std.testing.expectEqual(@as(usize, 2), upstream.state.actual_packets);
     try std.testing.expectEqual(@as(u64, 2), metrics.udp_session_create_total.load());
     try std.testing.expect(metrics.udp_session_expire_total.load() >= 1);
     try std.testing.expectEqual(@as(u64, 1), metrics.udp_active_sessions.load());

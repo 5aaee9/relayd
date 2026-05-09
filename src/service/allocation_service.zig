@@ -41,7 +41,6 @@ pub const Service = struct {
 
         var port: u16 = self.port_range.start;
         while (port <= self.port_range.end) : (port += 1) {
-            if (try self.exists(protocol, port)) continue;
             const now = compat.milliTimestamp();
             const id_arr = uuidv7.generateUuidV7(self.prng.random(), @intCast(now));
             var allocation = model.Allocation{
@@ -55,20 +54,30 @@ pub const Service = struct {
             };
             errdefer allocation.deinit(self.allocator);
 
+            try self.repo.begin();
+            var transaction_open = true;
+            errdefer if (transaction_open) self.repo.rollback();
+
+            if (try self.existsInCurrentTransaction(protocol, port)) {
+                self.repo.rollback();
+                transaction_open = false;
+                allocation.deinit(self.allocator);
+                continue;
+            }
+
             self.runtime_manager.create(allocation, self.apply_timeout_ms) catch |err| switch (err) {
                 error.RuntimeCreateFailed => {
+                    self.repo.rollback();
+                    transaction_open = false;
                     allocation.deinit(self.allocator);
                     continue;
                 },
                 else => return err,
             };
+            var runtime_created = true;
+            errdefer if (runtime_created) self.runtime_manager.delete(allocation.id, self.apply_timeout_ms) catch {};
 
-            self.repo.begin() catch {};
-            errdefer self.repo.rollback();
-            self.repo.insertAllocation(allocation) catch |err| {
-                self.runtime_manager.delete(allocation.id, self.apply_timeout_ms) catch {};
-                return err;
-            };
+            try self.repo.insertAllocation(allocation);
             if (target_port) |bound_port| {
                 try self.repo.putBinding(.{
                     .allocation_id = allocation.id,
@@ -79,6 +88,8 @@ pub const Service = struct {
                 });
             }
             try self.repo.commit();
+            transaction_open = false;
+            runtime_created = false;
             return allocation;
         }
         return error.NoAvailablePort;
@@ -306,31 +317,37 @@ pub const Service = struct {
 
     pub fn getAllocationView(self: *Service, allocator: std.mem.Allocator, id: []const u8) !?model.AllocationView {
         var views = try self.listAllocations(allocator);
-        defer views.deinit(allocator);
-        for (views.items) |*view| {
+        defer {
+            for (views.items) |*view| deinitView(allocator, view);
+            views.deinit(allocator);
+        }
+        for (views.items, 0..) |view, idx| {
             if (!std.mem.eql(u8, view.id, id)) continue;
-            const result = view.*;
-            view.id = &.{};
-            view.host = null;
-            view.effective_host = null;
-            view.last_error = null;
-            return result;
+            return views.orderedRemove(idx);
         }
         return null;
     }
 
-    fn exists(self: *Service, protocol: model.Protocol, port: u16) !bool {
+    fn existsInCurrentTransaction(self: *Service, protocol: model.Protocol, port: u16) !bool {
         var allocations = try self.repo.listAllocations(self.allocator);
         defer {
             for (allocations.items) |*item| item.deinit(self.allocator);
             allocations.deinit(self.allocator);
         }
         for (allocations.items) |allocation| {
-            if (allocation.protocol == protocol and allocation.port == port) return true;
+            if (allocation.port == port and conflicts(protocol, allocation.protocol)) return true;
         }
         return false;
     }
 };
+
+fn conflicts(requested: model.Protocol, existing: model.Protocol) bool {
+    return switch (requested) {
+        .tcp => existing == .tcp or existing == .both,
+        .udp => existing == .udp or existing == .both,
+        .both => true,
+    };
+}
 
 pub fn deinitAllocationResource(allocator: std.mem.Allocator, resource: *model.AllocationResource) void {
     allocator.free(resource.id);

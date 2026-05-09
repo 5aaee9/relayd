@@ -78,6 +78,7 @@ pub const RuntimeManager = struct {
     registry_mutex: compat.Mutex,
     listeners: std.StringHashMap(*ListenerEntry),
     listener_fds: std.AutoHashMap(posix.fd_t, *ListenerEntry),
+    listener_fd_protocols: std.AutoHashMap(posix.fd_t, model.Protocol),
     udp_reply_fds: std.AutoHashMap(posix.fd_t, UdpReplyDispatch),
     tcp_sessions_mutex: compat.Mutex,
     tcp_sessions: std.ArrayList(*TcpSessionCtx),
@@ -146,6 +147,7 @@ pub const RuntimeManager = struct {
             .registry_mutex = .{},
             .listeners = std.StringHashMap(*ListenerEntry).init(allocator),
             .listener_fds = std.AutoHashMap(posix.fd_t, *ListenerEntry).init(allocator),
+            .listener_fd_protocols = std.AutoHashMap(posix.fd_t, model.Protocol).init(allocator),
             .udp_reply_fds = std.AutoHashMap(posix.fd_t, UdpReplyDispatch).init(allocator),
             .tcp_sessions_mutex = .{},
             .tcp_sessions = .empty,
@@ -241,6 +243,7 @@ pub const RuntimeManager = struct {
             destroyEntry(self.allocator, entry.value_ptr.*);
         }
         self.listeners.deinit();
+        self.listener_fd_protocols.deinit();
         self.listener_fds.deinit();
         self.udp_reply_fds.deinit();
         self.registry_mutex.unlock();
@@ -265,7 +268,11 @@ pub const RuntimeManager = struct {
                 self.metrics.bind_fail_total.inc();
                 return error.RuntimeCreateFailed;
             };
-            try self.addToRegistry(entry);
+            self.addToRegistry(entry) catch |err| {
+                self.closeEntryFd(entry);
+                destroyEntry(self.allocator, entry);
+                return err;
+            };
             self.metrics.allocations_total.inc();
             return;
         }
@@ -275,13 +282,20 @@ pub const RuntimeManager = struct {
                 self.metrics.bind_fail_total.inc();
                 return error.RuntimeCreateFailed;
             };
-            try self.addToRegistry(entry);
+            self.addToRegistry(entry) catch |err| {
+                self.closeEntryFd(entry);
+                destroyEntry(self.allocator, entry);
+                return err;
+            };
             self.metrics.allocations_total.inc();
             return;
         }
-        if (self.bindEntry(entry)) |fd| {
-            entry.fd = fd;
-            try self.addToRegistry(entry);
+        if (self.bindEntry(entry)) |_| {
+            self.addToRegistry(entry) catch |err| {
+                self.closeEntryFd(entry);
+                destroyEntry(self.allocator, entry);
+                return err;
+            };
             self.metrics.allocations_total.inc();
             return;
         } else |_| {
@@ -324,8 +338,7 @@ pub const RuntimeManager = struct {
                 return;
             }
         }
-        if (self.bindEntry(entry)) |fd| {
-            entry.fd = fd;
+        if (self.bindEntry(entry)) |_| {
             try self.addToRegistry(entry);
             self.metrics.allocations_total.inc();
             return;
@@ -363,7 +376,7 @@ pub const RuntimeManager = struct {
             return;
         }
 
-        if (entry.fd == null and entry.tcp_worker_listener_fds == null and entry.udp_worker_listener_fds == null) {
+        if (!entry.hasRequiredListenerState()) {
             entry.status = .degraded_apply_failed;
             entry.error_kind = .apply_failed;
             setLastError(self.allocator, entry, "listener unavailable") catch {};
@@ -444,16 +457,17 @@ pub const RuntimeManager = struct {
     fn handleFd(self: *RuntimeManager, fd: posix.fd_t) void {
         self.registry_mutex.lock();
         if (self.listener_fds.get(fd)) |entry| {
+            const concrete_protocol = self.listener_fd_protocols.get(fd) orelse entry.protocol;
             entry.mutex.lock();
-            switch (entry.protocol) {
+            switch (concrete_protocol) {
                 .tcp => {
                     self.registry_mutex.unlock();
                     defer entry.mutex.unlock();
-                    handleTcpAccept(self, entry);
+                    handleTcpAccept(self, entry, fd);
                 },
                 .udp => {
                     if (self.udp_io_uring_enabled and !self.udp_io_uring_test_force_fallback and self.udp_session_workers.len == 0 and self.udp_io_uring != null and self.udp_io_uring_buffer_group != null) {
-                        armUdpIoUringListener(self, entry);
+                        armUdpIoUringListener(self, entry, fd);
                         entry.mutex.unlock();
                         self.registry_mutex.unlock();
                         self.drainUdpIoUringCompletions();
@@ -461,13 +475,14 @@ pub const RuntimeManager = struct {
                         defer self.registry_mutex.unlock();
                         defer entry.mutex.unlock();
                         self.metrics.udp_io_uring_fallback_total.inc();
-                        handleUdpReadable(self.allocator, self.metrics, entry);
+                        handleUdpReadable(self.allocator, self.metrics, entry, fd);
                     } else {
                         defer self.registry_mutex.unlock();
                         defer entry.mutex.unlock();
-                        handleUdpReadable(self.allocator, self.metrics, entry);
+                        handleUdpReadable(self.allocator, self.metrics, entry, fd);
                     }
                 },
+                .both => unreachable,
             }
             return;
         }
@@ -493,10 +508,11 @@ pub const RuntimeManager = struct {
         var it = self.listeners.iterator();
         while (it.next()) |kv| {
             const entry = kv.value_ptr.*;
-            if (entry.protocol != .udp) continue;
+            if (entry.protocol != .udp and entry.protocol != .both) continue;
             if (entry.udp_worker_shards != null) continue;
             entry.mutex.lock();
-            armUdpIoUringListener(self, entry);
+            const fd = entry.udp_fd orelse entry.fd;
+            if (fd) |udp_fd| armUdpIoUringListener(self, entry, udp_fd);
             entry.mutex.unlock();
         }
     }
@@ -523,7 +539,7 @@ pub const RuntimeManager = struct {
         const now_ms = compat.milliTimestamp();
         while (it.next()) |kv| {
             const entry = kv.value_ptr.*;
-            if (entry.protocol != .udp) continue;
+            if (entry.protocol != .udp and entry.protocol != .both) continue;
             if (entry.udp_worker_shards != null) continue;
             entry.mutex.lock();
             var removed_any = true;
@@ -610,6 +626,8 @@ pub const RuntimeManager = struct {
             .error_kind = null,
             .last_error = null,
             .fd = null,
+            .tcp_fd = null,
+            .udp_fd = null,
             .tcp_worker_listener_fds = null,
             .udp_worker_listener_fds = null,
             .udp_worker_shards = null,
@@ -642,14 +660,35 @@ pub const RuntimeManager = struct {
         self.registry_mutex.lock();
         defer self.registry_mutex.unlock();
         try self.listeners.put(entry.id, entry);
-        if (entry.fd) |fd| try self.listener_fds.put(fd, entry);
+        errdefer {
+            if (entry.fd) |fd| self.unregisterListenerFd(fd);
+            if (entry.tcp_fd) |fd| self.unregisterListenerFd(fd);
+            if (entry.udp_fd) |fd| self.unregisterListenerFd(fd);
+            _ = self.listeners.remove(entry.id);
+        }
+        if (entry.fd) |fd| try self.registerListenerFd(entry, fd, entry.protocol);
+        if (entry.tcp_fd) |fd| try self.registerListenerFd(entry, fd, .tcp);
+        if (entry.udp_fd) |fd| try self.registerListenerFd(entry, fd, .udp);
     }
 
-    fn bindEntry(self: *RuntimeManager, entry: *ListenerEntry) !posix.fd_t {
-        return switch (entry.protocol) {
-            .tcp => try bindTcpListener(entry.port, self.epoll_fd, false),
-            .udp => try bindUdpSocket(entry.port, self.epoll_fd, self.udp_socket_recv_buffer_bytes, self.udp_socket_send_buffer_bytes, false, self.udp_gro_enabled and !self.udp_fast_path_test_force_fallback and self.udp_session_workers.len == 0),
-        };
+    fn registerListenerFd(self: *RuntimeManager, entry: *ListenerEntry, fd: posix.fd_t, protocol: model.Protocol) !void {
+        try self.listener_fds.put(fd, entry);
+        errdefer _ = self.listener_fds.remove(fd);
+        try self.listener_fd_protocols.put(fd, protocol);
+    }
+
+    fn bindEntry(self: *RuntimeManager, entry: *ListenerEntry) !void {
+        switch (entry.protocol) {
+            .tcp => entry.fd = try bindTcpListener(entry.port, self.epoll_fd, false),
+            .udp => entry.fd = try bindUdpSocket(entry.port, self.epoll_fd, self.udp_socket_recv_buffer_bytes, self.udp_socket_send_buffer_bytes, false, self.udp_gro_enabled and !self.udp_fast_path_test_force_fallback and self.udp_session_workers.len == 0),
+            .both => {
+                const tcp_fd = try bindTcpListener(entry.port, self.epoll_fd, false);
+                errdefer closeIgnoreBadFd(tcp_fd);
+                const udp_fd = try bindUdpSocket(entry.port, self.epoll_fd, self.udp_socket_recv_buffer_bytes, self.udp_socket_send_buffer_bytes, false, self.udp_gro_enabled and !self.udp_fast_path_test_force_fallback and self.udp_session_workers.len == 0);
+                entry.tcp_fd = tcp_fd;
+                entry.udp_fd = udp_fd;
+            },
+        }
     }
 
     fn bindShardedTcpListeners(self: *RuntimeManager, entry: *ListenerEntry) !void {
@@ -733,12 +772,28 @@ pub const RuntimeManager = struct {
 
     fn closeEntryFd(self: *RuntimeManager, entry: *ListenerEntry) void {
         if (entry.fd) |fd| {
-            _ = self.listener_fds.remove(fd);
+            self.unregisterListenerFd(fd);
             entry.udp_io_uring_active = false;
             closeIgnoreBadFd(fd);
             entry.fd = null;
         }
+        if (entry.tcp_fd) |fd| {
+            self.unregisterListenerFd(fd);
+            closeIgnoreBadFd(fd);
+            entry.tcp_fd = null;
+        }
+        if (entry.udp_fd) |fd| {
+            self.unregisterListenerFd(fd);
+            entry.udp_io_uring_active = false;
+            closeIgnoreBadFd(fd);
+            entry.udp_fd = null;
+        }
         self.closeEntryWorkerListenerFds(entry);
+    }
+
+    fn unregisterListenerFd(self: *RuntimeManager, fd: posix.fd_t) void {
+        _ = self.listener_fds.remove(fd);
+        _ = self.listener_fd_protocols.remove(fd);
     }
 
     fn closeEntryWorkerListenerFds(self: *RuntimeManager, entry: *ListenerEntry) void {
@@ -1551,6 +1606,8 @@ const ListenerEntry = struct {
     error_kind: ?model.ErrorKind,
     last_error: ?[]u8,
     fd: ?posix.fd_t,
+    tcp_fd: ?posix.fd_t,
+    udp_fd: ?posix.fd_t,
     tcp_worker_listener_fds: ?[]posix.fd_t,
     udp_worker_listener_fds: ?[]posix.fd_t,
     udp_worker_shards: ?[]UdpWorkerShard,
@@ -1573,6 +1630,14 @@ const ListenerEntry = struct {
             .effective_target_port = self.effective_target_port,
             .error_kind = self.error_kind,
             .last_error = if (self.last_error) |msg| try allocator.dupe(u8, msg) else null,
+        };
+    }
+
+    fn hasRequiredListenerState(self: *const ListenerEntry) bool {
+        return switch (self.protocol) {
+            .tcp => self.fd != null or self.tcp_worker_listener_fds != null,
+            .udp => self.fd != null or self.udp_worker_listener_fds != null,
+            .both => self.tcp_fd != null and self.udp_fd != null,
         };
     }
 };
@@ -1968,8 +2033,7 @@ const SplicePumpResult = enum {
     runtime_error,
 };
 
-fn handleTcpAccept(manager: *RuntimeManager, entry: *ListenerEntry) void {
-    const listen_fd = entry.fd orelse return;
+fn handleTcpAccept(manager: *RuntimeManager, entry: *ListenerEntry, listen_fd: posix.fd_t) void {
     const use_runtime_session_model = manager.tcp_session_model_enabled and !manager.tcp_splice_enabled;
     const use_workerized_session_model = use_runtime_session_model and manager.tcp_session_model_workers > 1 and !manager.tcp_session_model_sharded_accept and !manager.tcp_session_model_accept_balanced;
     const use_accept_balanced_session_model = use_runtime_session_model and manager.tcp_session_model_workers > 1 and manager.tcp_session_model_accept_balanced and !manager.tcp_session_model_sharded_accept;
@@ -2391,8 +2455,7 @@ fn processUdpSegmentsSameClient(allocator: std.mem.Allocator, metrics: *Metrics,
     }
 }
 
-fn handleUdpReadableGro(allocator: std.mem.Allocator, metrics: *Metrics, entry: *ListenerEntry) void {
-    const fd = entry.fd orelse return;
+fn handleUdpReadableGro(allocator: std.mem.Allocator, metrics: *Metrics, entry: *ListenerEntry, fd: posix.fd_t) void {
     while (true) {
         var buffer: [64 * 1024]u8 = undefined;
         var control: [128]u8 = undefined;
@@ -2424,12 +2487,11 @@ fn handleUdpReadableGro(allocator: std.mem.Allocator, metrics: *Metrics, entry: 
     }
 }
 
-fn handleUdpReadable(allocator: std.mem.Allocator, metrics: *Metrics, entry: *ListenerEntry) void {
+fn handleUdpReadable(allocator: std.mem.Allocator, metrics: *Metrics, entry: *ListenerEntry, fd: posix.fd_t) void {
     if (entry.manager.udp_gro_enabled and !entry.manager.udp_fast_path_test_force_fallback) {
-        handleUdpReadableGro(allocator, metrics, entry);
+        handleUdpReadableGro(allocator, metrics, entry, fd);
         return;
     }
-    const fd = entry.fd orelse return;
     const batch_len = 16;
     var buffers: [batch_len][64 * 1024]u8 = undefined;
     var addrs: [batch_len]net.Address = undefined;
@@ -2779,6 +2841,10 @@ fn flushUdpConnectedBatch(metrics: *Metrics, session: *UdpSession, buffers: *con
     }
 }
 
+fn udpListenerFd(entry: *const ListenerEntry) ?posix.fd_t {
+    return entry.udp_fd orelse entry.fd;
+}
+
 fn handleUdpReplyReadable(metrics: *Metrics, entry: *ListenerEntry, key: ClientKey) void {
     const session = entry.udp_sessions.get(key) orelse {
         metrics.udp_reply_stale_total.inc();
@@ -2800,7 +2866,7 @@ fn handleUdpReplyReadable(metrics: *Metrics, entry: *ListenerEntry, key: ClientK
             removeUdpSessionLocked(entry, key, session, false);
             break;
         }
-        _ = compat.sendto(entry.fd orelse break, buffer[0..amt], 0, &session.client_addr.any, session.client_addr_len) catch {
+        _ = compat.sendto(udpListenerFd(entry) orelse break, buffer[0..amt], 0, &session.client_addr.any, session.client_addr_len) catch {
             metrics.udp_send_errors_total.inc();
             metrics.udp_reply_drop_total.inc();
             removeUdpSessionLocked(entry, key, session, false);
@@ -2866,9 +2932,8 @@ fn sendConnectedUdp(fd: posix.fd_t, payload: []const u8) bool {
     };
 }
 
-fn armUdpIoUringListener(manager: *RuntimeManager, entry: *ListenerEntry) void {
+fn armUdpIoUringListener(manager: *RuntimeManager, entry: *ListenerEntry, fd: posix.fd_t) void {
     if (entry.udp_io_uring_active) return;
-    const fd = entry.fd orelse return;
     var ring = &(manager.udp_io_uring orelse return);
     const buffer_group = manager.udp_io_uring_buffer_group orelse return;
 

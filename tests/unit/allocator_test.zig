@@ -3,6 +3,8 @@ const model = @import("../../src/model/allocation.zig");
 
 test "protocol parser" {
     try std.testing.expectEqual(model.Protocol.tcp, model.Protocol.fromString("tcp").?);
+    try std.testing.expectEqual(model.Protocol.both, model.Protocol.fromString("both").?);
+    try std.testing.expectEqual(model.Protocol.both, model.Protocol.fromString("BOTH").?);
     try std.testing.expect(model.Protocol.fromString("bogus") == null);
 }
 
