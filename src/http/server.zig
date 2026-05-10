@@ -6,6 +6,7 @@ const json = std.json;
 const config_mod = @import("../config.zig");
 const model = @import("../model/allocation.zig");
 const service_mod = @import("../service/allocation_service.zig");
+const prometheus_exporter = @import("../prometheus_exporter.zig");
 const Metrics = @import("../metrics.zig").Metrics;
 const posix = std.posix;
 
@@ -16,6 +17,9 @@ pub const HttpServer = struct {
     host: []const u8,
     port: u16,
     auth_token: []const u8,
+    rate_calculator: prometheus_exporter.RateCalculator,
+    rate_calculator_deinitialized: bool = false,
+    rate_calculator_mutex: compat.Mutex = .{},
     thread: ?std.Thread = null,
     server: ?net.Server = null,
     server_mutex: compat.Mutex = .{},
@@ -59,6 +63,14 @@ pub const HttpServer = struct {
         self.active_mutex.lock();
         defer self.active_mutex.unlock();
         while (self.active_count != 0) self.active_cond.wait(&self.active_mutex);
+    }
+
+    pub fn deinit(self: *HttpServer) void {
+        self.stop();
+        if (!self.rate_calculator_deinitialized) {
+            self.rate_calculator_deinitialized = true;
+            self.rate_calculator.deinit();
+        }
     }
 
     pub fn assignedPort(self: *HttpServer) !u16 {
@@ -166,6 +178,7 @@ fn handleRequest(server: *HttpServer, request: *http.Server.Request) !void {
     }
 
     const target = request.head.target;
+    if (request.head.method == .GET and std.mem.eql(u8, target, "/metrics")) return handlePrometheusMetrics(server, request);
     if (request.head.method == .GET and std.mem.eql(u8, target, "/v1/allocations")) return handleListAllocations(server, request);
     if (request.head.method == .POST and std.mem.eql(u8, target, "/v1/allocations")) return handleCreateAllocation(server, request);
     if (request.head.method == .GET and std.mem.eql(u8, target, "/v1/ports")) return handleList(server, request);
@@ -434,6 +447,30 @@ fn handleMetrics(server: *HttpServer, request: *http.Server.Request) !void {
     const payload = try encodeMetrics(server.allocator, server.metrics);
     defer server.allocator.free(payload);
     try request.respond(payload, .{ .status = .ok, .keep_alive = false, .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }} });
+}
+
+fn handlePrometheusMetrics(server: *HttpServer, request: *http.Server.Request) !void {
+    var snapshots = try server.service.snapshotListenerMetrics(server.allocator);
+    defer snapshots.deinit(server.allocator);
+
+    server.rate_calculator_mutex.lock();
+    defer server.rate_calculator_mutex.unlock();
+    const payload = try prometheus_exporter.render(
+        server.allocator,
+        snapshots.items,
+        &server.rate_calculator,
+        compat.milliTimestamp(),
+    );
+    defer server.allocator.free(payload);
+
+    try request.respond(payload, .{
+        .status = .ok,
+        .keep_alive = false,
+        .extra_headers = &.{.{
+            .name = "content-type",
+            .value = "text/plain; version=0.0.4; charset=utf-8",
+        }},
+    });
 }
 
 fn authorized(token: []const u8, request: *const http.Server.Request) bool {

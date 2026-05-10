@@ -5,6 +5,7 @@ const storage = @import("storage/sqlite.zig");
 const runtime = @import("runtime/manager.zig");
 const service_mod = @import("service/allocation_service.zig");
 const http_server = @import("http/server.zig");
+const prometheus_exporter = @import("prometheus_exporter.zig");
 
 pub const App = struct {
     allocator: std.mem.Allocator,
@@ -66,6 +67,7 @@ pub const App = struct {
             .host = config.http_listen_host,
             .port = config.http_listen_port,
             .auth_token = config.auth_token,
+            .rate_calculator = prometheus_exporter.RateCalculator.init(allocator),
         };
 
         return app;
@@ -81,7 +83,7 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
-        self.http.stop();
+        self.http.deinit();
         self.runtime_manager.deinit();
         self.repo.close();
         self.config.deinit(self.allocator);

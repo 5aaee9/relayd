@@ -5,6 +5,7 @@ const model = @import("../model/allocation.zig");
 const uuidv7 = @import("../util/uuidv7.zig");
 const storage = @import("../storage/sqlite.zig");
 const runtime = @import("../runtime/manager.zig");
+const prometheus_exporter = @import("../prometheus_exporter.zig");
 
 pub const Failpoints = struct {
     create_timeout: bool = false,
@@ -326,6 +327,24 @@ pub const Service = struct {
             return views.orderedRemove(idx);
         }
         return null;
+    }
+
+    pub fn snapshotListenerMetrics(self: *Service, allocator: std.mem.Allocator) !std.ArrayList(prometheus_exporter.ListenerMetricsSnapshot) {
+        var runtime_rows = try self.runtime_manager.snapshotListenerMetrics(allocator);
+        defer runtime_rows.deinit(allocator);
+
+        var rows = std.ArrayList(prometheus_exporter.ListenerMetricsSnapshot).empty;
+        errdefer rows.deinit(allocator);
+        for (runtime_rows.items) |row| {
+            try rows.append(allocator, .{
+                .port = row.port,
+                .protocol = row.protocol,
+                .connections_current = row.connections_current,
+                .rx_bytes_total = row.rx_bytes_total,
+                .tx_bytes_total = row.tx_bytes_total,
+            });
+        }
+        return rows;
     }
 
     fn existsInCurrentTransaction(self: *Service, protocol: model.Protocol, port: u16) !bool {

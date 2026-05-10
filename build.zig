@@ -23,6 +23,10 @@ pub fn build(b: *std.Build) void {
         "-DHAVE_USLEEP=0",
     };
     const has_bundled_sqlite = fileExists(b, "lib/sqlite3.c");
+    const metrics_prometheus = b.dependency("metrics", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("metrics");
 
     const exe_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -31,6 +35,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .strip = optimize != .Debug,
     });
+    exe_module.addImport("metrics_prometheus", metrics_prometheus);
     linkSqlite(b, exe_module, has_bundled_sqlite, sqlite_flags);
 
     const exe = b.addExecutable(.{
@@ -45,6 +50,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    test_module.addImport("metrics_prometheus", metrics_prometheus);
     linkSqlite(b, test_module, has_bundled_sqlite, sqlite_flags);
 
     const tests = b.addTest(.{

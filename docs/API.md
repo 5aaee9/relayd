@@ -1,6 +1,6 @@
 # API
 
-`relayd` exposes an authenticated HTTP control-plane API under `/v1`.
+`relayd` exposes an authenticated HTTP control-plane API under `/v1` and an authenticated Prometheus scrape endpoint at `/metrics`.
 
 ## Quick start
 
@@ -28,7 +28,7 @@ If the header is missing, malformed, or the token does not match, the server ret
 
 ## Conventions
 
-- Base path: `/v1`
+- Base path: `/v1` for JSON control-plane endpoints; `/metrics` is the Prometheus scrape endpoint without the `/v1` prefix
 - Successful `POST`/`PUT`/`GET` responses use `Content-Type: application/json`
 - Successful `DELETE` responses return `204 No Content` with an empty body
 - Error responses are plain text, not JSON
@@ -326,18 +326,66 @@ Dual-protocol allocations appear once with `protocol = "both"`, one `id`, and on
 
 ## Metrics
 
-### Metrics endpoint
+### Prometheus metrics endpoint
 
-`GET /v1/metrics`
+`GET /metrics`
 
-Return runtime counters and gauges as a single JSON object.
+Exports scrape-ready Prometheus text exposition for per-listener live connection/session counts and rx/tx speeds.
+
+Authentication:
+
+- Requires the same `Authorization: Bearer <AUTH_TOKEN>` header as the `/v1` control-plane endpoints.
+- Missing, malformed, or wrong bearer tokens return `401 Unauthorized` with body `unauthorized`.
 
 Success:
 
 - `200 OK`
+- `Content-Type: text/plain; version=0.0.4; charset=utf-8`
+- body: Prometheus text exposition format
+
+Exported metrics:
+
+```text
+relayd_connections_current{port="<port>",protocol="tcp|udp"} <current_sessions>
+relayd_rx_bytes_per_second{port="<port>",protocol="tcp|udp"} <bytes_per_second>
+relayd_tx_bytes_per_second{port="<port>",protocol="tcp|udp"} <bytes_per_second>
+```
+
+Labels:
+
+- `port` is the concrete relay listener port.
+- `protocol` is the concrete listener protocol, `tcp` or `udp`.
+- A `protocol = "both"` allocation is exported as two series for the same port: one with `protocol="tcp"` and one with `protocol="udp"`.
+- Allocation IDs are not exported as labels.
+
+Speed semantics:
+
+- `rx` is bytes accepted by relayd from external clients on the allocated listener port.
+- `tx` is bytes sent by relayd back to external clients on the allocated listener port.
+- Speeds are calculated from per-listener byte-total deltas between scrapes. The first scrape for a new `port`/`protocol` label reports `0` for rx/tx speed because no previous sample exists.
+- When an allocation is deleted, its label is omitted from later scrapes.
+
+Example:
+
+```bash
+curl -sS \
+  -H "Authorization: Bearer ${AUTH_TOKEN}" \
+  "${BASE_URL}/metrics"
+```
+
+### JSON metrics endpoint
+
+`GET /v1/metrics`
+
+Returns existing runtime counters and gauges as a single JSON object for compatibility. This endpoint remains JSON and is separate from Prometheus `/metrics`.
+
+Success:
+
+- `200 OK`
+- `Content-Type: application/json`
 - body: JSON object with integer values
 
-#### Current metric fields
+#### Current JSON metric fields
 
 - Core: `allocations_total`, `runtime_apply_total`, `restore_failures_total`, `restore_timeout_total`, `rejected_no_host_total`, `bind_fail_total`, `http_non_loopback_bind_total`
 - TCP splice/copy: `tcp_splice_fast_path_total`, `tcp_copy_fallback_total`, `tcp_splice_attempt_total`, `tcp_splice_success_total`, `tcp_splice_fallback_total`, `tcp_splice_hard_failure_total`, `tcp_splice_fallback_forced_total`, `tcp_splice_fallback_unsupported_total`, `tcp_splice_fallback_runtime_error_total`

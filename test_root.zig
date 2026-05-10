@@ -1,4 +1,5 @@
 test {
+    _ = @import("src/prometheus_exporter.zig");
     _ = @import("src/util/uuidv7.zig");
     _ = @import("tests/unit/config_test.zig");
     _ = @import("tests/unit/sqlite_test.zig");

@@ -4,7 +4,10 @@ const posix = std.posix;
 const net = @import("../net_compat.zig");
 const model = @import("../model/allocation.zig");
 const config_mod = @import("../config.zig");
-const Metrics = @import("../metrics.zig").Metrics;
+const metrics_mod = @import("../metrics.zig");
+const Metrics = metrics_mod.Metrics;
+const Counter = metrics_mod.Counter;
+const Gauge = metrics_mod.Gauge;
 
 pub const ObservedState = struct {
     runtime_status: model.RuntimeStatus,
@@ -17,6 +20,75 @@ pub const ObservedState = struct {
         if (self.effective_host) |host| allocator.free(host);
         if (self.last_error) |msg| allocator.free(msg);
         self.* = undefined;
+    }
+};
+
+pub const ListenerMetricsSnapshot = struct {
+    port: u16,
+    protocol: model.Protocol,
+    connections_current: u64,
+    rx_bytes_total: u64,
+    tx_bytes_total: u64,
+};
+
+const ListenerMetricsState = struct {
+    allocator: std.mem.Allocator,
+    ref_count: std.atomic.Value(u64) = std.atomic.Value(u64).init(1),
+    tcp_active_sessions: Gauge = .{},
+    udp_active_sessions: Gauge = .{},
+    tcp_rx_bytes_total: Counter = .{},
+    tcp_tx_bytes_total: Counter = .{},
+    udp_rx_bytes_total: Counter = .{},
+    udp_tx_bytes_total: Counter = .{},
+
+    fn create(allocator: std.mem.Allocator) !*ListenerMetricsState {
+        const state = try allocator.create(ListenerMetricsState);
+        state.* = .{ .allocator = allocator };
+        return state;
+    }
+
+    fn retain(self: *ListenerMetricsState) *ListenerMetricsState {
+        _ = self.ref_count.fetchAdd(1, .monotonic);
+        return self;
+    }
+
+    fn release(self: *ListenerMetricsState) void {
+        if (self.ref_count.fetchSub(1, .acq_rel) == 1) {
+            const allocator = self.allocator;
+            allocator.destroy(self);
+        }
+    }
+
+    fn incTcpActive(self: *ListenerMetricsState) void {
+        self.tcp_active_sessions.inc();
+    }
+
+    fn decTcpActive(self: *ListenerMetricsState) void {
+        self.tcp_active_sessions.dec();
+    }
+
+    fn incUdpActive(self: *ListenerMetricsState) void {
+        self.udp_active_sessions.inc();
+    }
+
+    fn decUdpActive(self: *ListenerMetricsState) void {
+        self.udp_active_sessions.dec();
+    }
+
+    fn addTcpRx(self: *ListenerMetricsState, amount: usize) void {
+        self.tcp_rx_bytes_total.add(@intCast(amount));
+    }
+
+    fn addTcpTx(self: *ListenerMetricsState, amount: usize) void {
+        self.tcp_tx_bytes_total.add(@intCast(amount));
+    }
+
+    fn addUdpRx(self: *ListenerMetricsState, amount: usize) void {
+        self.udp_rx_bytes_total.add(@intCast(amount));
+    }
+
+    fn addUdpTx(self: *ListenerMetricsState, amount: usize) void {
+        self.udp_tx_bytes_total.add(@intCast(amount));
     }
 };
 
@@ -424,6 +496,65 @@ pub const RuntimeManager = struct {
         return try entry.observed(allocator);
     }
 
+    pub fn snapshotListenerMetrics(self: *RuntimeManager, allocator: std.mem.Allocator) !std.ArrayList(ListenerMetricsSnapshot) {
+        var rows = std.ArrayList(ListenerMetricsSnapshot).empty;
+        errdefer rows.deinit(allocator);
+
+        self.registry_mutex.lock();
+        defer self.registry_mutex.unlock();
+
+        var it = self.listeners.iterator();
+        while (it.next()) |kv| {
+            const entry = kv.value_ptr.*;
+            entry.mutex.lock();
+            const port = entry.port;
+            const protocol = entry.protocol;
+            const state = entry.metrics_state;
+            const tcp_active = state.tcp_active_sessions.load();
+            const tcp_rx = state.tcp_rx_bytes_total.load();
+            const tcp_tx = state.tcp_tx_bytes_total.load();
+            const udp_active = state.udp_active_sessions.load();
+            const udp_rx = state.udp_rx_bytes_total.load();
+            const udp_tx = state.udp_tx_bytes_total.load();
+            entry.mutex.unlock();
+
+            switch (protocol) {
+                .tcp => try rows.append(allocator, .{
+                    .port = port,
+                    .protocol = .tcp,
+                    .connections_current = tcp_active,
+                    .rx_bytes_total = tcp_rx,
+                    .tx_bytes_total = tcp_tx,
+                }),
+                .udp => try rows.append(allocator, .{
+                    .port = port,
+                    .protocol = .udp,
+                    .connections_current = udp_active,
+                    .rx_bytes_total = udp_rx,
+                    .tx_bytes_total = udp_tx,
+                }),
+                .both => {
+                    try rows.append(allocator, .{
+                        .port = port,
+                        .protocol = .tcp,
+                        .connections_current = tcp_active,
+                        .rx_bytes_total = tcp_rx,
+                        .tx_bytes_total = tcp_tx,
+                    });
+                    try rows.append(allocator, .{
+                        .port = port,
+                        .protocol = .udp,
+                        .connections_current = udp_active,
+                        .rx_bytes_total = udp_rx,
+                        .tx_bytes_total = udp_tx,
+                    });
+                },
+            }
+        }
+
+        return rows;
+    }
+
     fn threadMain(self: *RuntimeManager) void {
         var events: [64]std.os.linux.epoll_event = undefined;
         while (true) {
@@ -583,6 +714,7 @@ pub const RuntimeManager = struct {
             }
             if (ctx.thread) |thread| thread.join();
             self.allocator.free(ctx.host);
+            ctx.metrics_state.release();
             self.allocator.destroy(ctx);
             _ = self.tcp_sessions.swapRemove(idx);
         }
@@ -606,15 +738,20 @@ pub const RuntimeManager = struct {
             }
             if (ctx.thread) |thread| thread.join();
             self.allocator.free(ctx.host);
+            ctx.metrics_state.release();
             self.allocator.destroy(ctx);
         }
     }
 
     fn createEntry(self: *RuntimeManager, allocation: model.Allocation) !*ListenerEntry {
         const entry = try self.allocator.create(ListenerEntry);
+        errdefer self.allocator.destroy(entry);
+        const metrics_state = try ListenerMetricsState.create(self.allocator);
+        errdefer metrics_state.release();
         entry.* = .{
             .allocator = self.allocator,
             .manager = self,
+            .metrics_state = metrics_state,
             .id = try self.allocator.dupe(u8, allocation.id),
             .protocol = allocation.protocol,
             .port = allocation.port,
@@ -862,7 +999,9 @@ pub const RuntimeManager = struct {
         }
 
         self.metrics.tcp_active_sessions.dec();
+        session.metrics_state.decTcpActive();
         self.metrics.tcp_session_close_total.inc();
+        session.metrics_state.release();
         self.allocator.destroy(session);
     }
 
@@ -874,7 +1013,9 @@ pub const RuntimeManager = struct {
             closeIgnoreBadFd(session.client_fd);
             closeIgnoreBadFd(session.upstream_fd);
             self.metrics.tcp_active_sessions.dec();
+            session.metrics_state.decTcpActive();
             self.metrics.tcp_session_close_total.inc();
+            session.metrics_state.release();
             self.allocator.destroy(session);
         }
     }
@@ -926,6 +1067,8 @@ fn dispatchTcpRuntimeSessionToWorker(manager: *RuntimeManager, session: *TcpRunt
 
 fn dispatchAcceptedTcpSessionToWorker(manager: *RuntimeManager, entry: *ListenerEntry, client_fd: posix.fd_t) !void {
     std.debug.assert(manager.tcp_session_workers.len > 0);
+    const metrics_state = entry.metrics_state.retain();
+    errdefer metrics_state.release();
     const host = try manager.allocator.dupe(u8, entry.effective_host.?);
     errdefer manager.allocator.free(host);
 
@@ -935,6 +1078,7 @@ fn dispatchAcceptedTcpSessionToWorker(manager: *RuntimeManager, entry: *Listener
     worker.mutex.lock();
     defer worker.mutex.unlock();
     try worker.pending_accepts.append(worker.allocator, .{
+        .metrics_state = metrics_state,
         .client_fd = client_fd,
         .host = host,
         .port = entry.effective_target_port.?,
@@ -1036,6 +1180,7 @@ fn attachPendingAcceptedTcpSessions(worker: *TcpSessionWorker) void {
         startTcpAcceptedRuntimeSessionOnWorker(worker, pending) catch {
             closeIgnoreBadFd(pending.client_fd);
             worker.allocator.free(pending.host);
+            pending.metrics_state.release();
             continue;
         };
     }
@@ -1050,7 +1195,9 @@ fn attachPendingTcpRuntimeSessions(worker: *TcpSessionWorker) void {
             closeIgnoreBadFd(session.client_fd);
             closeIgnoreBadFd(session.upstream_fd);
             worker.metrics.tcp_active_sessions.dec();
+            session.metrics_state.decTcpActive();
             worker.metrics.tcp_session_close_total.inc();
+            session.metrics_state.release();
             worker.allocator.destroy(session);
             continue;
         };
@@ -1059,7 +1206,9 @@ fn attachPendingTcpRuntimeSessions(worker: *TcpSessionWorker) void {
             closeIgnoreBadFd(session.client_fd);
             closeIgnoreBadFd(session.upstream_fd);
             worker.metrics.tcp_active_sessions.dec();
+            session.metrics_state.decTcpActive();
             worker.metrics.tcp_session_close_total.inc();
+            session.metrics_state.release();
             worker.allocator.destroy(session);
             continue;
         };
@@ -1069,7 +1218,9 @@ fn attachPendingTcpRuntimeSessions(worker: *TcpSessionWorker) void {
             closeIgnoreBadFd(session.client_fd);
             closeIgnoreBadFd(session.upstream_fd);
             worker.metrics.tcp_active_sessions.dec();
+            session.metrics_state.decTcpActive();
             worker.metrics.tcp_session_close_total.inc();
+            session.metrics_state.release();
             worker.allocator.destroy(session);
             continue;
         };
@@ -1102,7 +1253,9 @@ fn removeTcpRuntimeSessionFromWorker(worker: *TcpSessionWorker, session: *TcpRun
         }
     }
     worker.metrics.tcp_active_sessions.dec();
+    session.metrics_state.decTcpActive();
     worker.metrics.tcp_session_close_total.inc();
+    session.metrics_state.release();
     worker.allocator.destroy(session);
 }
 
@@ -1114,7 +1267,9 @@ fn shutdownTcpRuntimeSessionsInWorker(worker: *TcpSessionWorker) void {
         closeIgnoreBadFd(session.client_fd);
         closeIgnoreBadFd(session.upstream_fd);
         worker.metrics.tcp_active_sessions.dec();
+        session.metrics_state.decTcpActive();
         worker.metrics.tcp_session_close_total.inc();
+        session.metrics_state.release();
         worker.allocator.destroy(session);
     }
     while (worker.pending_sessions.items.len > 0) {
@@ -1122,7 +1277,9 @@ fn shutdownTcpRuntimeSessionsInWorker(worker: *TcpSessionWorker) void {
         closeIgnoreBadFd(session.client_fd);
         closeIgnoreBadFd(session.upstream_fd);
         worker.metrics.tcp_active_sessions.dec();
+        session.metrics_state.decTcpActive();
         worker.metrics.tcp_session_close_total.inc();
+        session.metrics_state.release();
         worker.allocator.destroy(session);
     }
 }
@@ -1185,7 +1342,10 @@ fn startTcpRuntimeSessionOnWorker(worker: *TcpSessionWorker, entry: *ListenerEnt
 
     const session = try worker.allocator.create(TcpRuntimeSession);
     errdefer worker.allocator.destroy(session);
+    const metrics_state = entry.metrics_state.retain();
+    errdefer metrics_state.release();
     session.* = .{
+        .metrics_state = metrics_state,
         .client_fd = client_fd,
         .upstream_fd = upstream_fd,
         .upstream_connected = upstream_connected,
@@ -1210,10 +1370,12 @@ fn startTcpRuntimeSessionOnWorker(worker: *TcpSessionWorker, entry: *ListenerEnt
     updateTcpRuntimeSessionInterest(worker.epoll_fd, session);
     worker.metrics.tcp_session_create_total.inc();
     worker.metrics.tcp_active_sessions.inc();
+    session.metrics_state.incTcpActive();
 }
 
 fn startTcpAcceptedRuntimeSessionOnWorker(worker: *TcpSessionWorker, pending: PendingAcceptedTcpSession) !void {
     defer worker.allocator.free(pending.host);
+    errdefer pending.metrics_state.release();
     const addr = try config_mod.parseIpLiteral(pending.host, pending.port);
     const family: u32 = switch (addr.any.family) {
         std.posix.AF.INET => std.posix.AF.INET,
@@ -1238,6 +1400,7 @@ fn startTcpAcceptedRuntimeSessionOnWorker(worker: *TcpSessionWorker, pending: Pe
     const session = try worker.allocator.create(TcpRuntimeSession);
     errdefer worker.allocator.destroy(session);
     session.* = .{
+        .metrics_state = pending.metrics_state,
         .client_fd = pending.client_fd,
         .upstream_fd = upstream_fd,
         .upstream_connected = upstream_connected,
@@ -1262,6 +1425,7 @@ fn startTcpAcceptedRuntimeSessionOnWorker(worker: *TcpSessionWorker, pending: Pe
     updateTcpRuntimeSessionInterest(worker.epoll_fd, session);
     worker.metrics.tcp_session_create_total.inc();
     worker.metrics.tcp_active_sessions.inc();
+    session.metrics_state.incTcpActive();
 }
 
 fn udpSessionWorkerThread(worker: *UdpSessionWorker) void {
@@ -1396,6 +1560,7 @@ fn handleUdpReadableOnWorker(worker: *UdpSessionWorker, shard: *UdpWorkerShard) 
             const amt = msgvec[idx].len;
             metrics.udp_packets_in_total.inc();
             metrics.udp_bytes_in_total.add(amt);
+            shard.entry.metrics_state.addUdpRx(amt);
             incUdpWorkerPacketsIn(metrics, worker.index, 1);
             incUdpDataplaneRedesignPacketsIn(metrics, shard.entry.manager.udp_dataplane_redesign_enabled, 1);
             lengths[idx] = amt;
@@ -1487,7 +1652,10 @@ fn getOrCreateUdpSessionOnWorker(worker: *UdpSessionWorker, shard: *UdpWorkerSha
         return null;
     };
     errdefer shard.allocator.destroy(session);
+    const metrics_state = shard.entry.metrics_state.retain();
+    errdefer metrics_state.release();
     session.* = .{
+        .metrics_state = metrics_state,
         .key = key,
         .client_addr = addr,
         .client_addr_len = addr.getOsSockLen(),
@@ -1500,26 +1668,32 @@ fn getOrCreateUdpSessionOnWorker(worker: *UdpSessionWorker, shard: *UdpWorkerSha
     };
     shard.sessions.put(key, session) catch {
         compat.close(upstream_fd);
+        session.metrics_state.release();
         shard.allocator.destroy(session);
         worker.metrics.udp_drop_total.inc();
         return null;
     };
     worker.metrics.udp_session_create_total.inc();
     worker.metrics.udp_active_sessions.inc();
+    session.metrics_state.incUdpActive();
     var event = std.os.linux.epoll_event{ .events = std.os.linux.EPOLL.IN, .data = .{ .fd = upstream_fd } };
     compat.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_ADD, upstream_fd, &event) catch {
         _ = shard.sessions.remove(key);
         compat.close(upstream_fd);
-        shard.allocator.destroy(session);
         worker.metrics.udp_active_sessions.dec();
+        session.metrics_state.decUdpActive();
+        session.metrics_state.release();
+        shard.allocator.destroy(session);
         return null;
     };
     worker.reply_fds.put(upstream_fd, .{ .shard = shard, .key = key }) catch {
         compat.epoll_ctl(worker.epoll_fd, std.os.linux.EPOLL.CTL_DEL, upstream_fd, &event) catch {};
         _ = shard.sessions.remove(key);
         compat.close(upstream_fd);
-        shard.allocator.destroy(session);
         worker.metrics.udp_active_sessions.dec();
+        session.metrics_state.decUdpActive();
+        session.metrics_state.release();
+        shard.allocator.destroy(session);
         return null;
     };
     shard.cached_key = key;
@@ -1548,7 +1722,7 @@ fn handleUdpReplyReadableOnWorker(worker: *UdpSessionWorker, shard: *UdpWorkerSh
             removeUdpSessionFromWorkerShardLocked(worker, shard, key, session, false);
             break;
         }
-        _ = compat.sendto(shard.listener_fd, buffer[0..amt], 0, &session.client_addr.any, session.client_addr_len) catch {
+        const sent = compat.sendto(shard.listener_fd, buffer[0..amt], 0, &session.client_addr.any, session.client_addr_len) catch {
             worker.metrics.udp_send_errors_total.inc();
             worker.metrics.udp_reply_drop_total.inc();
             removeUdpSessionFromWorkerShardLocked(worker, shard, key, session, false);
@@ -1556,7 +1730,8 @@ fn handleUdpReplyReadableOnWorker(worker: *UdpSessionWorker, shard: *UdpWorkerSh
         };
         worker.metrics.udp_reply_primary_total.inc();
         worker.metrics.udp_packets_out_total.inc();
-        worker.metrics.udp_bytes_out_total.add(@intCast(amt));
+        worker.metrics.udp_bytes_out_total.add(@intCast(sent));
+        session.metrics_state.addUdpTx(sent);
         incUdpWorkerPacketsOut(worker.metrics, worker.index, 1);
         incUdpDataplaneRedesignPacketsOut(worker.metrics, shard.entry.manager.udp_dataplane_redesign_enabled, 1);
         session.last_seen_ms.store(compat.milliTimestamp(), .monotonic);
@@ -1578,6 +1753,8 @@ fn removeUdpSessionFromWorkerShardLocked(worker: *UdpSessionWorker, shard: *UdpW
     closeIgnoreBadFd(session.upstream_fd);
     if (count_as_reply_drop) worker.metrics.udp_reply_drop_total.inc();
     worker.metrics.udp_active_sessions.dec();
+    session.metrics_state.decUdpActive();
+    session.metrics_state.release();
     shard.allocator.destroy(session);
 }
 
@@ -1595,6 +1772,7 @@ fn closeUdpWorkerShardSessionsLocked(worker: *UdpSessionWorker, shard: *UdpWorke
 const ListenerEntry = struct {
     allocator: std.mem.Allocator,
     manager: *RuntimeManager,
+    metrics_state: *ListenerMetricsState,
     id: []u8,
     protocol: model.Protocol,
     port: u16,
@@ -1654,6 +1832,7 @@ const UdpReplyDispatch = struct {
 };
 
 const UdpSession = struct {
+    metrics_state: *ListenerMetricsState,
     key: ClientKey,
     client_addr: net.Address,
     client_addr_len: posix.socklen_t,
@@ -1678,6 +1857,7 @@ fn destroyEntry(allocator: std.mem.Allocator, entry: *ListenerEntry) void {
     }
     if (entry.tcp_worker_listener_fds) |fds| allocator.free(fds);
     if (entry.udp_worker_listener_fds) |fds| allocator.free(fds);
+    entry.metrics_state.release();
     allocator.destroy(entry);
 }
 
@@ -1834,6 +2014,7 @@ const TcpRuntimeBuffer = struct {
 };
 
 const TcpRuntimeSession = struct {
+    metrics_state: *ListenerMetricsState,
     client_fd: posix.fd_t,
     upstream_fd: posix.fd_t,
     upstream_connected: bool,
@@ -1846,6 +2027,7 @@ const TcpRuntimeSession = struct {
 };
 
 const PendingAcceptedTcpSession = struct {
+    metrics_state: *ListenerMetricsState,
     client_fd: posix.fd_t,
     host: []u8,
     port: u16,
@@ -1955,6 +2137,7 @@ fn deinitTcpSessionWorker(allocator: std.mem.Allocator, worker: *TcpSessionWorke
         const pending = worker.pending_accepts.pop() orelse break;
         closeIgnoreBadFd(pending.client_fd);
         allocator.free(pending.host);
+        pending.metrics_state.release();
     }
     worker.pending_accepts.deinit(allocator);
     worker.pending_sessions.deinit(allocator);
@@ -2087,6 +2270,7 @@ fn handleTcpAccept(manager: *RuntimeManager, entry: *ListenerEntry, listen_fd: p
             .force_copy = manager.force_tcp_copy_fallback,
             .splice_test_mode = manager.tcp_splice_test_mode,
             .metrics = manager.metrics,
+            .metrics_state = entry.metrics_state.retain(),
             .upstream_fd = null,
             .thread = null,
             .mutex = .{},
@@ -2096,6 +2280,7 @@ fn handleTcpAccept(manager: *RuntimeManager, entry: *ListenerEntry, listen_fd: p
         manager.tcp_sessions.append(manager.allocator, ctx) catch {
             manager.tcp_sessions_mutex.unlock();
             allocator.free(ctx.host);
+            ctx.metrics_state.release();
             allocator.destroy(ctx);
             compat.close(conn_fd);
             continue;
@@ -2112,6 +2297,7 @@ fn handleTcpAccept(manager: *RuntimeManager, entry: *ListenerEntry, listen_fd: p
             }
             manager.tcp_sessions_mutex.unlock();
             allocator.free(ctx.host);
+            ctx.metrics_state.release();
             allocator.destroy(ctx);
             compat.close(conn_fd);
             continue;
@@ -2143,7 +2329,10 @@ fn startTcpRuntimeSession(manager: *RuntimeManager, entry: *ListenerEntry, clien
 
     const session = try manager.allocator.create(TcpRuntimeSession);
     errdefer manager.allocator.destroy(session);
+    const metrics_state = entry.metrics_state.retain();
+    errdefer metrics_state.release();
     session.* = .{
+        .metrics_state = metrics_state,
         .client_fd = client_fd,
         .upstream_fd = upstream_fd,
         .upstream_connected = upstream_connected,
@@ -2157,6 +2346,7 @@ fn startTcpRuntimeSession(manager: *RuntimeManager, entry: *ListenerEntry, clien
         try dispatchTcpRuntimeSessionToWorker(manager, session);
         manager.metrics.tcp_session_create_total.inc();
         manager.metrics.tcp_active_sessions.inc();
+        session.metrics_state.incTcpActive();
         return;
     }
 
@@ -2175,6 +2365,7 @@ fn startTcpRuntimeSession(manager: *RuntimeManager, entry: *ListenerEntry, clien
     updateTcpRuntimeSessionInterest(manager.epoll_fd, session);
     manager.metrics.tcp_session_create_total.inc();
     manager.metrics.tcp_active_sessions.inc();
+    session.metrics_state.incTcpActive();
 }
 
 fn finishTcpRuntimeConnect(session: *TcpRuntimeSession) !void {
@@ -2184,15 +2375,15 @@ fn finishTcpRuntimeConnect(session: *TcpRuntimeSession) !void {
 
 fn driveTcpRuntimeSession(session: *TcpRuntimeSession) void {
     if (!session.client_read_closed and session.client_to_upstream.writableLen() > 0) {
-        fillTcpRuntimeBuffer(session.client_fd, &session.client_to_upstream, &session.client_read_closed);
+        fillTcpRuntimeBuffer(session.client_fd, &session.client_to_upstream, &session.client_read_closed, session.metrics_state, .rx);
     }
     if (!session.upstream_connected) return;
     if (!session.upstream_read_closed and session.upstream_to_client.writableLen() > 0) {
-        fillTcpRuntimeBuffer(session.upstream_fd, &session.upstream_to_client, &session.upstream_read_closed);
+        fillTcpRuntimeBuffer(session.upstream_fd, &session.upstream_to_client, &session.upstream_read_closed, session.metrics_state, .none);
     }
 
-    flushTcpRuntimeBuffer(session.upstream_fd, &session.client_to_upstream, &session.upstream_read_closed);
-    flushTcpRuntimeBuffer(session.client_fd, &session.upstream_to_client, &session.client_read_closed);
+    flushTcpRuntimeBuffer(session.upstream_fd, &session.client_to_upstream, &session.upstream_read_closed, session.metrics_state, .none);
+    flushTcpRuntimeBuffer(session.client_fd, &session.upstream_to_client, &session.client_read_closed, session.metrics_state, .tx);
 
     if (session.client_read_closed and session.client_to_upstream.readableLen() == 0 and !session.upstream_shutdown_sent) {
         shutdownIgnore(session.upstream_fd, .send);
@@ -2210,7 +2401,17 @@ fn shouldCloseTcpRuntimeSession(session: *const TcpRuntimeSession) bool {
         session.upstream_to_client.readableLen() == 0;
 }
 
-fn fillTcpRuntimeBuffer(fd: posix.fd_t, buffer: *TcpRuntimeBuffer, read_closed: *bool) void {
+const TcpByteDirection = enum { none, rx, tx };
+
+fn recordTcpBytes(metrics_state: *ListenerMetricsState, direction: TcpByteDirection, amount: usize) void {
+    switch (direction) {
+        .none => {},
+        .rx => metrics_state.addTcpRx(amount),
+        .tx => metrics_state.addTcpTx(amount),
+    }
+}
+
+fn fillTcpRuntimeBuffer(fd: posix.fd_t, buffer: *TcpRuntimeBuffer, read_closed: *bool, metrics_state: *ListenerMetricsState, direction: TcpByteDirection) void {
     while (!read_closed.* and buffer.writableLen() > 0) {
         const amt = compat.read(fd, buffer.writableSlice()) catch |err| switch (err) {
             error.WouldBlock => return,
@@ -2228,11 +2429,12 @@ fn fillTcpRuntimeBuffer(fd: posix.fd_t, buffer: *TcpRuntimeBuffer, read_closed: 
             return;
         }
         buffer.appendWritten(amt);
+        recordTcpBytes(metrics_state, direction, amt);
         if (amt == 0) return;
     }
 }
 
-fn flushTcpRuntimeBuffer(fd: posix.fd_t, buffer: *TcpRuntimeBuffer, peer_read_closed: *bool) void {
+fn flushTcpRuntimeBuffer(fd: posix.fd_t, buffer: *TcpRuntimeBuffer, peer_read_closed: *bool, metrics_state: *ListenerMetricsState, direction: TcpByteDirection) void {
     while (buffer.readableLen() > 0) {
         const written = compat.write(fd, buffer.readableSlice()) catch |err| switch (err) {
             error.WouldBlock => return,
@@ -2248,6 +2450,7 @@ fn flushTcpRuntimeBuffer(fd: posix.fd_t, buffer: *TcpRuntimeBuffer, peer_read_cl
             },
         };
         if (written == 0) return;
+        recordTcpBytes(metrics_state, direction, written);
         buffer.consume(written);
     }
 }
@@ -2262,6 +2465,7 @@ const TcpSessionCtx = struct {
     force_copy: bool,
     splice_test_mode: TcpSpliceTestMode,
     metrics: *Metrics,
+    metrics_state: *ListenerMetricsState,
     upstream_fd: ?posix.fd_t,
     thread: ?std.Thread,
     mutex: compat.Mutex,
@@ -2281,26 +2485,34 @@ fn tcpSessionThread(ctx: *TcpSessionCtx) void {
     const upstream = net.tcpConnectToAddress(addr) catch return;
     const upstream_fd = upstream.handle;
     ctx.upstream_fd = upstream_fd;
+    ctx.metrics.tcp_session_create_total.inc();
+    ctx.metrics.tcp_active_sessions.inc();
+    ctx.metrics_state.incTcpActive();
+    defer {
+        ctx.metrics.tcp_active_sessions.dec();
+        ctx.metrics_state.decTcpActive();
+        ctx.metrics.tcp_session_close_total.inc();
+    }
     if (ctx.force_copy) {
         recordTcpFallback(ctx.metrics, .forced);
-        runTcpCopy(ctx.client_fd, upstream_fd);
+        runTcpCopy(ctx.client_fd, upstream_fd, ctx.metrics_state);
         return;
     }
     if (ctx.session_mode == .copy) {
         ctx.metrics.tcp_copy_fallback_total.inc();
-        runTcpCopy(ctx.client_fd, upstream_fd);
+        runTcpCopy(ctx.client_fd, upstream_fd, ctx.metrics_state);
         return;
     }
 
     ctx.metrics.tcp_splice_attempt_total.inc();
-    switch (runTcpSplice(ctx.client_fd, upstream_fd, ctx.splice_test_mode)) {
+    switch (runTcpSplice(ctx.client_fd, upstream_fd, ctx.splice_test_mode, ctx.metrics_state)) {
         .success => {
             ctx.metrics.tcp_splice_success_total.inc();
             ctx.metrics.tcp_splice_fast_path_total.inc();
         },
         .fallback => |reason| {
             recordTcpFallback(ctx.metrics, reason);
-            runTcpCopy(ctx.client_fd, upstream_fd);
+            runTcpCopy(ctx.client_fd, upstream_fd, ctx.metrics_state);
         },
         .hard_failure => {
             ctx.metrics.tcp_splice_hard_failure_total.inc();
@@ -2318,15 +2530,17 @@ fn recordTcpFallback(metrics: *Metrics, reason: TcpSpliceFallbackReason) void {
     }
 }
 
-fn runTcpCopy(client_fd: posix.fd_t, upstream_fd: posix.fd_t) void {
+fn runTcpCopy(client_fd: posix.fd_t, upstream_fd: posix.fd_t, metrics_state: *ListenerMetricsState) void {
     const CopyCtx = struct {
         src: posix.fd_t,
         dst: posix.fd_t,
         how: compat.ShutdownHow,
+        metrics_state: *ListenerMetricsState,
+        direction: TcpByteDirection,
     };
-    var reverse = CopyCtx{ .src = upstream_fd, .dst = client_fd, .how = .send };
+    var reverse = CopyCtx{ .src = upstream_fd, .dst = client_fd, .how = .send, .metrics_state = metrics_state, .direction = .tx };
     const thread = std.Thread.spawn(.{}, copyPumpThread, .{&reverse}) catch return;
-    var forward = CopyCtx{ .src = client_fd, .dst = upstream_fd, .how = .send };
+    var forward = CopyCtx{ .src = client_fd, .dst = upstream_fd, .how = .send, .metrics_state = metrics_state, .direction = .rx };
     copyPumpThread(&forward);
     thread.join();
 }
@@ -2340,6 +2554,7 @@ fn copyPumpThread(ctx: anytype) void {
         while (offset < amt) {
             const written = compat.write(ctx.dst, buffer[offset..amt]) catch break;
             offset += written;
+            recordTcpBytes(ctx.metrics_state, ctx.direction, written);
         }
     }
     shutdownIgnore(ctx.dst, ctx.how);
@@ -2347,7 +2562,7 @@ fn copyPumpThread(ctx: anytype) void {
 
 extern "c" fn splice(fd_in: c_int, off_in: ?*i64, fd_out: c_int, off_out: ?*i64, len: usize, flags: c_uint) isize;
 
-fn runTcpSplice(client_fd: posix.fd_t, upstream_fd: posix.fd_t, test_mode: TcpSpliceTestMode) TcpSpliceOutcome {
+fn runTcpSplice(client_fd: posix.fd_t, upstream_fd: posix.fd_t, test_mode: TcpSpliceTestMode, metrics_state: *ListenerMetricsState) TcpSpliceOutcome {
     if (test_mode == .recoverable_setup_failure) return .{ .fallback = .unsupported };
     if (test_mode == .hard_failure) return .hard_failure;
 
@@ -2370,10 +2585,12 @@ fn runTcpSplice(client_fd: posix.fd_t, upstream_fd: posix.fd_t, test_mode: TcpSp
         pipe_r: posix.fd_t,
         pipe_w: posix.fd_t,
         result: SplicePumpResult = .success,
+        metrics_state: *ListenerMetricsState,
+        direction: TcpByteDirection,
     };
-    var reverse = SpliceCtx{ .src = upstream_fd, .dst = client_fd, .pipe_r = reverse_pipe[0], .pipe_w = reverse_pipe[1] };
+    var reverse = SpliceCtx{ .src = upstream_fd, .dst = client_fd, .pipe_r = reverse_pipe[0], .pipe_w = reverse_pipe[1], .metrics_state = metrics_state, .direction = .tx };
     const thread = std.Thread.spawn(.{}, splicePumpThread, .{&reverse}) catch return .{ .fallback = .unsupported };
-    var forward = SpliceCtx{ .src = client_fd, .dst = upstream_fd, .pipe_r = forward_pipe[0], .pipe_w = forward_pipe[1] };
+    var forward = SpliceCtx{ .src = client_fd, .dst = upstream_fd, .pipe_r = forward_pipe[0], .pipe_w = forward_pipe[1], .metrics_state = metrics_state, .direction = .rx };
     splicePumpThread(&forward);
     thread.join();
 
@@ -2381,10 +2598,10 @@ fn runTcpSplice(client_fd: posix.fd_t, upstream_fd: posix.fd_t, test_mode: TcpSp
 }
 
 fn splicePumpThread(ctx: anytype) void {
-    ctx.result = splicePump(ctx.src, ctx.dst, ctx.pipe_r, ctx.pipe_w);
+    ctx.result = splicePump(ctx.src, ctx.dst, ctx.pipe_r, ctx.pipe_w, ctx.metrics_state, ctx.direction);
 }
 
-fn splicePump(src: posix.fd_t, dst: posix.fd_t, pipe_r: posix.fd_t, pipe_w: posix.fd_t) SplicePumpResult {
+fn splicePump(src: posix.fd_t, dst: posix.fd_t, pipe_r: posix.fd_t, pipe_w: posix.fd_t, metrics_state: *ListenerMetricsState, direction: TcpByteDirection) SplicePumpResult {
     while (true) {
         const moved = splice(src, null, pipe_w, null, 64 * 1024, 0);
         if (moved == 0) break;
@@ -2394,6 +2611,7 @@ fn splicePump(src: posix.fd_t, dst: posix.fd_t, pipe_r: posix.fd_t, pipe_w: posi
             const sent = splice(pipe_r, null, dst, null, remaining, 0);
             if (sent == 0) return .runtime_error;
             if (sent < 0) return classifySpliceErrno();
+            recordTcpBytes(metrics_state, direction, @intCast(sent));
             remaining -= @intCast(sent);
         }
         if (remaining > 0) return .runtime_error;
@@ -2423,6 +2641,7 @@ fn processUdpSegmentsSameClient(allocator: std.mem.Allocator, metrics: *Metrics,
     const packet_count: usize = buffer.len / packet_size;
     metrics.udp_packets_in_total.add(packet_count);
     metrics.udp_bytes_in_total.add(buffer.len);
+    entry.metrics_state.addUdpRx(buffer.len);
     if (packet_count > 1) {
         metrics.udp_batch_calls_total.inc();
         metrics.udp_batch_messages_total.add(packet_count);
@@ -2536,6 +2755,7 @@ fn handleUdpReadable(allocator: std.mem.Allocator, metrics: *Metrics, entry: *Li
             const amt = msgvec[idx].len;
             metrics.udp_packets_in_total.inc();
             metrics.udp_bytes_in_total.add(amt);
+            entry.metrics_state.addUdpRx(amt);
             lengths[idx] = amt;
 
             if (entry.status != .active or entry.effective_host == null or entry.effective_target_port == null) {
@@ -2627,7 +2847,10 @@ fn getOrCreateUdpSession(allocator: std.mem.Allocator, metrics: *Metrics, entry:
         return null;
     };
     errdefer allocator.destroy(session);
+    const metrics_state = entry.metrics_state.retain();
+    errdefer metrics_state.release();
     session.* = .{
+        .metrics_state = metrics_state,
         .key = key,
         .client_addr = addr,
         .client_addr_len = addr.getOsSockLen(),
@@ -2640,26 +2863,32 @@ fn getOrCreateUdpSession(allocator: std.mem.Allocator, metrics: *Metrics, entry:
     };
     entry.udp_sessions.put(key, session) catch {
         compat.close(upstream_fd);
+        session.metrics_state.release();
         allocator.destroy(session);
         metrics.udp_drop_total.inc();
         return null;
     };
     metrics.udp_session_create_total.inc();
     metrics.udp_active_sessions.inc();
+    session.metrics_state.incUdpActive();
     var event = std.os.linux.epoll_event{ .events = std.os.linux.EPOLL.IN, .data = .{ .fd = upstream_fd } };
     compat.epoll_ctl(entry.manager.epoll_fd, std.os.linux.EPOLL.CTL_ADD, upstream_fd, &event) catch {
         _ = entry.udp_sessions.remove(key);
         compat.close(upstream_fd);
-        allocator.destroy(session);
         metrics.udp_active_sessions.dec();
+        session.metrics_state.decUdpActive();
+        session.metrics_state.release();
+        allocator.destroy(session);
         return null;
     };
     entry.manager.udp_reply_fds.put(upstream_fd, .{ .entry = entry, .key = key }) catch {
         compat.epoll_ctl(entry.manager.epoll_fd, std.os.linux.EPOLL.CTL_DEL, upstream_fd, &event) catch {};
         _ = entry.udp_sessions.remove(key);
         compat.close(upstream_fd);
-        allocator.destroy(session);
         metrics.udp_active_sessions.dec();
+        session.metrics_state.decUdpActive();
+        session.metrics_state.release();
+        allocator.destroy(session);
         return null;
     };
     entry.udp_cached_key = key;
@@ -2866,7 +3095,7 @@ fn handleUdpReplyReadable(metrics: *Metrics, entry: *ListenerEntry, key: ClientK
             removeUdpSessionLocked(entry, key, session, false);
             break;
         }
-        _ = compat.sendto(udpListenerFd(entry) orelse break, buffer[0..amt], 0, &session.client_addr.any, session.client_addr_len) catch {
+        const sent = compat.sendto(udpListenerFd(entry) orelse break, buffer[0..amt], 0, &session.client_addr.any, session.client_addr_len) catch {
             metrics.udp_send_errors_total.inc();
             metrics.udp_reply_drop_total.inc();
             removeUdpSessionLocked(entry, key, session, false);
@@ -2874,7 +3103,8 @@ fn handleUdpReplyReadable(metrics: *Metrics, entry: *ListenerEntry, key: ClientK
         };
         metrics.udp_reply_primary_total.inc();
         metrics.udp_packets_out_total.inc();
-        metrics.udp_bytes_out_total.add(@intCast(amt));
+        metrics.udp_bytes_out_total.add(@intCast(sent));
+        session.metrics_state.addUdpTx(sent);
         session.last_seen_ms.store(compat.milliTimestamp(), .monotonic);
     }
 }
@@ -2894,6 +3124,8 @@ fn removeUdpSessionLocked(entry: *ListenerEntry, key: ClientKey, session: *UdpSe
     closeIgnoreBadFd(session.upstream_fd);
     if (count_as_reply_drop) entry.manager.metrics.udp_reply_drop_total.inc();
     entry.manager.metrics.udp_active_sessions.dec();
+    session.metrics_state.decUdpActive();
+    session.metrics_state.release();
     entry.allocator.destroy(session);
 }
 
@@ -3032,6 +3264,7 @@ fn handleUdpIoUringCompletion(manager: *RuntimeManager, buffer_group: *std.os.li
 
     manager.metrics.udp_packets_in_total.inc();
     manager.metrics.udp_bytes_in_total.add(payload.len);
+    entry.metrics_state.addUdpRx(payload.len);
 
     if (entry.status != .active or entry.effective_host == null or entry.effective_target_port == null) {
         manager.metrics.rejected_no_host_total.inc();
