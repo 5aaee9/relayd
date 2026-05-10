@@ -31,7 +31,7 @@ RUN arch="${TARGETARCH}" \
 
 WORKDIR /src
 COPY . .
-RUN python3 .forgejo/scripts/fetch-sqlite3.py
+RUN python3 scripts/ci/fetch-sqlite3.py
 RUN nofile_limit="$(ulimit -Hn)" \
     && if [ "$nofile_limit" = "unlimited" ] || [ "$nofile_limit" -gt 10000 ]; then nofile_limit=10000; fi \
     && ulimit -n "$nofile_limit" \

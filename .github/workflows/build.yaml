@@ -1,10 +1,14 @@
-name: build
+name: build bianry
 
 env:
   ZIG_VERSION: 0.16.0
   SQLITE_AMALGAMATION_YEAR: 2026
   SQLITE_AMALGAMATION_VERSION: 3530100
   SQLITE_AMALGAMATION_SHA3: 3c07136e4f6b5dd0c395be86455014039597bc65b6851f7111e88f71b6e06114
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 on:
   push:
@@ -29,18 +33,18 @@ jobs:
             target_args: -Dtarget=aarch64-linux-musl
     steps:
       - name: Checkout
-        uses: https://data.forgejo.org/actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install dependencies
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends ca-certificates python3
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ca-certificates python3
 
       - name: Download SQLite amalgamation
-        run: python3 .forgejo/scripts/fetch-sqlite3.py
+        run: python3 scripts/ci/fetch-sqlite3.py
 
       - name: Setup Zig
-        uses: https://codeberg.org/mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
 
@@ -51,7 +55,7 @@ jobs:
         run: zig build -Doptimize=ReleaseFast ${{ matrix.target_args }}
 
       - name: Upload binary
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: zig-out/bin/relayd
