@@ -2216,6 +2216,8 @@ const SplicePumpResult = enum {
     runtime_error,
 };
 
+const tcp_copy_max_sessions: usize = 1024;
+
 fn handleTcpAccept(manager: *RuntimeManager, entry: *ListenerEntry, listen_fd: posix.fd_t) void {
     const use_runtime_session_model = manager.tcp_session_model_enabled and !manager.tcp_splice_enabled;
     const use_workerized_session_model = use_runtime_session_model and manager.tcp_session_model_workers > 1 and !manager.tcp_session_model_sharded_accept and !manager.tcp_session_model_accept_balanced;
@@ -2248,6 +2250,15 @@ fn handleTcpAccept(manager: *RuntimeManager, entry: *ListenerEntry, listen_fd: p
             startTcpRuntimeSession(manager, entry, conn_fd, use_workerized_session_model) catch {
                 closeIgnoreBadFd(conn_fd);
             };
+            continue;
+        }
+
+        manager.tcp_sessions_mutex.lock();
+        const tcp_copy_sessions_at_capacity = manager.tcp_sessions.items.len >= tcp_copy_max_sessions;
+        manager.tcp_sessions_mutex.unlock();
+        if (tcp_copy_sessions_at_capacity) {
+            manager.metrics.rejected_no_host_total.inc();
+            compat.close(conn_fd);
             continue;
         }
 
