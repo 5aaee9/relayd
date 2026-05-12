@@ -42,6 +42,7 @@ pub const App = struct {
             .tcp_session_model_workers = config.tcp_session_model_workers,
             .tcp_session_model_accept_balanced = config.tcp_session_model_accept_balanced,
             .tcp_session_model_sharded_accept = config.tcp_session_model_sharded_accept,
+            .tcp_session_model_max_active = config.tcp_session_model_max_active,
             .tcp_splice_enabled = config.tcp_splice_enabled,
             .force_tcp_copy_fallback = config.force_tcp_copy_fallback,
             .udp_session_workers = config.udp_session_workers,
