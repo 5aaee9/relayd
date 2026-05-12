@@ -438,6 +438,7 @@ pub const RuntimeManager = struct {
 
         if (!model.isHostConfigured(entry.desired_host) or entry.desired_target_port == null) {
             closeUdpSessions(self.allocator, entry);
+            self.closeTcpSessionsForAllocation(entry.id);
             replaceOptionalString(self.allocator, &entry.effective_host, null) catch {};
             entry.effective_target_port = null;
             entry.status = .rejecting_no_host;
@@ -714,6 +715,7 @@ pub const RuntimeManager = struct {
             }
             if (ctx.thread) |thread| thread.join();
             self.allocator.free(ctx.host);
+            self.allocator.free(ctx.allocation_id);
             ctx.metrics_state.release();
             self.allocator.destroy(ctx);
             _ = self.tcp_sessions.swapRemove(idx);
@@ -738,8 +740,34 @@ pub const RuntimeManager = struct {
             }
             if (ctx.thread) |thread| thread.join();
             self.allocator.free(ctx.host);
+            self.allocator.free(ctx.allocation_id);
             ctx.metrics_state.release();
             self.allocator.destroy(ctx);
+        }
+    }
+
+    fn closeTcpSessionsForAllocation(self: *RuntimeManager, allocation_id: []const u8) void {
+        self.tcp_sessions_mutex.lock();
+        defer self.tcp_sessions_mutex.unlock();
+        var idx: usize = 0;
+        while (idx < self.tcp_sessions.items.len) {
+            const ctx = self.tcp_sessions.items[idx];
+            if (!std.mem.eql(u8, ctx.allocation_id, allocation_id)) {
+                idx += 1;
+                continue;
+            }
+            shutdownIgnoreBadFd(ctx.client_fd);
+            closeIgnoreBadFd(ctx.client_fd);
+            if (ctx.upstream_fd) |fd| {
+                shutdownIgnoreBadFd(fd);
+                closeIgnoreBadFd(fd);
+            }
+            if (ctx.thread) |thread| thread.join();
+            self.allocator.free(ctx.host);
+            self.allocator.free(ctx.allocation_id);
+            ctx.metrics_state.release();
+            self.allocator.destroy(ctx);
+            _ = self.tcp_sessions.swapRemove(idx);
         }
     }
 
@@ -1002,6 +1030,7 @@ pub const RuntimeManager = struct {
         session.metrics_state.decTcpActive();
         self.metrics.tcp_session_close_total.inc();
         session.metrics_state.release();
+        self.allocator.free(session.allocation_id);
         self.allocator.destroy(session);
     }
 
@@ -1198,6 +1227,7 @@ fn attachPendingTcpRuntimeSessions(worker: *TcpSessionWorker) void {
             session.metrics_state.decTcpActive();
             worker.metrics.tcp_session_close_total.inc();
             session.metrics_state.release();
+            worker.allocator.free(session.allocation_id);
             worker.allocator.destroy(session);
             continue;
         };
@@ -1209,6 +1239,7 @@ fn attachPendingTcpRuntimeSessions(worker: *TcpSessionWorker) void {
             session.metrics_state.decTcpActive();
             worker.metrics.tcp_session_close_total.inc();
             session.metrics_state.release();
+            worker.allocator.free(session.allocation_id);
             worker.allocator.destroy(session);
             continue;
         };
@@ -1221,6 +1252,7 @@ fn attachPendingTcpRuntimeSessions(worker: *TcpSessionWorker) void {
             session.metrics_state.decTcpActive();
             worker.metrics.tcp_session_close_total.inc();
             session.metrics_state.release();
+            worker.allocator.free(session.allocation_id);
             worker.allocator.destroy(session);
             continue;
         };
@@ -1256,6 +1288,7 @@ fn removeTcpRuntimeSessionFromWorker(worker: *TcpSessionWorker, session: *TcpRun
     session.metrics_state.decTcpActive();
     worker.metrics.tcp_session_close_total.inc();
     session.metrics_state.release();
+    worker.allocator.free(session.allocation_id);
     worker.allocator.destroy(session);
 }
 
@@ -1270,6 +1303,7 @@ fn shutdownTcpRuntimeSessionsInWorker(worker: *TcpSessionWorker) void {
         session.metrics_state.decTcpActive();
         worker.metrics.tcp_session_close_total.inc();
         session.metrics_state.release();
+        worker.allocator.free(session.allocation_id);
         worker.allocator.destroy(session);
     }
     while (worker.pending_sessions.items.len > 0) {
@@ -1280,6 +1314,7 @@ fn shutdownTcpRuntimeSessionsInWorker(worker: *TcpSessionWorker) void {
         session.metrics_state.decTcpActive();
         worker.metrics.tcp_session_close_total.inc();
         session.metrics_state.release();
+        worker.allocator.free(session.allocation_id);
         worker.allocator.destroy(session);
     }
 }
@@ -1345,6 +1380,7 @@ fn startTcpRuntimeSessionOnWorker(worker: *TcpSessionWorker, entry: *ListenerEnt
     const metrics_state = entry.metrics_state.retain();
     errdefer metrics_state.release();
     session.* = .{
+        .allocation_id = try manager.allocator.dupe(u8, entry.id),
         .metrics_state = metrics_state,
         .client_fd = client_fd,
         .upstream_fd = upstream_fd,
@@ -2014,6 +2050,7 @@ const TcpRuntimeBuffer = struct {
 };
 
 const TcpRuntimeSession = struct {
+    allocation_id: []u8,
     metrics_state: *ListenerMetricsState,
     client_fd: posix.fd_t,
     upstream_fd: posix.fd_t,
@@ -2265,6 +2302,12 @@ fn handleTcpAccept(manager: *RuntimeManager, entry: *ListenerEntry, listen_fd: p
                 allocator.destroy(ctx);
                 continue;
             },
+            .allocation_id = allocator.dupe(u8, entry.id) catch {
+                compat.close(conn_fd);
+                allocator.free(ctx.host);
+                allocator.destroy(ctx);
+                continue;
+            },
             .port = entry.effective_target_port.?,
             .session_mode = if (manager.tcp_splice_enabled and !manager.force_tcp_copy_fallback) .splice else .copy,
             .force_copy = manager.force_tcp_copy_fallback,
@@ -2280,6 +2323,7 @@ fn handleTcpAccept(manager: *RuntimeManager, entry: *ListenerEntry, listen_fd: p
         manager.tcp_sessions.append(manager.allocator, ctx) catch {
             manager.tcp_sessions_mutex.unlock();
             allocator.free(ctx.host);
+            allocator.free(ctx.allocation_id);
             ctx.metrics_state.release();
             allocator.destroy(ctx);
             compat.close(conn_fd);
@@ -2297,6 +2341,7 @@ fn handleTcpAccept(manager: *RuntimeManager, entry: *ListenerEntry, listen_fd: p
             }
             manager.tcp_sessions_mutex.unlock();
             allocator.free(ctx.host);
+            allocator.free(ctx.allocation_id);
             ctx.metrics_state.release();
             allocator.destroy(ctx);
             compat.close(conn_fd);
@@ -2460,6 +2505,7 @@ const TcpSessionCtx = struct {
     manager: ?*RuntimeManager,
     client_fd: posix.fd_t,
     host: []u8,
+    allocation_id: []u8,
     port: u16,
     session_mode: TcpSessionMode,
     force_copy: bool,
