@@ -97,6 +97,7 @@ pub const Options = struct {
     tcp_session_model_workers: u32 = 0,
     tcp_session_model_accept_balanced: bool = false,
     tcp_session_model_sharded_accept: bool = false,
+    tcp_session_model_max_active: u32 = 256,
     tcp_splice_enabled: bool = false,
     force_tcp_copy_fallback: bool = false,
     tcp_splice_test_mode: TcpSpliceTestMode = .off,
@@ -127,6 +128,7 @@ pub const RuntimeManager = struct {
     tcp_session_model_workers: u32,
     tcp_session_model_accept_balanced: bool,
     tcp_session_model_sharded_accept: bool,
+    tcp_session_model_max_active: u32,
     tcp_splice_enabled: bool,
     force_tcp_copy_fallback: bool,
     tcp_splice_test_mode: TcpSpliceTestMode,
@@ -196,6 +198,7 @@ pub const RuntimeManager = struct {
             .tcp_session_model_workers = tcp_worker_count,
             .tcp_session_model_accept_balanced = options.tcp_session_model_accept_balanced,
             .tcp_session_model_sharded_accept = options.tcp_session_model_sharded_accept,
+            .tcp_session_model_max_active = options.tcp_session_model_max_active,
             .tcp_splice_enabled = options.tcp_splice_enabled,
             .force_tcp_copy_fallback = options.force_tcp_copy_fallback,
             .tcp_splice_test_mode = options.tcp_splice_test_mode,
@@ -472,6 +475,11 @@ pub const RuntimeManager = struct {
 
     fn useShardedUdpListeners(self: *RuntimeManager, entry: *const ListenerEntry) bool {
         return entry.protocol == .udp and self.udp_session_workers.len > 0;
+    }
+
+    fn tcpSessionModelAtCapacity(self: *RuntimeManager) bool {
+        if (self.tcp_session_model_max_active == 0) return false;
+        return self.metrics.tcp_active_sessions.load() >= self.tcp_session_model_max_active;
     }
 
     pub fn delete(self: *RuntimeManager, id: []const u8, timeout_ms: u32) !void {
@@ -1304,6 +1312,11 @@ fn handleTcpWorkerAccept(worker: *TcpSessionWorker, entry: *ListenerEntry, liste
         if (entry.status != .active or entry.effective_host == null or entry.effective_target_port == null) {
             entry.mutex.unlock();
             worker.metrics.rejected_no_host_total.inc();
+            closeIgnoreBadFd(conn_fd);
+            continue;
+        }
+        if (entry.manager.tcpSessionModelAtCapacity()) {
+            entry.mutex.unlock();
             closeIgnoreBadFd(conn_fd);
             continue;
         }
@@ -2238,6 +2251,10 @@ fn handleTcpAccept(manager: *RuntimeManager, entry: *ListenerEntry, listen_fd: p
         }
 
         if (use_accept_balanced_session_model) {
+            if (manager.tcpSessionModelAtCapacity()) {
+                closeIgnoreBadFd(conn_fd);
+                continue;
+            }
             dispatchAcceptedTcpSessionToWorker(manager, entry, conn_fd) catch {
                 closeIgnoreBadFd(conn_fd);
             };
@@ -2245,6 +2262,10 @@ fn handleTcpAccept(manager: *RuntimeManager, entry: *ListenerEntry, listen_fd: p
         }
 
         if (use_runtime_session_model) {
+            if (manager.tcpSessionModelAtCapacity()) {
+                closeIgnoreBadFd(conn_fd);
+                continue;
+            }
             startTcpRuntimeSession(manager, entry, conn_fd, use_workerized_session_model) catch {
                 closeIgnoreBadFd(conn_fd);
             };

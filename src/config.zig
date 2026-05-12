@@ -24,6 +24,7 @@ pub const Config = struct {
     tcp_session_model_workers: u32,
     tcp_session_model_accept_balanced: bool,
     tcp_session_model_sharded_accept: bool,
+    tcp_session_model_max_active: u32,
     tcp_splice_enabled: bool,
     force_tcp_copy_fallback: bool,
     udp_session_workers: u32,
@@ -57,6 +58,7 @@ pub const Config = struct {
         }
 
         const tcp_session_model_workers = try envU32("TCP_SESSION_MODEL_WORKERS", 0);
+        const tcp_session_model_max_active = try envU32("TCP_SESSION_MODEL_MAX_ACTIVE", 256);
         const udp_session_workers = try envU32("UDP_SESSION_WORKERS", 0);
         const udp_fast_path_segment_size = try envU32("UDP_FAST_PATH_SEGMENT_SIZE", 1472);
         const udp_fast_path_gso_burst = try envU32("UDP_FAST_PATH_GSO_BURST", 16);
@@ -77,6 +79,7 @@ pub const Config = struct {
             .tcp_session_model_workers = tcp_session_model_workers,
             .tcp_session_model_accept_balanced = envBool("TCP_SESSION_MODEL_ACCEPT_BALANCED"),
             .tcp_session_model_sharded_accept = envBool("TCP_SESSION_MODEL_SHARDED_ACCEPT"),
+            .tcp_session_model_max_active = tcp_session_model_max_active,
             .tcp_splice_enabled = envBool("TCP_SPLICE_ENABLED"),
             .force_tcp_copy_fallback = envBool("FORCE_TCP_COPY_FALLBACK"),
             .udp_session_workers = udp_session_workers,
