@@ -612,12 +612,12 @@ pub const RuntimeManager = struct {
                         self.registry_mutex.unlock();
                         self.drainUdpIoUringCompletions();
                     } else if (self.udp_io_uring_enabled and self.udp_session_workers.len == 0) {
-                        defer self.registry_mutex.unlock();
+                        self.registry_mutex.unlock();
                         defer entry.mutex.unlock();
                         self.metrics.udp_io_uring_fallback_total.inc();
                         handleUdpReadable(self.allocator, self.metrics, entry, fd);
                     } else {
-                        defer self.registry_mutex.unlock();
+                        self.registry_mutex.unlock();
                         defer entry.mutex.unlock();
                         handleUdpReadable(self.allocator, self.metrics, entry, fd);
                     }
@@ -629,7 +629,7 @@ pub const RuntimeManager = struct {
         if (self.udp_reply_fds.get(fd)) |dispatch| {
             const entry = dispatch.entry;
             entry.mutex.lock();
-            defer self.registry_mutex.unlock();
+            self.registry_mutex.unlock();
             defer entry.mutex.unlock();
             handleUdpReplyReadable(self.metrics, entry, dispatch.key);
             return;
