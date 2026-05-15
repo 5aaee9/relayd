@@ -42,7 +42,7 @@ IPERF_KEEP_RUN_DIR="${IPERF_KEEP_RUN_DIR:-0}"
 IPERF_SERVER_READY_TIMEOUT_SEC="${IPERF_SERVER_READY_TIMEOUT_SEC:-5}"
 READINESS_TIMEOUT_SEC="${READINESS_TIMEOUT_SEC:-30}"
 ACTIVE_TIMEOUT_SEC="${ACTIVE_TIMEOUT_SEC:-30}"
-RELAYD_BIN="zig-out/bin/relayd"
+RELAYD_BIN="${RELAYD_BIN:-zig-out/bin/relayd}"
 IPERF3_BIN="${IPERF3_BIN:-iperf3}"
 if [[ "$IPERF3_BIN" == "iperf3" ]] && ! command -v iperf3 >/dev/null 2>&1 && [[ -x ".zig-cache/tools/iperf-3.20/build/bin/iperf3" ]]; then
   IPERF3_BIN=".zig-cache/tools/iperf-3.20/build/bin/iperf3"

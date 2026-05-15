@@ -1,10 +1,7 @@
-name: build bianry
+name: build binary
 
 env:
-  ZIG_VERSION: 0.16.0
-  SQLITE_AMALGAMATION_YEAR: 2026
-  SQLITE_AMALGAMATION_VERSION: 3530100
-  SQLITE_AMALGAMATION_SHA3: 3c07136e4f6b5dd0c395be86455014039597bc65b6851f7111e88f71b6e06114
+  RUST_VERSION: 1.95
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -19,43 +16,25 @@ on:
 
 jobs:
   compile:
-    name: compile-${{ matrix.arch }}
+    name: compile-x86_64-unknown-linux-gnu
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            artifact: relayd-amd64-linux-musl
-            target_args: -Dtarget=x86_64-linux-musl
-          - arch: aarch64
-            artifact: relayd-aarch64-linux-musl
-            target_args: -Dtarget=aarch64-linux-musl
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ca-certificates python3
-
-      - name: Download SQLite amalgamation
-        run: python3 scripts/ci/fetch-sqlite3.py
-
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          version: ${{ env.ZIG_VERSION }}
+          toolchain: ${{ env.RUST_VERSION }}
 
-      - name: Verify Zig version
-        run: test "$(zig version)" = "$ZIG_VERSION"
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
 
-      - name: Compile ${{ matrix.arch }} binary
-        run: zig build -Doptimize=ReleaseFast ${{ matrix.target_args }}
+      - name: Compile Rust binary
+        run: cargo build --locked --release --bin relayd
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: zig-out/bin/relayd
+          name: relayd-x86_64-unknown-linux-gnu
+          path: target/release/relayd

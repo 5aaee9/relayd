@@ -1,6 +1,7 @@
 name: test
 
 env:
+  RUST_VERSION: 1.95
   ZIG_VERSION: 0.16.0
 
 concurrency:
@@ -25,6 +26,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ca-certificates curl xz-utils libsqlite3-dev
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
@@ -33,11 +42,19 @@ jobs:
       - name: Verify Zig version
         run: test "$(zig version)" = "$ZIG_VERSION"
 
-      - name: Format check
-        run: |
-          zig fmt --check $(find src tests -type f -name '*.zig' -print) test_root.zig build.zig
+      - name: Rust format check
+        run: cargo fmt -- --check
 
-      - name: Run tests
+      - name: Rust tests
+        run: cargo test --locked
+
+      - name: Rust clippy
+        run: cargo clippy --locked --lib --tests -- -D warnings
+
+      - name: Rust release build
+        run: cargo build --locked --release --bin relayd
+
+      - name: Zig reference tests
         run: zig build test
 
   e2e-bandwidth:
@@ -53,16 +70,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ca-certificates curl xz-utils libsqlite3-dev iperf3 python3
 
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          version: ${{ env.ZIG_VERSION }}
+          toolchain: ${{ env.RUST_VERSION }}
 
-      - name: Verify Zig version
-        run: test "$(zig version)" = "$ZIG_VERSION"
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
 
       - name: Build relayd
-        run: zig build
+        run: cargo build --locked --release --bin relayd
 
       - name: Run e2e bandwidth harness
-        run: ./scripts/ci/e2e_iperf3.sh
+        run: RELAYD_BIN=target/release/relayd ./scripts/ci/e2e_iperf3.sh
