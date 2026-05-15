@@ -3,3 +3,4 @@ zig-out/
 .omx/
 .local/
 zig-pkg/
+target/
