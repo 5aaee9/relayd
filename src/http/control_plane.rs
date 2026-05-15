@@ -471,19 +471,28 @@ mod tests {
     use axum::http::{Method, Request};
     use http_body_util::BodyExt;
     use serde_json::Value;
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex as StdMutex};
-    use tempfile::NamedTempFile;
     use tower::ServiceExt;
+
+    fn temp_db_path() -> PathBuf {
+        let parent = std::env::current_dir()
+            .unwrap()
+            .join("target/relayd-test-dbs");
+        std::fs::create_dir_all(&parent).unwrap();
+        let dir = tempfile::tempdir_in(parent).unwrap().keep();
+        dir.join("relayd.sqlite")
+    }
 
     async fn test_app() -> (
         Router,
         Arc<Service<InMemoryRuntime>>,
         InMemoryRuntime,
         Arc<Metrics>,
-        NamedTempFile,
+        PathBuf,
     ) {
-        let file = NamedTempFile::new().unwrap();
-        let repo = Repository::open(file.path()).await.unwrap();
+        let file = temp_db_path();
+        let repo = Repository::open(&file).await.unwrap();
         let runtime = InMemoryRuntime::default();
         let metrics = Arc::new(Metrics::default());
         let next_id = Arc::new(StdMutex::new(0_u64));

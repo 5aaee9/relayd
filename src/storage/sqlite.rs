@@ -373,11 +373,20 @@ fn port_from_i32(field: &'static str, value: i32) -> Result<u16> {
 mod tests {
     use super::*;
     use crate::model::{Allocation, Binding, Protocol};
-    use tempfile::NamedTempFile;
+    use std::path::PathBuf;
 
     async fn temp_repo() -> Repository {
-        let file = NamedTempFile::new().unwrap();
-        Repository::open(file.path()).await.unwrap()
+        let path = temp_db_path();
+        Repository::open(&path).await.unwrap()
+    }
+
+    fn temp_db_path() -> PathBuf {
+        let parent = std::env::current_dir()
+            .unwrap()
+            .join("target/relayd-test-dbs");
+        std::fs::create_dir_all(&parent).unwrap();
+        let dir = tempfile::tempdir_in(parent).unwrap().keep();
+        dir.join("relayd.sqlite")
     }
 
     fn allocation(
@@ -522,13 +531,13 @@ mod tests {
 
     #[tokio::test]
     async fn sqlite_migrates_legacy_allocation_binding_into_bindings_table() {
-        let file = NamedTempFile::new().unwrap();
+        let file = temp_db_path();
         {
             let pool = SqlitePoolOptions::new()
                 .max_connections(1)
                 .connect_with(
                     SqliteConnectOptions::new()
-                        .filename(file.path())
+                        .filename(&file)
                         .create_if_missing(true),
                 )
                 .await
@@ -557,7 +566,7 @@ mod tests {
             .unwrap();
             pool.close().await;
         }
-        let repo = Repository::open(file.path()).await.unwrap();
+        let repo = Repository::open(&file).await.unwrap();
         let binding = repo.get_binding("legacy").await.unwrap().unwrap();
         assert_eq!(binding.target_port, 8080);
         assert_eq!(binding.host.as_deref(), Some("127.0.0.1"));

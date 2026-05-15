@@ -478,18 +478,27 @@ mod tests {
     use super::*;
     use crate::runtime::facade::InMemoryRuntime;
     use sqlx::Executor;
+    use std::path::PathBuf;
     use std::sync::Mutex as StdMutex;
-    use tempfile::NamedTempFile;
 
     async fn temp_repo() -> Repository {
-        let (repo, _file) = temp_repo_with_file().await;
-        repo
+        let path = temp_db_path();
+        Repository::open(&path).await.unwrap()
     }
 
-    async fn temp_repo_with_file() -> (Repository, NamedTempFile) {
-        let file = NamedTempFile::new().unwrap();
-        let repo = Repository::open(file.path()).await.unwrap();
-        (repo, file)
+    async fn temp_repo_with_path() -> (Repository, PathBuf) {
+        let path = temp_db_path();
+        let repo = Repository::open(&path).await.unwrap();
+        (repo, path)
+    }
+
+    fn temp_db_path() -> PathBuf {
+        let parent = std::env::current_dir()
+            .unwrap()
+            .join("target/relayd-test-dbs");
+        std::fs::create_dir_all(&parent).unwrap();
+        let dir = tempfile::tempdir_in(parent).unwrap().keep();
+        dir.join("relayd.sqlite")
     }
 
     fn service(repo: Repository, runtime: InMemoryRuntime) -> Service<InMemoryRuntime> {
@@ -718,9 +727,9 @@ mod tests {
 
     #[tokio::test]
     async fn create_allocation_binding_persistence_failure_cleans_allocation_and_runtime() {
-        let (repo, file) = temp_repo_with_file().await;
+        let (repo, file) = temp_repo_with_path().await;
         let options = sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(file.path())
+            .filename(&file)
             .create_if_missing(false);
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)

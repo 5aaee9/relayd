@@ -141,3 +141,9 @@ M0 is complete when:
 - Verification: `cargo fmt -- --check`; `cargo test --locked`; `zig build test`.
 - API note: Allocation, binding, compatibility port, JSON metrics, auth, content type, and error-mapping interfaces are preserved. Real forwarding and full Prometheus rate parity remain M3-M6.
 
+## M3 implementation status
+
+- Status: implemented in Rust TCP runtime with loopback listener lifecycle, default copy forwarding, no-host rejection, delete cleanup, restore, and TCP listener metrics.
+- Verification: `cargo fmt -- --check`; `cargo test --locked`; `cargo clippy --locked --lib --tests -- -D warnings`; `zig build test`.
+- Scope note: UDP runtime, dual-protocol real runtime parity, TCP session-model/splice optional lanes, and full Prometheus rate semantics remain assigned to M4-M6.
+
