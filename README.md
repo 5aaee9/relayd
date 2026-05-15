@@ -18,7 +18,7 @@ Linux-first Rust port-forwarder with:
 - `RESTORE_SWEEP_TIMEOUT_MS` — optional, default `30000`
 - `UDP_SOCKET_RCVBUF_BYTES` / `UDP_SOCKET_SNDBUF_BYTES` — parsed for compatibility, default `8388608`
 
-Optional compatibility feature gates are parsed but are not part of the Rust default runtime yet: `TCP_SESSION_MODEL_*`, `TCP_SPLICE_ENABLED`, `FORCE_TCP_COPY_FALLBACK`, `UDP_SESSION_WORKERS`, `UDP_IO_URING_ENABLED`, `UDP_GRO_ENABLED`, `UDP_DATAPLANE_REDESIGN_ENABLED`, and `UDP_FAST_PATH_*`.
+Optional compatibility feature gates are parsed only where they are implemented by the Rust runtime. `TCP_SPLICE_ENABLED` and `FORCE_TCP_COPY_FALLBACK` are intentionally ignored because this Rust runtime does not expose the old Linux `splice(2)` TCP path.
 
 If `HTTP_LISTEN` is `:PORT`, relayd binds `127.0.0.1:PORT`.
 
