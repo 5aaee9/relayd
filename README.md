@@ -39,13 +39,17 @@ cargo clippy --locked --lib --tests -- -D warnings
 
 ## Run
 ```bash
-HTTP_LISTEN=:8080 AUTH_TOKEN=mytoken target/x86_64-unknown-linux-musl/release/relayd
+target/x86_64-unknown-linux-musl/release/relayd \
+  --http-listen :8080 \
+  --auth-token mytoken
 ```
+
+Environment variables remain supported and can be mixed with CLI options; CLI options take precedence. Use `relayd --help` to see all options and their matching environment variables.
 
 For development:
 
 ```bash
-HTTP_LISTEN=:8080 AUTH_TOKEN=mytoken cargo run --locked --bin relayd
+cargo run --locked --bin relayd -- --http-listen :8080 --auth-token mytoken
 ```
 
 ## Docker

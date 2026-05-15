@@ -1,3 +1,4 @@
+use clap::Parser;
 use relayd::config::Config;
 use relayd::http::control_plane::{AppState, router};
 use relayd::metrics::Metrics;
@@ -18,12 +19,240 @@ async fn main() {
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let config = config_from_env()?;
+    let config = config_from_cli_and_env(Cli::parse(), std::env::vars().collect())?;
     run_with_config(config).await
 }
 
-fn config_from_env() -> Result<Config, relayd::config::ConfigError> {
-    let env: HashMap<String, String> = std::env::vars().collect();
+#[derive(Debug, Parser)]
+#[command(
+    name = "relayd",
+    version,
+    about = "Authenticated TCP/UDP relay daemon with SQLite persistence",
+    long_about = "relayd starts an authenticated HTTP control plane, persists allocations in SQLite, restores allocations at startup, and forwards TCP/UDP traffic for allocated ports. CLI options override the matching environment variables."
+)]
+struct Cli {
+    #[arg(
+        long,
+        value_name = "ADDR",
+        help = "HTTP control-plane listen address (env: HTTP_LISTEN). Use :PORT to bind 127.0.0.1; IPv6 literals use [::1]:PORT."
+    )]
+    http_listen: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "START-END",
+        help = "Inclusive relay port allocation range (env: PORT_RANGE). Example: 10000-30000."
+    )]
+    port_range: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "TOKEN",
+        help = "Required bearer token for authenticated HTTP API requests (env: AUTH_TOKEN)."
+    )]
+    auth_token: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "SQLite database path for persisted allocations (env: SQLITE_PATH)."
+    )]
+    sqlite_path: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "MILLISECONDS",
+        help = "Timeout for applying runtime allocation changes (env: RUNTIME_APPLY_TIMEOUT_MS)."
+    )]
+    runtime_apply_timeout_ms: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "MILLISECONDS",
+        help = "Timeout for startup restore sweep operations (env: RESTORE_SWEEP_TIMEOUT_MS)."
+    )]
+    restore_sweep_timeout_ms: Option<String>,
+
+    #[arg(
+        long,
+        action = clap::ArgAction::SetTrue,
+        help = "Enable the compatibility TCP session model flag (env: TCP_SESSION_MODEL_ENABLED)."
+    )]
+    tcp_session_model_enabled: bool,
+
+    #[arg(
+        long,
+        value_name = "COUNT",
+        help = "Compatibility TCP session worker count parsed by config (env: TCP_SESSION_MODEL_WORKERS)."
+    )]
+    tcp_session_model_workers: Option<String>,
+
+    #[arg(
+        long,
+        action = clap::ArgAction::SetTrue,
+        help = "Enable balanced TCP accept compatibility flag (env: TCP_SESSION_MODEL_ACCEPT_BALANCED)."
+    )]
+    tcp_session_model_accept_balanced: bool,
+
+    #[arg(
+        long,
+        action = clap::ArgAction::SetTrue,
+        help = "Enable sharded TCP accept compatibility flag (env: TCP_SESSION_MODEL_SHARDED_ACCEPT)."
+    )]
+    tcp_session_model_sharded_accept: bool,
+
+    #[arg(
+        long,
+        value_name = "COUNT",
+        help = "Maximum active compatibility TCP sessions (env: TCP_SESSION_MODEL_MAX_ACTIVE)."
+    )]
+    tcp_session_model_max_active: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "COUNT",
+        help = "Compatibility UDP session worker count parsed by config (env: UDP_SESSION_WORKERS)."
+    )]
+    udp_session_workers: Option<String>,
+
+    #[arg(
+        long,
+        action = clap::ArgAction::SetTrue,
+        help = "Enable UDP io_uring compatibility flag parsed by config (env: UDP_IO_URING_ENABLED)."
+    )]
+    udp_io_uring_enabled: bool,
+
+    #[arg(
+        long,
+        action = clap::ArgAction::SetTrue,
+        help = "Enable UDP GRO compatibility flag parsed by config (env: UDP_GRO_ENABLED)."
+    )]
+    udp_gro_enabled: bool,
+
+    #[arg(
+        long,
+        action = clap::ArgAction::SetTrue,
+        help = "Enable UDP dataplane redesign compatibility flag parsed by config (env: UDP_DATAPLANE_REDESIGN_ENABLED)."
+    )]
+    udp_dataplane_redesign_enabled: bool,
+
+    #[arg(
+        long,
+        action = clap::ArgAction::SetTrue,
+        help = "Enable UDP fast-path compatibility flag parsed by config (env: UDP_FAST_PATH_ENABLED)."
+    )]
+    udp_fast_path_enabled: bool,
+
+    #[arg(
+        long,
+        value_name = "BYTES",
+        help = "UDP fast-path segment size parsed by config (env: UDP_FAST_PATH_SEGMENT_SIZE)."
+    )]
+    udp_fast_path_segment_size: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "COUNT",
+        help = "UDP fast-path GSO burst size parsed by config (env: UDP_FAST_PATH_GSO_BURST)."
+    )]
+    udp_fast_path_gso_burst: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "BYTES",
+        help = "UDP socket receive buffer size parsed for compatibility (env: UDP_SOCKET_RCVBUF_BYTES)."
+    )]
+    udp_socket_rcvbuf_bytes: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "BYTES",
+        help = "UDP socket send buffer size parsed for compatibility (env: UDP_SOCKET_SNDBUF_BYTES)."
+    )]
+    udp_socket_sndbuf_bytes: Option<String>,
+}
+
+impl Cli {
+    fn apply_to_env(self, env: &mut HashMap<String, String>) {
+        fn insert_if_present(
+            env: &mut HashMap<String, String>,
+            name: &'static str,
+            value: Option<String>,
+        ) {
+            if let Some(value) = value {
+                env.insert(name.to_owned(), value);
+            }
+        }
+        fn insert_flag(env: &mut HashMap<String, String>, name: &'static str, enabled: bool) {
+            if enabled {
+                env.insert(name.to_owned(), "true".to_owned());
+            }
+        }
+
+        insert_if_present(env, "HTTP_LISTEN", self.http_listen);
+        insert_if_present(env, "PORT_RANGE", self.port_range);
+        insert_if_present(env, "AUTH_TOKEN", self.auth_token);
+        insert_if_present(env, "SQLITE_PATH", self.sqlite_path);
+        insert_if_present(
+            env,
+            "RUNTIME_APPLY_TIMEOUT_MS",
+            self.runtime_apply_timeout_ms,
+        );
+        insert_if_present(
+            env,
+            "RESTORE_SWEEP_TIMEOUT_MS",
+            self.restore_sweep_timeout_ms,
+        );
+        insert_flag(
+            env,
+            "TCP_SESSION_MODEL_ENABLED",
+            self.tcp_session_model_enabled,
+        );
+        insert_if_present(
+            env,
+            "TCP_SESSION_MODEL_WORKERS",
+            self.tcp_session_model_workers,
+        );
+        insert_flag(
+            env,
+            "TCP_SESSION_MODEL_ACCEPT_BALANCED",
+            self.tcp_session_model_accept_balanced,
+        );
+        insert_flag(
+            env,
+            "TCP_SESSION_MODEL_SHARDED_ACCEPT",
+            self.tcp_session_model_sharded_accept,
+        );
+        insert_if_present(
+            env,
+            "TCP_SESSION_MODEL_MAX_ACTIVE",
+            self.tcp_session_model_max_active,
+        );
+        insert_if_present(env, "UDP_SESSION_WORKERS", self.udp_session_workers);
+        insert_flag(env, "UDP_IO_URING_ENABLED", self.udp_io_uring_enabled);
+        insert_flag(env, "UDP_GRO_ENABLED", self.udp_gro_enabled);
+        insert_flag(
+            env,
+            "UDP_DATAPLANE_REDESIGN_ENABLED",
+            self.udp_dataplane_redesign_enabled,
+        );
+        insert_flag(env, "UDP_FAST_PATH_ENABLED", self.udp_fast_path_enabled);
+        insert_if_present(
+            env,
+            "UDP_FAST_PATH_SEGMENT_SIZE",
+            self.udp_fast_path_segment_size,
+        );
+        insert_if_present(env, "UDP_FAST_PATH_GSO_BURST", self.udp_fast_path_gso_burst);
+        insert_if_present(env, "UDP_SOCKET_RCVBUF_BYTES", self.udp_socket_rcvbuf_bytes);
+        insert_if_present(env, "UDP_SOCKET_SNDBUF_BYTES", self.udp_socket_sndbuf_bytes);
+    }
+}
+
+fn config_from_cli_and_env(
+    cli: Cli,
+    mut env: HashMap<String, String>,
+) -> Result<Config, relayd::config::ConfigError> {
+    cli.apply_to_env(&mut env);
     Config::from_env_map(&env)
 }
 
@@ -66,7 +295,60 @@ async fn serve_listener(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn cli_help_documents_runtime_options() {
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("relayd starts an authenticated HTTP control plane"));
+        assert!(help.contains("--http-listen <ADDR>"));
+        assert!(help.contains("env: HTTP_LISTEN"));
+        assert!(help.contains("--port-range <START-END>"));
+        assert!(help.contains("--auth-token <TOKEN>"));
+        assert!(help.contains("--sqlite-path <PATH>"));
+        assert!(help.contains("--runtime-apply-timeout-ms <MILLISECONDS>"));
+        assert!(help.contains("--udp-socket-rcvbuf-bytes <BYTES>"));
+    }
+
+    #[test]
+    fn cli_options_override_environment_config() {
+        let cli = Cli::try_parse_from([
+            "relayd",
+            "--http-listen",
+            "127.0.0.1:19080",
+            "--port-range",
+            "20000-20005",
+            "--auth-token",
+            "cli-token",
+            "--sqlite-path",
+            "cli.sqlite3",
+            "--runtime-apply-timeout-ms",
+            "1500",
+            "--tcp-session-model-enabled",
+            "--udp-socket-rcvbuf-bytes",
+            "4096",
+        ])
+        .unwrap();
+        let env = HashMap::from([
+            ("HTTP_LISTEN".to_owned(), ":8080".to_owned()),
+            ("PORT_RANGE".to_owned(), "10000-10010".to_owned()),
+            ("AUTH_TOKEN".to_owned(), "env-token".to_owned()),
+            ("SQLITE_PATH".to_owned(), "env.sqlite3".to_owned()),
+        ]);
+
+        let config = config_from_cli_and_env(cli, env).unwrap();
+
+        assert_eq!(config.http_listen_host, "127.0.0.1");
+        assert_eq!(config.http_listen_port, 19080);
+        assert_eq!(config.port_range.start, 20000);
+        assert_eq!(config.port_range.end, 20005);
+        assert_eq!(config.auth_token, "cli-token");
+        assert_eq!(config.db_path, "cli.sqlite3");
+        assert_eq!(config.runtime_apply_timeout_ms, 1500);
+        assert!(config.tcp_session_model_enabled);
+        assert_eq!(config.udp_socket_recv_buffer_bytes, 4096);
+    }
 
     #[tokio::test]
     async fn startup_config_requires_auth_token() {
