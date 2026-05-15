@@ -49,7 +49,12 @@ HTTP_LISTEN=:8080 AUTH_TOKEN=mytoken cargo run --locked --bin relayd
 ```
 
 ## Docker
+Docker images package a prebuilt musl binary from `dist/relayd`; the Dockerfile does not download or run compiler toolchains. For local image builds:
+
 ```bash
+cargo zigbuild --locked --release --bin relayd --target x86_64-unknown-linux-musl
+mkdir -p dist
+cp target/x86_64-unknown-linux-musl/release/relayd dist/relayd
 docker build -t relayd:local .
 docker run --rm \
   -e AUTH_TOKEN=mytoken \
