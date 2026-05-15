@@ -2,7 +2,7 @@
 
 ## Source requirement
 
-Migrate `relayd` from Zig to Rust while matching all main functionality. Functionality hidden behind feature flags or optional fast-path environment gates may be deferred. Every functional slice must be represented by a milestone. Each milestone must have a Superpowers-style spec and implementation plan; the plan must be reviewed by an independent agent until it is approved before implementation starts. Implementation must use Subagent Driven Development. After implementation, an independent agent must review spec compliance until approved, documentation must be updated, and the work must be committed and pushed.
+Migrate `relayd` from Zig to Rust while matching all main functionality. API interfaces and definitions must remain exactly aligned with the existing Zig HTTP API. Functionality hidden behind feature flags or optional fast-path environment gates may be deferred. Every functional slice must be represented by a milestone. Each milestone must have a Superpowers-style spec and implementation plan; the plan must be reviewed by an independent agent until it is approved before implementation starts. Implementation must use Subagent Driven Development. After implementation, an independent agent must review spec compliance until approved, documentation must be updated, and the work must be committed and pushed.
 
 ## Current product summary
 
@@ -128,3 +128,9 @@ M0 is complete when:
 - Status: implemented in Rust foundation crate.
 - Verification: `cargo test`.
 - Scope note: Zig implementation remains available as parity reference for later milestones.
+
+## M1 implementation status
+
+- Status: implemented in Rust service layer with in-memory runtime facade.
+- Verification: `cargo fmt -- --check`; `cargo test --locked`; `zig build test`.
+- API note: HTTP wire-level compatibility remains M2, but M1 preserves allocation resource, binding view, aggregate allocation view, and compatibility update service definitions.
