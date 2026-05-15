@@ -134,3 +134,10 @@ M0 is complete when:
 - Status: implemented in Rust service layer with in-memory runtime facade.
 - Verification: `cargo fmt -- --check`; `cargo test --locked`; `zig build test`.
 - API note: HTTP wire-level compatibility remains M2, but M1 preserves allocation resource, binding view, aggregate allocation view, and compatibility update service definitions.
+
+## M2 implementation status
+
+- Status: implemented in Rust HTTP control-plane router using the M1 in-memory runtime facade.
+- Verification: `cargo fmt -- --check`; `cargo test --locked`; `zig build test`.
+- API note: Allocation, binding, compatibility port, JSON metrics, auth, content type, and error-mapping interfaces are preserved. Real forwarding and full Prometheus rate parity remain M3-M6.
+

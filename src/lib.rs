@@ -1,5 +1,8 @@
 pub mod config;
+pub mod http;
+pub mod metrics;
 pub mod model;
+pub mod prometheus;
 pub mod runtime;
 pub mod service;
 pub mod storage;
