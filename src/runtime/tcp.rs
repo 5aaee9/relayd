@@ -214,6 +214,16 @@ impl TcpRuntime {
         Self::close_sessions(&entry).await;
     }
 
+    pub async fn shutdown_all(&self) {
+        let entries = {
+            let mut entries = self.entries.lock().await;
+            entries.drain().map(|(_, entry)| entry).collect::<Vec<_>>()
+        };
+        for entry in entries {
+            Self::stop_entry(entry).await;
+        }
+    }
+
     async fn bind_entry(
         &self,
         allocation: &Allocation,

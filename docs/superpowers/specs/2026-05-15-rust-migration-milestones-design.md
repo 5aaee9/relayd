@@ -152,3 +152,9 @@ M0 is complete when:
 - Status: implemented in Rust UDP runtime with loopback listener lifecycle, baseline per-client session forwarding, no-host rejection, TTL cleanup, update/delete stale-session cleanup, restore, and UDP listener metrics.
 - Verification: `cargo fmt -- --check`; `cargo test --locked`; `cargo clippy --locked --lib --tests -- -D warnings`; `zig build test`.
 - Scope note: Dual-protocol real runtime parity, UDP workerized/io_uring/GRO/fast-path optional lanes, and full Prometheus rate semantics remain assigned to M5-M6.
+## M5 implementation status
+
+- Status: implemented in Rust composed real runtime with dual-protocol create/update/delete/restore, shared binding target, TCP+UDP forwarding on the same port, aggregate snapshots, explicit shutdown cleanup, and concrete TCP/UDP listener metrics rows.
+- Verification: `cargo fmt -- --check`; `cargo test --locked`; `cargo clippy --locked --lib --tests -- -D warnings`; `zig build test`.
+- Scope note: Full Prometheus rate semantics and Rust binary production cutover remain assigned to M6-M7.
+
