@@ -719,12 +719,24 @@ mod tests {
         );
         runtime.create(&alloc, 500).await.unwrap();
 
-        let client = TcpStream::connect(("127.0.0.1", relay_port)).await.unwrap();
+        let mut client = TcpStream::connect(("127.0.0.1", relay_port)).await.unwrap();
+        client.write_all(b"before-detach").await.unwrap();
+        let mut before_buf = [0_u8; 13];
+        client.read_exact(&mut before_buf).await.unwrap();
+        assert_eq!(&before_buf, b"before-detach");
+        wait_for_active_sessions(&runtime, &metrics, 1).await;
+
         runtime
             .update(&allocation("alloc-close", relay_port, None, None), 500)
             .await
             .unwrap();
-        drop(client);
+        wait_for_active_sessions(&runtime, &metrics, 0).await;
+        let mut stale_buf = [0_u8; 1];
+        let stale_read = timeout(Duration::from_millis(500), client.read(&mut stale_buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stale_read, 0);
 
         let observed = runtime.snapshot("alloc-close").await.unwrap().unwrap();
         assert_eq!(observed.runtime_status, RuntimeStatus::RejectingNoHost);
