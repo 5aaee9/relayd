@@ -8,7 +8,6 @@ Linux-first Rust port-forwarder with:
 - dual-protocol allocations (`both`) sharing one TCP+UDP port
 - Prometheus listener metrics with per-scrape byte rates
 
-The Zig implementation remains in-tree as the parity/reference implementation and test target. Optional feature-flag lanes from the Zig runtime (TCP session-model/splice and UDP worker/io_uring/GRO/dataplane/fast-path modes) are intentionally deferred in the Rust default runtime.
 
 ## Env
 - `HTTP_LISTEN` — HTTP API listen address, e.g. `:8080` or `127.0.0.1:8080`
@@ -19,7 +18,7 @@ The Zig implementation remains in-tree as the parity/reference implementation an
 - `RESTORE_SWEEP_TIMEOUT_MS` — optional, default `30000`
 - `UDP_SOCKET_RCVBUF_BYTES` / `UDP_SOCKET_SNDBUF_BYTES` — parsed for compatibility, default `8388608`
 
-Optional Zig feature gates are parsed for compatibility but are not part of the Rust default runtime yet: `TCP_SESSION_MODEL_*`, `TCP_SPLICE_ENABLED`, `FORCE_TCP_COPY_FALLBACK`, `UDP_SESSION_WORKERS`, `UDP_IO_URING_ENABLED`, `UDP_GRO_ENABLED`, `UDP_DATAPLANE_REDESIGN_ENABLED`, and `UDP_FAST_PATH_*`.
+Optional compatibility feature gates are parsed but are not part of the Rust default runtime yet: `TCP_SESSION_MODEL_*`, `TCP_SPLICE_ENABLED`, `FORCE_TCP_COPY_FALLBACK`, `UDP_SESSION_WORKERS`, `UDP_IO_URING_ENABLED`, `UDP_GRO_ENABLED`, `UDP_DATAPLANE_REDESIGN_ENABLED`, and `UDP_FAST_PATH_*`.
 
 If `HTTP_LISTEN` is `:PORT`, relayd binds `127.0.0.1:PORT`.
 
@@ -28,9 +27,6 @@ If `HTTP_LISTEN` is `:PORT`, relayd binds `127.0.0.1:PORT`.
 cargo build --locked --release --bin relayd
 cargo test --locked
 cargo clippy --locked --lib --tests -- -D warnings
-
-# Reference parity tests for the legacy Zig implementation
-zig build test
 ```
 
 ## Run
@@ -71,7 +67,7 @@ By default the harness uses `AUTH_TOKEN=test-token`, `HTTP_LISTEN=127.0.0.1:1808
 HTTP_LISTEN=127.0.0.1:28080 PORT_RANGE=28100-28120 RELAYD_BIN=target/release/relayd ./scripts/ci/e2e_iperf3.sh
 ```
 
-The harness still contains matrix modes for optional Zig benchmark lanes. Those modes remain useful for reference experiments, but the Rust default runtime currently targets main TCP/UDP/`both` forwarding parity rather than optional fast-path gates.
+The harness includes matrix modes for optional benchmark lanes, but the Rust default runtime currently targets main TCP/UDP/`both` forwarding parity rather than optional fast-path gates.
 
 ## API
 Canonical API documentation lives in [`docs/API.md`](docs/API.md).

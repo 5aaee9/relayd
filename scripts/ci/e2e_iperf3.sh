@@ -4,7 +4,7 @@ set -euo pipefail
 AUTH_TOKEN="${AUTH_TOKEN:-test-token}"
 HTTP_LISTEN="${HTTP_LISTEN:-127.0.0.1:18080}"
 PORT_RANGE="${PORT_RANGE:-18100-18120}"
-SQLITE_PATH="${SQLITE_PATH:-.zig-cache/e2e/relayd-$$.sqlite3}"
+SQLITE_PATH="${SQLITE_PATH:-target/e2e/relayd-$$.sqlite3}"
 TARGET_HOST="${TARGET_HOST:-127.0.0.1}"
 TCP_SESSION_MODEL_ENABLED="${TCP_SESSION_MODEL_ENABLED:-0}"
 TCP_SESSION_MODEL_WORKERS="${TCP_SESSION_MODEL_WORKERS:-0}"
@@ -42,19 +42,15 @@ IPERF_KEEP_RUN_DIR="${IPERF_KEEP_RUN_DIR:-0}"
 IPERF_SERVER_READY_TIMEOUT_SEC="${IPERF_SERVER_READY_TIMEOUT_SEC:-5}"
 READINESS_TIMEOUT_SEC="${READINESS_TIMEOUT_SEC:-30}"
 ACTIVE_TIMEOUT_SEC="${ACTIVE_TIMEOUT_SEC:-30}"
-RELAYD_BIN="${RELAYD_BIN:-zig-out/bin/relayd}"
+RELAYD_BIN="${RELAYD_BIN:-target/release/relayd}"
 IPERF3_BIN="${IPERF3_BIN:-iperf3}"
-if [[ "$IPERF3_BIN" == "iperf3" ]] && ! command -v iperf3 >/dev/null 2>&1 && [[ -x ".zig-cache/tools/iperf-3.20/build/bin/iperf3" ]]; then
-  IPERF3_BIN=".zig-cache/tools/iperf-3.20/build/bin/iperf3"
-fi
-
 if [[ "$HTTP_LISTEN" == :* ]]; then
   API_HTTP_LISTEN="127.0.0.1${HTTP_LISTEN}"
 else
   API_HTTP_LISTEN="$HTTP_LISTEN"
 fi
 
-ARTIFACT_DIR=".zig-cache/e2e"
+ARTIFACT_DIR="target/e2e"
 RUN_DIR="${ARTIFACT_DIR}/iperf3-$$"
 LATEST_RUN_DIR="${ARTIFACT_DIR}/iperf3-latest"
 RELAYD_LOG="${RUN_DIR}/relayd.log"

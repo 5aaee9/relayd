@@ -2,7 +2,6 @@ name: test
 
 env:
   RUST_VERSION: 1.95
-  ZIG_VERSION: 0.16.0
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -30,17 +29,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
-
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-
-      - name: Verify Zig version
-        run: test "$(zig version)" = "$ZIG_VERSION"
 
       - name: Rust format check
         run: cargo fmt -- --check
@@ -53,9 +45,6 @@ jobs:
 
       - name: Rust release build
         run: cargo build --locked --release --bin relayd
-
-      - name: Zig reference tests
-        run: zig build test
 
   e2e-bandwidth:
     needs:
@@ -74,6 +63,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2

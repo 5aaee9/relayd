@@ -1,6 +1,6 @@
-zig-out/
-.zig-cache/
 .omx/
 .local/
-zig-pkg/
 target/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

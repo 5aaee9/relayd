@@ -166,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn host_configured_helper_matches_zig_semantics() {
+    fn host_configured_helper_matches_legacy_semantics() {
         assert!(!is_host_configured(None));
         assert!(!is_host_configured(Some("")));
         assert!(is_host_configured(Some("127.0.0.1")));
