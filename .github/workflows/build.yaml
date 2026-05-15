@@ -3,7 +3,6 @@ name: build binary
 env:
   RUST_VERSION: 1.95
   ZIG_VERSION: 0.16.0
-  BUILD_TARGET: x86_64-unknown-linux-musl
   CARGO_ZIGBUILD_VERSION: 0.22.3
 
 concurrency:
@@ -19,8 +18,14 @@ on:
 
 jobs:
   compile:
-    name: compile-${{ env.BUILD_TARGET }}
+    name: compile-${{ matrix.target }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -29,7 +34,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
-          targets: ${{ env.BUILD_TARGET }}
+          targets: ${{ matrix.target }}
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -43,10 +48,10 @@ jobs:
         run: cargo install cargo-zigbuild --locked --version "${CARGO_ZIGBUILD_VERSION}"
 
       - name: Compile musl Rust binary
-        run: cargo zigbuild --locked --release --bin relayd --target "${BUILD_TARGET}"
+        run: cargo zigbuild --locked --release --bin relayd --target "${{ matrix.target }}"
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: relayd-${{ env.BUILD_TARGET }}
-          path: target/${{ env.BUILD_TARGET }}/release/relayd
+          name: relayd-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/relayd
