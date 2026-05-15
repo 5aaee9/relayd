@@ -1053,6 +1053,7 @@ pub const RuntimeManager = struct {
             session.metrics_state.decTcpActive();
             self.metrics.tcp_session_close_total.inc();
             session.metrics_state.release();
+            self.allocator.free(session.allocation_id);
             self.allocator.destroy(session);
         }
     }
@@ -1108,6 +1109,8 @@ fn dispatchAcceptedTcpSessionToWorker(manager: *RuntimeManager, entry: *Listener
     errdefer metrics_state.release();
     const host = try manager.allocator.dupe(u8, entry.effective_host.?);
     errdefer manager.allocator.free(host);
+    const allocation_id = try manager.allocator.dupe(u8, entry.id);
+    errdefer manager.allocator.free(allocation_id);
 
     const worker_index = manager.next_tcp_session_worker % manager.tcp_session_workers.len;
     manager.next_tcp_session_worker = (worker_index + 1) % manager.tcp_session_workers.len;
@@ -1118,6 +1121,7 @@ fn dispatchAcceptedTcpSessionToWorker(manager: *RuntimeManager, entry: *Listener
         .metrics_state = metrics_state,
         .client_fd = client_fd,
         .host = host,
+        .allocation_id = allocation_id,
         .port = entry.effective_target_port.?,
     });
     manager.metrics.tcp_accept_handoff_total.inc();
@@ -1216,8 +1220,6 @@ fn attachPendingAcceptedTcpSessions(worker: *TcpSessionWorker) void {
         const pending = worker.pending_accepts.swapRemove(worker.pending_accepts.items.len - 1);
         startTcpAcceptedRuntimeSessionOnWorker(worker, pending) catch {
             closeIgnoreBadFd(pending.client_fd);
-            worker.allocator.free(pending.host);
-            pending.metrics_state.release();
             continue;
         };
     }
@@ -1393,7 +1395,7 @@ fn startTcpRuntimeSessionOnWorker(worker: *TcpSessionWorker, entry: *ListenerEnt
     const metrics_state = entry.metrics_state.retain();
     errdefer metrics_state.release();
     session.* = .{
-        .allocation_id = try manager.allocator.dupe(u8, entry.id),
+        .allocation_id = try worker.allocator.dupe(u8, entry.id),
         .metrics_state = metrics_state,
         .client_fd = client_fd,
         .upstream_fd = upstream_fd,
@@ -1403,6 +1405,7 @@ fn startTcpRuntimeSessionOnWorker(worker: *TcpSessionWorker, entry: *ListenerEnt
         .client_shutdown_sent = false,
         .upstream_shutdown_sent = false,
     };
+    errdefer worker.allocator.free(session.allocation_id);
 
     try worker.sessions.append(worker.allocator, session);
     errdefer _ = worker.sessions.pop();
@@ -1424,6 +1427,7 @@ fn startTcpRuntimeSessionOnWorker(worker: *TcpSessionWorker, entry: *ListenerEnt
 
 fn startTcpAcceptedRuntimeSessionOnWorker(worker: *TcpSessionWorker, pending: PendingAcceptedTcpSession) !void {
     defer worker.allocator.free(pending.host);
+    errdefer worker.allocator.free(pending.allocation_id);
     errdefer pending.metrics_state.release();
     const addr = try config_mod.parseIpLiteral(pending.host, pending.port);
     const family: u32 = switch (addr.any.family) {
@@ -1449,6 +1453,7 @@ fn startTcpAcceptedRuntimeSessionOnWorker(worker: *TcpSessionWorker, pending: Pe
     const session = try worker.allocator.create(TcpRuntimeSession);
     errdefer worker.allocator.destroy(session);
     session.* = .{
+        .allocation_id = pending.allocation_id,
         .metrics_state = pending.metrics_state,
         .client_fd = pending.client_fd,
         .upstream_fd = upstream_fd,
@@ -2080,6 +2085,7 @@ const PendingAcceptedTcpSession = struct {
     metrics_state: *ListenerMetricsState,
     client_fd: posix.fd_t,
     host: []u8,
+    allocation_id: []u8,
     port: u16,
 };
 
@@ -2187,6 +2193,7 @@ fn deinitTcpSessionWorker(allocator: std.mem.Allocator, worker: *TcpSessionWorke
         const pending = worker.pending_accepts.pop() orelse break;
         closeIgnoreBadFd(pending.client_fd);
         allocator.free(pending.host);
+        allocator.free(pending.allocation_id);
         pending.metrics_state.release();
     }
     worker.pending_accepts.deinit(allocator);
@@ -2398,6 +2405,7 @@ fn startTcpRuntimeSession(manager: *RuntimeManager, entry: *ListenerEntry, clien
     const metrics_state = entry.metrics_state.retain();
     errdefer metrics_state.release();
     session.* = .{
+        .allocation_id = try manager.allocator.dupe(u8, entry.id),
         .metrics_state = metrics_state,
         .client_fd = client_fd,
         .upstream_fd = upstream_fd,
@@ -2407,6 +2415,7 @@ fn startTcpRuntimeSession(manager: *RuntimeManager, entry: *ListenerEntry, clien
         .client_shutdown_sent = false,
         .upstream_shutdown_sent = false,
     };
+    errdefer manager.allocator.free(session.allocation_id);
 
     if (workerized) {
         try dispatchTcpRuntimeSessionToWorker(manager, session);
