@@ -7,6 +7,7 @@ use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use std::collections::HashMap;
 use std::num::TryFromIntError;
+use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -65,6 +66,8 @@ pub enum RepositoryError {
     Sqlx(#[from] sqlx::Error),
     #[error(transparent)]
     Model(#[from] crate::model::ModelError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
     #[error("invalid {field} value in database: {value}")]
     InvalidPort { field: &'static str, value: i32 },
     #[error(transparent)]
@@ -75,6 +78,8 @@ pub type Result<T> = std::result::Result<T, RepositoryError>;
 
 impl Repository {
     pub async fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        let path = path.as_ref();
+        prepare_sqlite_file_permissions(path)?;
         let options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
@@ -88,6 +93,7 @@ impl Repository {
         let repo = Self { pool, db };
         repo.setup_schema().await?;
         repo.migrate_legacy_bindings().await?;
+        restrict_sqlite_file_permissions(path)?;
         Ok(repo)
     }
 
@@ -369,10 +375,79 @@ fn port_from_i32(field: &'static str, value: i32) -> Result<u16> {
     u16::try_from(value).map_err(Into::into)
 }
 
+#[cfg(unix)]
+fn prepare_sqlite_file_permissions(path: &Path) -> std::io::Result<()> {
+    use std::fs::OpenOptions;
+    use std::io::ErrorKind;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    if is_sqlite_memory_path(path) {
+        return Ok(());
+    }
+
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(file) => drop(file),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    restrict_sqlite_file_permissions(path)
+}
+
+#[cfg(not(unix))]
+fn prepare_sqlite_file_permissions(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restrict_sqlite_file_permissions(path: &Path) -> std::io::Result<()> {
+    use std::fs::Permissions;
+    use std::io::ErrorKind;
+    use std::os::unix::fs::PermissionsExt;
+
+    if is_sqlite_memory_path(path) {
+        return Ok(());
+    }
+
+    for path in [
+        path.to_path_buf(),
+        sqlite_sidecar_path(path, "wal"),
+        sqlite_sidecar_path(path, "shm"),
+    ] {
+        match std::fs::set_permissions(&path, Permissions::from_mode(0o600)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_sqlite_file_permissions(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn is_sqlite_memory_path(path: &Path) -> bool {
+    path.as_os_str() == ":memory:"
+}
+
+fn sqlite_sidecar_path(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut sidecar = path.as_os_str().to_owned();
+    sidecar.push(format!("-{suffix}"));
+    sidecar.into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{Allocation, Binding, Protocol};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     async fn temp_repo() -> Repository {
@@ -413,6 +488,26 @@ mod tests {
         repo.self_check().await.unwrap();
         assert_eq!(repo.journal_mode().await.to_ascii_lowercase(), "wal");
         assert_eq!(repo.busy_timeout_ms().await, 5000);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sqlite_creates_database_and_wal_files_private_to_owner() {
+        let file = temp_db_path();
+
+        let repo = Repository::open(&file).await.unwrap();
+        repo.insert_allocation(&allocation("a1", Protocol::Tcp, 10000, None, None))
+            .await
+            .unwrap();
+
+        for path in [
+            &file,
+            &sqlite_sidecar_path(&file, "wal"),
+            &sqlite_sidecar_path(&file, "shm"),
+        ] {
+            let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{} mode should be 0600", path.display());
+        }
     }
 
     #[tokio::test]
