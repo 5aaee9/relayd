@@ -157,4 +157,9 @@ M0 is complete when:
 - Status: implemented in Rust composed real runtime with dual-protocol create/update/delete/restore, shared binding target, TCP+UDP forwarding on the same port, aggregate snapshots, explicit shutdown cleanup, and concrete TCP/UDP listener metrics rows.
 - Verification: `cargo fmt -- --check`; `cargo test --locked`; `cargo clippy --locked --lib --tests -- -D warnings`; `zig build test`.
 - Scope note: Full Prometheus rate semantics and Rust binary production cutover remain assigned to M6-M7.
+## M6 implementation status
+
+- Status: implemented Rust Prometheus rate parity with stateful per-listener TCP/UDP byte-rate calculation, authenticated `/metrics` rendering, stale listener cleanup, and dual-protocol concrete series support.
+- Verification: `cargo fmt -- --check`; `cargo test --locked`; `cargo clippy --locked --lib --tests -- -D warnings`; `zig build test`.
+- Scope note: Rust binary production cutover, Docker, and CI migration remain assigned to M7.
 

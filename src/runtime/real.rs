@@ -394,6 +394,35 @@ mod tests {
         Service::new(repo, runtime, PortRange { start, end }, 500)
     }
 
+    fn metric_rate(
+        rows: &[crate::prometheus::ListenerMetricsRate],
+        port: u16,
+        protocol: Protocol,
+    ) -> &crate::prometheus::ListenerMetricsRate {
+        rows.iter()
+            .find(|row| row.port == port && row.protocol == protocol)
+            .expect("rate row missing")
+    }
+
+    async fn wait_for_listener_bytes(runtime: &RealRuntime, port: u16, protocol: Protocol) {
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let rows = runtime.snapshot_listener_metrics().await.unwrap();
+                if rows.iter().any(|row| {
+                    row.port == port
+                        && row.protocol == protocol
+                        && row.rx_bytes_total > 0
+                        && row.tx_bytes_total > 0
+                }) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("listener bytes did not settle");
+    }
+
     #[tokio::test]
     async fn real_runtime_delegates_single_protocol_tcp_and_udp_forwarding() {
         let metrics = Arc::new(Metrics::default());
@@ -893,5 +922,113 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn real_runtime_tcp_metrics_feed_positive_prometheus_rates() {
+        let runtime = RealRuntime::new(RealRuntimeConfig::loopback(Arc::new(Metrics::default())));
+        let relay_port = free_tcp_port().await;
+        let (target_port, target_task) = start_tcp_echo_server().await;
+        runtime
+            .create(
+                &allocation(
+                    "tcp-rates",
+                    Protocol::Tcp,
+                    relay_port,
+                    Some(target_port),
+                    Some("127.0.0.1"),
+                ),
+                500,
+            )
+            .await
+            .unwrap();
+
+        let mut calculator = crate::prometheus::RateCalculator::default();
+        calculator.calculate(&runtime.snapshot_listener_metrics().await.unwrap(), 1_000);
+        tcp_round_trip(relay_port, b"tcp-rate").await;
+        wait_for_listener_bytes(&runtime, relay_port, Protocol::Tcp).await;
+        let rates =
+            calculator.calculate(&runtime.snapshot_listener_metrics().await.unwrap(), 2_000);
+        let row = metric_rate(&rates, relay_port, Protocol::Tcp);
+        assert!(row.rx_bytes_per_second > 0.0);
+        assert!(row.tx_bytes_per_second > 0.0);
+
+        runtime.delete("tcp-rates", 500).await.unwrap();
+        target_task.abort();
+    }
+
+    #[tokio::test]
+    async fn real_runtime_udp_metrics_feed_positive_prometheus_rates() {
+        let runtime = RealRuntime::new(RealRuntimeConfig::loopback(Arc::new(Metrics::default())));
+        let relay_port = free_udp_port().await;
+        let (target_port, target_task) = start_udp_echo_server().await;
+        runtime
+            .create(
+                &allocation(
+                    "udp-rates",
+                    Protocol::Udp,
+                    relay_port,
+                    Some(target_port),
+                    Some("127.0.0.1"),
+                ),
+                500,
+            )
+            .await
+            .unwrap();
+
+        let mut calculator = crate::prometheus::RateCalculator::default();
+        calculator.calculate(&runtime.snapshot_listener_metrics().await.unwrap(), 1_000);
+        udp_round_trip(relay_port, b"udp-rate").await;
+        wait_for_listener_bytes(&runtime, relay_port, Protocol::Udp).await;
+        let rates =
+            calculator.calculate(&runtime.snapshot_listener_metrics().await.unwrap(), 2_000);
+        let row = metric_rate(&rates, relay_port, Protocol::Udp);
+        assert_eq!(row.connections_current, 1);
+        assert!(row.rx_bytes_per_second > 0.0);
+        assert!(row.tx_bytes_per_second > 0.0);
+
+        runtime.delete("udp-rates", 500).await.unwrap();
+        target_task.abort();
+    }
+
+    #[tokio::test]
+    async fn real_runtime_both_metrics_feed_separate_tcp_udp_prometheus_rates() {
+        let runtime = RealRuntime::new(RealRuntimeConfig::loopback(Arc::new(Metrics::default())));
+        let relay_port = free_tcp_udp_port_pair().await;
+        let target_port = free_tcp_udp_port_pair().await;
+        let tcp_task = start_tcp_echo_server_on(target_port).await;
+        let udp_task = start_udp_echo_server_on(target_port).await;
+        runtime
+            .create(
+                &allocation(
+                    "both-rates",
+                    Protocol::Both,
+                    relay_port,
+                    Some(target_port),
+                    Some("127.0.0.1"),
+                ),
+                500,
+            )
+            .await
+            .unwrap();
+
+        let mut calculator = crate::prometheus::RateCalculator::default();
+        calculator.calculate(&runtime.snapshot_listener_metrics().await.unwrap(), 1_000);
+        tcp_round_trip(relay_port, b"both-tcp-rate").await;
+        udp_round_trip(relay_port, b"both-udp-rate").await;
+        wait_for_listener_bytes(&runtime, relay_port, Protocol::Tcp).await;
+        wait_for_listener_bytes(&runtime, relay_port, Protocol::Udp).await;
+        let rates =
+            calculator.calculate(&runtime.snapshot_listener_metrics().await.unwrap(), 2_000);
+        let tcp = metric_rate(&rates, relay_port, Protocol::Tcp);
+        let udp = metric_rate(&rates, relay_port, Protocol::Udp);
+        assert!(tcp.rx_bytes_per_second > 0.0);
+        assert!(tcp.tx_bytes_per_second > 0.0);
+        assert!(udp.rx_bytes_per_second > 0.0);
+        assert!(udp.tx_bytes_per_second > 0.0);
+
+        runtime.delete("both-rates", 500).await.unwrap();
+        tcp_task.abort();
+        udp_task.abort();
     }
 }

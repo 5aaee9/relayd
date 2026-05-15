@@ -1,6 +1,7 @@
 use crate::config::parse_port;
 use crate::metrics::Metrics;
 use crate::model::Protocol;
+use crate::prometheus::{RateCalculator, render_rates};
 use crate::runtime::facade::{RuntimeError, RuntimeFacade};
 use crate::service::allocation_service::{Service, ServiceError};
 use axum::body::Body;
@@ -16,11 +17,13 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use std::str::FromStr;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 pub struct AppState<R: RuntimeFacade> {
     pub service: Arc<Service<R>>,
     pub metrics: Arc<Metrics>,
     pub auth_token: Arc<str>,
+    pub prometheus_rates: Arc<Mutex<RateCalculator>>,
 }
 
 impl<R: RuntimeFacade> Clone for AppState<R> {
@@ -29,6 +32,7 @@ impl<R: RuntimeFacade> Clone for AppState<R> {
             service: Arc::clone(&self.service),
             metrics: Arc::clone(&self.metrics),
             auth_token: Arc::clone(&self.auth_token),
+            prometheus_rates: Arc::clone(&self.prometheus_rates),
         }
     }
 }
@@ -43,6 +47,7 @@ impl<R: RuntimeFacade> AppState<R> {
             service,
             metrics,
             auth_token: auth_token.into(),
+            prometheus_rates: Arc::new(Mutex::new(RateCalculator::default())),
         }
     }
 }
@@ -227,12 +232,20 @@ async fn prometheus_metrics<R: RuntimeFacade>(
     State(state): State<AppState<R>>,
 ) -> Response {
     match state.service.snapshot_listener_metrics().await {
-        Ok(rows) => (
-            StatusCode::OK,
-            [(CONTENT_TYPE, crate::prometheus::CONTENT_TYPE)],
-            crate::prometheus::render(&rows),
-        )
-            .into_response(),
+        Ok(rows) => {
+            let timestamp_ms = current_time_ms();
+            let rates = state
+                .prometheus_rates
+                .lock()
+                .await
+                .calculate(&rows, timestamp_ms);
+            (
+                StatusCode::OK,
+                [(CONTENT_TYPE, crate::prometheus::CONTENT_TYPE)],
+                render_rates(&rates),
+            )
+                .into_response()
+        }
         Err(error) => service_error_response(error),
     }
 }
@@ -242,6 +255,15 @@ async fn json_metrics<R: RuntimeFacade>(
     State(state): State<AppState<R>>,
 ) -> Response {
     json_response(StatusCode::OK, state.metrics.snapshot())
+}
+
+fn current_time_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX)
 }
 
 async fn list_allocations<R: RuntimeFacade>(
@@ -721,6 +743,18 @@ mod tests {
         assert!(metrics.get("http_non_loopback_bind_total").is_some());
     }
 
+    fn assert_metric_sample_positive(body: &str, name: &str, port: u16, protocol: &str) {
+        let prefix = format!("{name}{{port=\"{port}\",protocol=\"{protocol}\"}} ");
+        let line = body
+            .lines()
+            .find(|line| line.starts_with(&prefix))
+            .expect("metric line missing");
+        let value: f64 = line[prefix.len()..]
+            .parse()
+            .expect("metric sample value parses");
+        assert!(value > 0.0, "expected {line} to be positive");
+    }
+
     #[tokio::test]
     async fn prometheus_metrics_uses_seeded_rows_text_content_type_labels_and_no_json() {
         let (app, _, runtime, _, _file) = test_app().await;
@@ -760,6 +794,52 @@ mod tests {
         assert!(body.contains("relayd_connections_current{port=\"10000\",protocol=\"tcp\"} 4\n"));
         assert!(body.contains("relayd_connections_current{port=\"10001\",protocol=\"udp\"} 5\n"));
         assert!(!body.contains("{\""));
+    }
+
+    #[tokio::test]
+    async fn prometheus_metrics_calculates_rates_across_scrapes() {
+        let (app, _, runtime, _, _file) = test_app().await;
+        runtime.seed_listener_metrics(vec![crate::runtime::facade::ListenerMetricsSnapshot {
+            port: 10000,
+            protocol: Protocol::Tcp,
+            connections_current: 1,
+            rx_bytes_total: 100,
+            tx_bytes_total: 50,
+        }]);
+
+        let (status, _, first_body) = request(
+            app.clone(),
+            Method::GET,
+            "/metrics",
+            "",
+            Some("Bearer secret-token"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            first_body.contains("relayd_rx_bytes_per_second{port=\"10000\",protocol=\"tcp\"} 0\n")
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        runtime.seed_listener_metrics(vec![crate::runtime::facade::ListenerMetricsSnapshot {
+            port: 10000,
+            protocol: Protocol::Tcp,
+            connections_current: 1,
+            rx_bytes_total: 300,
+            tx_bytes_total: 150,
+        }]);
+
+        let (status, _, second_body) = request(
+            app,
+            Method::GET,
+            "/metrics",
+            "",
+            Some("Bearer secret-token"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_metric_sample_positive(&second_body, "relayd_rx_bytes_per_second", 10000, "tcp");
+        assert_metric_sample_positive(&second_body, "relayd_tx_bytes_per_second", 10000, "tcp");
     }
 
     #[tokio::test]
