@@ -23,15 +23,23 @@ Optional compatibility feature gates are parsed but are not part of the Rust def
 If `HTTP_LISTEN` is `:PORT`, relayd binds `127.0.0.1:PORT`.
 
 ## Build and test
+
+Release builds use [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild) and target `x86_64-unknown-linux-musl` so published artifacts are musl-linked Linux binaries. Install once with:
+
 ```bash
-cargo build --locked --release --bin relayd
+cargo install cargo-zigbuild --locked
+rustup target add x86_64-unknown-linux-musl
+```
+
+```bash
+cargo zigbuild --locked --release --bin relayd --target x86_64-unknown-linux-musl
 cargo test --locked
 cargo clippy --locked --lib --tests -- -D warnings
 ```
 
 ## Run
 ```bash
-HTTP_LISTEN=:8080 AUTH_TOKEN=mytoken target/release/relayd
+HTTP_LISTEN=:8080 AUTH_TOKEN=mytoken target/x86_64-unknown-linux-musl/release/relayd
 ```
 
 For development:
@@ -57,14 +65,14 @@ Docker uses `HTTP_LISTEN=0.0.0.0:8080` so the service is reachable through the p
 Local e2e runs use `scripts/ci/e2e_iperf3.sh` to drive real TCP and UDP `iperf3` traffic through `relayd`.
 
 ```bash
-cargo build --locked --release --bin relayd
-RELAYD_BIN=target/release/relayd ./scripts/ci/e2e_iperf3.sh
+cargo zigbuild --locked --release --bin relayd --target x86_64-unknown-linux-musl
+RELAYD_BIN=target/x86_64-unknown-linux-musl/release/relayd ./scripts/ci/e2e_iperf3.sh
 ```
 
 By default the harness uses `AUTH_TOKEN=test-token`, `HTTP_LISTEN=127.0.0.1:18080`, and `PORT_RANGE=18100-18120`. Override them for local reruns:
 
 ```bash
-HTTP_LISTEN=127.0.0.1:28080 PORT_RANGE=28100-28120 RELAYD_BIN=target/release/relayd ./scripts/ci/e2e_iperf3.sh
+HTTP_LISTEN=127.0.0.1:28080 PORT_RANGE=28100-28120 RELAYD_BIN=target/x86_64-unknown-linux-musl/release/relayd ./scripts/ci/e2e_iperf3.sh
 ```
 
 The harness includes matrix modes for optional benchmark lanes, but the Rust default runtime currently targets main TCP/UDP/`both` forwarding parity rather than optional fast-path gates.

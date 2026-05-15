@@ -2,6 +2,9 @@ name: build binary
 
 env:
   RUST_VERSION: 1.95
+  ZIG_VERSION: 0.16.0
+  BUILD_TARGET: x86_64-unknown-linux-musl
+  CARGO_ZIGBUILD_VERSION: 0.22.3
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -16,7 +19,7 @@ on:
 
 jobs:
   compile:
-    name: compile-x86_64-unknown-linux-gnu
+    name: compile-${{ env.BUILD_TARGET }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -26,15 +29,24 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ env.BUILD_TARGET }}
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
 
-      - name: Compile Rust binary
-        run: cargo build --locked --release --bin relayd
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked --version "${CARGO_ZIGBUILD_VERSION}"
+
+      - name: Compile musl Rust binary
+        run: cargo zigbuild --locked --release --bin relayd --target "${BUILD_TARGET}"
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: relayd-x86_64-unknown-linux-gnu
-          path: target/release/relayd
+          name: relayd-${{ env.BUILD_TARGET }}
+          path: target/${{ env.BUILD_TARGET }}/release/relayd

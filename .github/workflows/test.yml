@@ -2,6 +2,9 @@ name: test
 
 env:
   RUST_VERSION: 1.95
+  ZIG_VERSION: 0.16.0
+  BUILD_TARGET: x86_64-unknown-linux-musl
+  CARGO_ZIGBUILD_VERSION: 0.22.3
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -30,6 +33,7 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt, clippy
+          targets: ${{ env.BUILD_TARGET }}
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -43,8 +47,16 @@ jobs:
       - name: Rust clippy
         run: cargo clippy --locked --lib --tests -- -D warnings
 
-      - name: Rust release build
-        run: cargo build --locked --release --bin relayd
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked --version "${CARGO_ZIGBUILD_VERSION}"
+
+      - name: Rust musl release build
+        run: cargo zigbuild --locked --release --bin relayd --target "${BUILD_TARGET}"
 
   e2e-bandwidth:
     needs:
@@ -63,13 +75,21 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
-          components: rustfmt, clippy
+          targets: ${{ env.BUILD_TARGET }}
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
 
-      - name: Build relayd
-        run: cargo build --locked --release --bin relayd
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked --version "${CARGO_ZIGBUILD_VERSION}"
+
+      - name: Build relayd musl binary
+        run: cargo zigbuild --locked --release --bin relayd --target "${BUILD_TARGET}"
 
       - name: Run e2e bandwidth harness
-        run: RELAYD_BIN=target/release/relayd ./scripts/ci/e2e_iperf3.sh
+        run: RELAYD_BIN="target/${BUILD_TARGET}/release/relayd" ./scripts/ci/e2e_iperf3.sh
