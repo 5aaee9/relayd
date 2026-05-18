@@ -6,6 +6,7 @@ use relayd::runtime::real::{RealRuntime, RealRuntimeConfig};
 use relayd::service::allocation_service::Service;
 use relayd::storage::sqlite::Repository;
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -288,8 +289,24 @@ async fn serve_listener(
     listener: TcpListener,
     state: AppState<RealRuntime>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    axum::serve(listener, router(state)).await?;
+    serve_listener_until_shutdown(listener, state, shutdown_signal()).await
+}
+
+async fn serve_listener_until_shutdown(
+    listener: TcpListener,
+    state: AppState<RealRuntime>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    axum::serve(listener, router(state))
+        .with_graceful_shutdown(shutdown)
+        .await?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        eprintln!("relayd: failed to listen for shutdown signal: {error}");
+    }
 }
 
 #[cfg(test)]
@@ -371,6 +388,53 @@ mod tests {
         let host: IpAddr = config.http_listen_host.parse().unwrap();
         let addr = SocketAddr::new(host, config.http_listen_port);
         assert_eq!(addr.to_string(), "[::1]:8080");
+    }
+
+    #[tokio::test]
+    async fn serve_listener_exits_after_shutdown_signal() {
+        let parent = std::env::current_dir()
+            .unwrap()
+            .join("target/relayd-test-dbs");
+        std::fs::create_dir_all(&parent).unwrap();
+        let dir = tempfile::tempdir_in(parent).unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let env = HashMap::from([
+            ("HTTP_LISTEN".to_owned(), "127.0.0.1:18080".to_owned()),
+            ("PORT_RANGE".to_owned(), "24100-24110".to_owned()),
+            ("AUTH_TOKEN".to_owned(), "secret-token".to_owned()),
+            (
+                "SQLITE_PATH".to_owned(),
+                dir.path().join("relayd.sqlite").display().to_string(),
+            ),
+            ("RUNTIME_APPLY_TIMEOUT_MS".to_owned(), "500".to_owned()),
+            ("RESTORE_SWEEP_TIMEOUT_MS".to_owned(), "500".to_owned()),
+        ]);
+        let config = Config::from_env_map(&env).unwrap();
+        let metrics = Arc::new(Metrics::default());
+        let repo = Repository::open(&config.db_path).await.unwrap();
+        let runtime = RealRuntime::new(RealRuntimeConfig::loopback(metrics.clone()));
+        let service = Arc::new(Service::new(
+            repo,
+            runtime,
+            config.port_range,
+            config.runtime_apply_timeout_ms,
+        ));
+        let state = AppState::new(service, metrics, config.auth_token);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            serve_listener_until_shutdown(listener, state, async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+        });
+
+        shutdown_tx.send(()).unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .expect("server should exit promptly after shutdown signal")
+            .expect("server task should not panic")
+            .expect("server shutdown should succeed");
     }
 
     #[tokio::test]
