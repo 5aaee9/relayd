@@ -12,13 +12,19 @@ use tokio::time::Duration;
 #[derive(Clone)]
 pub struct RealRuntimeConfig {
     metrics: Arc<Metrics>,
+    bind_host: String,
     udp_session_ttl: Duration,
 }
 
 impl RealRuntimeConfig {
     pub fn loopback(metrics: Arc<Metrics>) -> Self {
+        Self::with_bind_host("127.0.0.1", metrics)
+    }
+
+    pub fn with_bind_host(bind_host: impl Into<String>, metrics: Arc<Metrics>) -> Self {
         Self {
             metrics,
+            bind_host: bind_host.into(),
             udp_session_ttl: Duration::from_millis(60_000),
         }
     }
@@ -38,9 +44,12 @@ pub struct RealRuntime {
 
 impl RealRuntime {
     pub fn new(config: RealRuntimeConfig) -> Self {
-        let tcp = TcpRuntime::new(TcpRuntimeConfig::loopback(config.metrics.clone()));
+        let tcp = TcpRuntime::new(TcpRuntimeConfig::with_bind_host(
+            config.bind_host.clone(),
+            config.metrics.clone(),
+        ));
         let udp = UdpRuntime::new(
-            UdpRuntimeConfig::loopback(config.metrics.clone())
+            UdpRuntimeConfig::with_bind_host(config.bind_host, config.metrics.clone())
                 .with_session_ttl(config.udp_session_ttl),
         );
         Self {

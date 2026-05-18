@@ -3,7 +3,7 @@ use crate::model::{Allocation, ErrorKind, Protocol, RuntimeStatus};
 use crate::runtime::facade::{ListenerMetricsSnapshot, ObservedState, RuntimeError, RuntimeFacade};
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::net::UdpSocket;
@@ -21,8 +21,12 @@ pub struct UdpRuntimeConfig {
 
 impl UdpRuntimeConfig {
     pub fn loopback(metrics: Arc<Metrics>) -> Self {
+        Self::with_bind_host("127.0.0.1", metrics)
+    }
+
+    pub fn with_bind_host(bind_host: impl Into<String>, metrics: Arc<Metrics>) -> Self {
         Self {
-            bind_host: "127.0.0.1".to_owned(),
+            bind_host: bind_host.into(),
             metrics,
             session_ttl: Duration::from_millis(60_000),
             max_sessions: 4096,
@@ -145,9 +149,12 @@ impl UdpRuntime {
     }
 
     fn bind_addr(&self, port: u16) -> Result<SocketAddr, RuntimeError> {
-        format!("{}:{port}", self.config.bind_host)
+        let host: IpAddr = self
+            .config
+            .bind_host
             .parse()
-            .map_err(|_| RuntimeError::RuntimeCreateFailed)
+            .map_err(|_| RuntimeError::RuntimeCreateFailed)?;
+        Ok(SocketAddr::new(host, port))
     }
 
     async fn spawn_receive_loop(entry: Arc<ListenerEntry>) {

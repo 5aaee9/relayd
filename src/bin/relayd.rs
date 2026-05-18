@@ -41,6 +41,13 @@ struct Cli {
 
     #[arg(
         long,
+        value_name = "HOST",
+        help = "TCP/UDP relay listen host (env: PROXY_LISTEN_HOST). Default: 0.0.0.0."
+    )]
+    proxy_listen_host: Option<String>,
+
+    #[arg(
+        long,
         value_name = "START-END",
         help = "Inclusive relay port allocation range (env: PORT_RANGE). Example: 10000-30000."
     )]
@@ -191,6 +198,7 @@ impl Cli {
         }
 
         insert_if_present(env, "HTTP_LISTEN", self.http_listen);
+        insert_if_present(env, "PROXY_LISTEN_HOST", self.proxy_listen_host);
         insert_if_present(env, "PORT_RANGE", self.port_range);
         insert_if_present(env, "AUTH_TOKEN", self.auth_token);
         insert_if_present(env, "SQLITE_PATH", self.sqlite_path);
@@ -273,7 +281,10 @@ async fn run_with_listener(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let metrics = Arc::new(Metrics::default());
     let repo = Repository::open(&config.db_path).await?;
-    let runtime = RealRuntime::new(RealRuntimeConfig::loopback(metrics.clone()));
+    let runtime = RealRuntime::new(RealRuntimeConfig::with_bind_host(
+        config.proxy_listen_host.clone(),
+        metrics.clone(),
+    ));
     let service = Arc::new(Service::new(
         repo,
         runtime,
@@ -321,6 +332,8 @@ mod tests {
         assert!(help.contains("relayd starts an authenticated HTTP control plane"));
         assert!(help.contains("--http-listen <ADDR>"));
         assert!(help.contains("env: HTTP_LISTEN"));
+        assert!(help.contains("--proxy-listen-host <HOST>"));
+        assert!(help.contains("env: PROXY_LISTEN_HOST"));
         assert!(help.contains("--port-range <START-END>"));
         assert!(help.contains("--auth-token <TOKEN>"));
         assert!(help.contains("--sqlite-path <PATH>"));
@@ -334,6 +347,8 @@ mod tests {
             "relayd",
             "--http-listen",
             "127.0.0.1:19080",
+            "--proxy-listen-host",
+            "127.0.0.1",
             "--port-range",
             "20000-20005",
             "--auth-token",
@@ -349,6 +364,7 @@ mod tests {
         .unwrap();
         let env = HashMap::from([
             ("HTTP_LISTEN".to_owned(), ":8080".to_owned()),
+            ("PROXY_LISTEN_HOST".to_owned(), "0.0.0.0".to_owned()),
             ("PORT_RANGE".to_owned(), "10000-10010".to_owned()),
             ("AUTH_TOKEN".to_owned(), "env-token".to_owned()),
             ("SQLITE_PATH".to_owned(), "env.sqlite3".to_owned()),
@@ -358,6 +374,7 @@ mod tests {
 
         assert_eq!(config.http_listen_host, "127.0.0.1");
         assert_eq!(config.http_listen_port, 19080);
+        assert_eq!(config.proxy_listen_host, "127.0.0.1");
         assert_eq!(config.port_range.start, 20000);
         assert_eq!(config.port_range.end, 20005);
         assert_eq!(config.auth_token, "cli-token");
@@ -412,7 +429,10 @@ mod tests {
         let config = Config::from_env_map(&env).unwrap();
         let metrics = Arc::new(Metrics::default());
         let repo = Repository::open(&config.db_path).await.unwrap();
-        let runtime = RealRuntime::new(RealRuntimeConfig::loopback(metrics.clone()));
+        let runtime = RealRuntime::new(RealRuntimeConfig::with_bind_host(
+            config.proxy_listen_host.clone(),
+            metrics.clone(),
+        ));
         let service = Arc::new(Service::new(
             repo,
             runtime,

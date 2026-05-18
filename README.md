@@ -11,6 +11,7 @@ Linux-first Rust port-forwarder with:
 
 ## Env
 - `HTTP_LISTEN` — HTTP API listen address, e.g. `:8080` or `127.0.0.1:8080`
+- `PROXY_LISTEN_HOST` — TCP/UDP relay listen host, default `0.0.0.0`
 - `PORT_RANGE` — default `10000-30000`
 - `AUTH_TOKEN` — required bearer token
 - `SQLITE_PATH` — optional, default `relayd.sqlite3`
@@ -20,7 +21,7 @@ Linux-first Rust port-forwarder with:
 
 Optional compatibility feature gates are parsed only where they are implemented by the Rust runtime. `TCP_SPLICE_ENABLED` and `FORCE_TCP_COPY_FALLBACK` are intentionally ignored because this Rust runtime does not expose the old Linux `splice(2)` TCP path.
 
-If `HTTP_LISTEN` is `:PORT`, relayd binds `127.0.0.1:PORT`.
+If `HTTP_LISTEN` is `:PORT`, relayd binds the HTTP API to `127.0.0.1:PORT`. Relay listeners use `PROXY_LISTEN_HOST` independently, so allocations bind TCP/UDP ports on `0.0.0.0` by default.
 
 ## Build and test
 
@@ -41,6 +42,7 @@ cargo clippy --locked --lib --tests -- -D warnings
 ```bash
 target/x86_64-unknown-linux-musl/release/relayd \
   --http-listen :8080 \
+  --proxy-listen-host 0.0.0.0 \
   --auth-token mytoken
 ```
 
@@ -49,7 +51,7 @@ Environment variables remain supported and can be mixed with CLI options; CLI op
 For development:
 
 ```bash
-cargo run --locked --bin relayd -- --http-listen :8080 --auth-token mytoken
+cargo run --locked --bin relayd -- --http-listen :8080 --proxy-listen-host 127.0.0.1 --auth-token mytoken
 ```
 
 ## Docker
@@ -68,7 +70,7 @@ docker run --rm \
   relayd:local
 ```
 
-Docker uses `HTTP_LISTEN=0.0.0.0:8080` so the service is reachable through the published port. For local non-container runs, `:8080` still maps to `127.0.0.1:8080`.
+Docker uses `HTTP_LISTEN=0.0.0.0:8080` so the service is reachable through the published port. Relay TCP/UDP ports bind `0.0.0.0` by default via `PROXY_LISTEN_HOST`. For local non-container runs, `:8080` still maps the HTTP API to `127.0.0.1:8080`; set `PROXY_LISTEN_HOST=127.0.0.1` if relay ports should be loopback-only.
 
 ## End-to-end bandwidth harness
 Local e2e runs use `scripts/ci/e2e_iperf3.sh` to drive real TCP and UDP `iperf3` traffic through `relayd`.

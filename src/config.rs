@@ -24,6 +24,7 @@ impl PortRange {
 pub struct Config {
     pub http_listen_host: String,
     pub http_listen_port: u16,
+    pub proxy_listen_host: String,
     pub port_range: PortRange,
     pub auth_token: String,
     pub tcp_session_model_enabled: bool,
@@ -70,6 +71,11 @@ impl Config {
                 .map(String::as_str)
                 .unwrap_or(":8080"),
         )?;
+        let proxy_listen_host = env
+            .get("PROXY_LISTEN_HOST")
+            .map(String::as_str)
+            .unwrap_or("0.0.0.0");
+        parse_ip_literal(proxy_listen_host)?;
         let port_range = parse_port_range(
             env.get("PORT_RANGE")
                 .map(String::as_str)
@@ -85,6 +91,7 @@ impl Config {
         Ok(Self {
             http_listen_host: listen.host,
             http_listen_port: listen.port,
+            proxy_listen_host: proxy_listen_host.to_owned(),
             port_range,
             auth_token,
             tcp_session_model_enabled: env_bool(env, "TCP_SESSION_MODEL_ENABLED"),
@@ -262,6 +269,7 @@ mod tests {
         let cfg = Config::from_env_map(&env).unwrap();
         assert_eq!(cfg.http_listen_host, "127.0.0.1");
         assert_eq!(cfg.http_listen_port, 8080);
+        assert_eq!(cfg.proxy_listen_host, "0.0.0.0");
         assert_eq!(
             cfg.port_range,
             PortRange {
@@ -275,6 +283,24 @@ mod tests {
         assert_eq!(cfg.tcp_session_model_max_active, 256);
         assert_eq!(cfg.udp_fast_path_segment_size, 1472);
         assert_eq!(cfg.udp_socket_recv_buffer_bytes, 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn config_from_env_map_parses_proxy_listen_host() {
+        let mut env = env_with_token();
+        env.insert("PROXY_LISTEN_HOST".to_owned(), "127.0.0.1".to_owned());
+        let cfg = Config::from_env_map(&env).unwrap();
+        assert_eq!(cfg.proxy_listen_host, "127.0.0.1");
+
+        env.insert("PROXY_LISTEN_HOST".to_owned(), "::1".to_owned());
+        let cfg = Config::from_env_map(&env).unwrap();
+        assert_eq!(cfg.proxy_listen_host, "::1");
+
+        env.insert("PROXY_LISTEN_HOST".to_owned(), "localhost".to_owned());
+        assert!(matches!(
+            Config::from_env_map(&env),
+            Err(ConfigError::InvalidHost)
+        ));
     }
 
     #[test]
@@ -295,6 +321,7 @@ mod tests {
         let cfg = Config {
             http_listen_host: "127.0.0.1".to_owned(),
             http_listen_port: 8080,
+            proxy_listen_host: "0.0.0.0".to_owned(),
             port_range: PortRange {
                 start: 10000,
                 end: 30000,
