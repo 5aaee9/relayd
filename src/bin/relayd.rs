@@ -134,6 +134,13 @@ struct Cli {
 
     #[arg(
         long,
+        value_name = "COUNT",
+        help = "Maximum active UDP sessions per relay port (env: UDP_MAX_SESSIONS). Default: 65536."
+    )]
+    udp_max_sessions: Option<String>,
+
+    #[arg(
+        long,
         action = clap::ArgAction::SetTrue,
         help = "Enable UDP io_uring compatibility flag parsed by config (env: UDP_IO_URING_ENABLED)."
     )]
@@ -247,6 +254,7 @@ impl Cli {
             self.tcp_session_model_max_active,
         );
         insert_if_present(env, "UDP_SESSION_WORKERS", self.udp_session_workers);
+        insert_if_present(env, "UDP_MAX_SESSIONS", self.udp_max_sessions);
         insert_flag(env, "UDP_IO_URING_ENABLED", self.udp_io_uring_enabled);
         insert_flag(env, "UDP_GRO_ENABLED", self.udp_gro_enabled);
         insert_flag(
@@ -274,6 +282,11 @@ fn config_from_cli_and_env(
     Config::from_env_map(&env)
 }
 
+fn real_runtime_config_from_config(config: &Config, metrics: Arc<Metrics>) -> RealRuntimeConfig {
+    RealRuntimeConfig::with_bind_host(config.proxy_listen_host.clone(), metrics)
+        .with_udp_max_sessions(config.udp_max_sessions)
+}
+
 async fn run_with_config(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let host: IpAddr = config
         .http_listen_host
@@ -298,10 +311,7 @@ async fn run_with_listener(
     );
     let metrics = Arc::new(Metrics::default());
     let repo = Repository::open(&config.db_path).await?;
-    let runtime = RealRuntime::new(RealRuntimeConfig::with_bind_host(
-        config.proxy_listen_host.clone(),
-        metrics.clone(),
-    ));
+    let runtime = RealRuntime::new(real_runtime_config_from_config(&config, metrics.clone()));
     let service = Arc::new(Service::new(
         repo,
         runtime,
@@ -357,6 +367,8 @@ mod tests {
         assert!(help.contains("--auth-token <TOKEN>"));
         assert!(help.contains("--sqlite-path <PATH>"));
         assert!(help.contains("--runtime-apply-timeout-ms <MILLISECONDS>"));
+        assert!(help.contains("--udp-max-sessions <COUNT>"));
+        assert!(help.contains("env: UDP_MAX_SESSIONS"));
         assert!(help.contains("--udp-socket-rcvbuf-bytes <BYTES>"));
     }
 
@@ -376,6 +388,8 @@ mod tests {
             "cli.sqlite3",
             "--runtime-apply-timeout-ms",
             "1500",
+            "--udp-max-sessions",
+            "777",
             "--tcp-session-model-enabled",
             "--udp-socket-rcvbuf-bytes",
             "4096",
@@ -387,6 +401,7 @@ mod tests {
             ("PORT_RANGE".to_owned(), "10000-10010".to_owned()),
             ("AUTH_TOKEN".to_owned(), "env-token".to_owned()),
             ("SQLITE_PATH".to_owned(), "env.sqlite3".to_owned()),
+            ("UDP_MAX_SESSIONS".to_owned(), "333".to_owned()),
         ]);
 
         let config = config_from_cli_and_env(cli, env).unwrap();
@@ -399,8 +414,27 @@ mod tests {
         assert_eq!(config.auth_token, "cli-token");
         assert_eq!(config.db_path, "cli.sqlite3");
         assert_eq!(config.runtime_apply_timeout_ms, 1500);
+        assert_eq!(config.udp_max_sessions, 777);
         assert!(config.tcp_session_model_enabled);
         assert_eq!(config.udp_socket_recv_buffer_bytes, 4096);
+    }
+
+    #[test]
+    fn runtime_config_from_config_carries_udp_max_sessions() {
+        let mut env = HashMap::from([
+            ("AUTH_TOKEN".to_owned(), "secret-token".to_owned()),
+            ("UDP_MAX_SESSIONS".to_owned(), "444".to_owned()),
+        ]);
+        let config = Config::from_env_map(&env).unwrap();
+        let runtime_config = real_runtime_config_from_config(&config, Arc::new(Metrics::default()));
+
+        assert_eq!(runtime_config.udp_max_sessions(), 444);
+
+        env.insert("UDP_MAX_SESSIONS".to_owned(), "555".to_owned());
+        let config = Config::from_env_map(&env).unwrap();
+        let runtime_config = real_runtime_config_from_config(&config, Arc::new(Metrics::default()));
+
+        assert_eq!(runtime_config.udp_max_sessions(), 555);
     }
 
     #[tokio::test]

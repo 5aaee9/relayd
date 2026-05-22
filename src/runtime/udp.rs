@@ -37,6 +37,11 @@ impl UdpRuntimeConfig {
         self.session_ttl = ttl;
         self
     }
+
+    pub fn with_udp_max_sessions(mut self, max_sessions: usize) -> Self {
+        self.max_sessions = max_sessions;
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -126,6 +131,11 @@ impl UdpRuntime {
             config,
             entries: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn max_sessions(&self) -> usize {
+        self.config.max_sessions
     }
 
     fn entry_state_for(allocation: &Allocation) -> EntryState {
@@ -717,6 +727,14 @@ mod tests {
     async fn free_udp_port() -> u16 {
         let socket = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
         socket.local_addr().unwrap().port()
+    }
+
+    #[test]
+    fn udp_runtime_config_accepts_custom_max_sessions() {
+        let config =
+            UdpRuntimeConfig::loopback(Arc::new(Metrics::default())).with_udp_max_sessions(123);
+
+        assert_eq!(config.max_sessions, 123);
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub struct RealRuntimeConfig {
     metrics: Arc<Metrics>,
     bind_host: String,
     udp_session_ttl: Duration,
+    udp_max_sessions: usize,
 }
 
 impl RealRuntimeConfig {
@@ -26,12 +27,22 @@ impl RealRuntimeConfig {
             metrics,
             bind_host: bind_host.into(),
             udp_session_ttl: Duration::from_millis(60_000),
+            udp_max_sessions: 65_536,
         }
     }
 
     pub fn with_udp_session_ttl(mut self, ttl: Duration) -> Self {
         self.udp_session_ttl = ttl;
         self
+    }
+
+    pub fn with_udp_max_sessions(mut self, max_sessions: usize) -> Self {
+        self.udp_max_sessions = max_sessions;
+        self
+    }
+
+    pub fn udp_max_sessions(&self) -> usize {
+        self.udp_max_sessions
     }
 }
 
@@ -50,7 +61,8 @@ impl RealRuntime {
         ));
         let udp = UdpRuntime::new(
             UdpRuntimeConfig::with_bind_host(config.bind_host, config.metrics.clone())
-                .with_session_ttl(config.udp_session_ttl),
+                .with_session_ttl(config.udp_session_ttl)
+                .with_udp_max_sessions(config.udp_max_sessions),
         );
         Self {
             tcp,
@@ -246,6 +258,15 @@ mod tests {
             created_at_ms: 1000,
             updated_at_ms: 1000,
         }
+    }
+
+    #[test]
+    fn real_runtime_config_propagates_udp_max_sessions() {
+        let config =
+            RealRuntimeConfig::loopback(Arc::new(Metrics::default())).with_udp_max_sessions(321);
+        let runtime = RealRuntime::new(config);
+
+        assert_eq!(runtime.udp.max_sessions(), 321);
     }
 
     async fn free_tcp_port() -> u16 {

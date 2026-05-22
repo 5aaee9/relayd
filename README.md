@@ -17,6 +17,7 @@ Linux-first Rust port-forwarder with:
 - `SQLITE_PATH` — optional, default `relayd.sqlite3`
 - `RUNTIME_APPLY_TIMEOUT_MS` — optional, default `2000`
 - `RESTORE_SWEEP_TIMEOUT_MS` — optional, default `30000`
+- `UDP_MAX_SESSIONS` — maximum active UDP sessions per relay port, default `65536`
 - `UDP_SOCKET_RCVBUF_BYTES` / `UDP_SOCKET_SNDBUF_BYTES` — parsed for compatibility, default `8388608`
 
 Optional compatibility feature gates are parsed only where they are implemented by the Rust runtime. `TCP_SPLICE_ENABLED` and `FORCE_TCP_COPY_FALLBACK` are intentionally ignored because this Rust runtime does not expose the old Linux `splice(2)` TCP path.
@@ -62,10 +63,12 @@ target/x86_64-unknown-linux-musl/release/relayd \
 
 Environment variables remain supported and can be mixed with CLI options; CLI options take precedence. Use `relayd --help` to see all options and their matching environment variables.
 
+CLI options override matching environment variables; for example `--udp-max-sessions 131072` overrides `UDP_MAX_SESSIONS` for the current process.
+
 For development:
 
 ```bash
-cargo run --locked --bin relayd -- --http-listen :8080 --proxy-listen-host 127.0.0.1 --auth-token mytoken
+cargo run --locked --bin relayd -- --http-listen :8080 --proxy-listen-host 127.0.0.1 --udp-max-sessions 131072 --auth-token mytoken
 ```
 
 ## Docker

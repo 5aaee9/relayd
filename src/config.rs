@@ -39,6 +39,7 @@ pub struct Config {
     pub udp_fast_path_enabled: bool,
     pub udp_fast_path_segment_size: u32,
     pub udp_fast_path_gso_burst: u32,
+    pub udp_max_sessions: usize,
     pub udp_socket_recv_buffer_bytes: u32,
     pub udp_socket_send_buffer_bytes: u32,
     pub runtime_apply_timeout_ms: u32,
@@ -106,6 +107,7 @@ impl Config {
             udp_fast_path_enabled: env_bool(env, "UDP_FAST_PATH_ENABLED"),
             udp_fast_path_segment_size: env_u32(env, "UDP_FAST_PATH_SEGMENT_SIZE", 1472)?,
             udp_fast_path_gso_burst: env_u32(env, "UDP_FAST_PATH_GSO_BURST", 16)?,
+            udp_max_sessions: env_nonzero_usize(env, "UDP_MAX_SESSIONS", 65_536)?,
             udp_socket_recv_buffer_bytes: env_u32(env, "UDP_SOCKET_RCVBUF_BYTES", 8 * 1024 * 1024)?,
             udp_socket_send_buffer_bytes: env_u32(env, "UDP_SOCKET_SNDBUF_BYTES", 8 * 1024 * 1024)?,
             runtime_apply_timeout_ms: env_u32(env, "RUNTIME_APPLY_TIMEOUT_MS", 2000)?,
@@ -199,6 +201,21 @@ fn env_u32(
     }
 }
 
+fn env_nonzero_usize(
+    env: &HashMap<String, String>,
+    name: &'static str,
+    default_value: usize,
+) -> Result<usize, ConfigError> {
+    match env.get(name) {
+        Some(value) => value
+            .parse::<usize>()
+            .ok()
+            .filter(|parsed| *parsed > 0)
+            .ok_or(ConfigError::InvalidInteger(name)),
+        None => Ok(default_value),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,6 +303,37 @@ mod tests {
     }
 
     #[test]
+    fn config_from_env_map_defaults_udp_max_sessions_to_65536() {
+        let cfg = Config::from_env_map(&env_with_token()).unwrap();
+        assert_eq!(cfg.udp_max_sessions, 65_536);
+    }
+
+    #[test]
+    fn config_from_env_map_parses_udp_max_sessions_override() {
+        let mut env = env_with_token();
+        env.insert("UDP_MAX_SESSIONS".to_owned(), "12345".to_owned());
+        let cfg = Config::from_env_map(&env).unwrap();
+        assert_eq!(cfg.udp_max_sessions, 12_345);
+    }
+
+    #[test]
+    fn config_from_env_map_rejects_invalid_udp_max_sessions() {
+        let mut env = env_with_token();
+        env.insert("UDP_MAX_SESSIONS".to_owned(), "bad".to_owned());
+        assert!(matches!(
+            Config::from_env_map(&env),
+            Err(ConfigError::InvalidInteger("UDP_MAX_SESSIONS"))
+        ));
+
+        let mut env = env_with_token();
+        env.insert("UDP_MAX_SESSIONS".to_owned(), "0".to_owned());
+        assert!(matches!(
+            Config::from_env_map(&env),
+            Err(ConfigError::InvalidInteger("UDP_MAX_SESSIONS"))
+        ));
+    }
+
+    #[test]
     fn config_from_env_map_parses_proxy_listen_host() {
         let mut env = env_with_token();
         env.insert("PROXY_LISTEN_HOST".to_owned(), "127.0.0.1".to_owned());
@@ -339,6 +387,7 @@ mod tests {
             udp_fast_path_enabled: false,
             udp_fast_path_segment_size: 1472,
             udp_fast_path_gso_burst: 16,
+            udp_max_sessions: 65_536,
             udp_socket_recv_buffer_bytes: 8 * 1024 * 1024,
             udp_socket_send_buffer_bytes: 8 * 1024 * 1024,
             runtime_apply_timeout_ms: 2000,
