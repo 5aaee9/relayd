@@ -13,6 +13,7 @@
 ## File Structure
 
 - Modify `Cargo.toml`: add `tracing` and `tracing-subscriber` dependencies.
+- Modify `Cargo.lock`: resolve and lock the new dependencies before running `--locked` verification.
 - Modify `src/bin/relayd.rs`: initialize subscriber, replace stderr shutdown failure with tracing error, add startup/restore/serve info events.
 - Modify `src/service/allocation_service.rs`: import `tracing::info` and add success lifecycle events to `create_allocation`, `put_binding`, `update_allocation`, `delete_binding`, and `delete_allocation`; add tests capturing logs.
 - Modify `README.md`: document default stderr logging and `RUST_LOG` filtering.
@@ -21,6 +22,7 @@
 
 **Files:**
 - Modify: `Cargo.toml`
+- Modify: `Cargo.lock`
 - Modify: `src/bin/relayd.rs`
 
 - [ ] **Step 1: Add dependencies**
@@ -31,6 +33,14 @@ In `Cargo.toml`, add these dependencies under `[dependencies]`:
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 ```
+
+Then resolve the lockfile before any `--locked` commands:
+
+```bash
+cargo generate-lockfile
+```
+
+Expected: `Cargo.lock` is updated to include the new tracing subscriber dependency graph.
 
 - [ ] **Step 2: Initialize tracing in the binary**
 
@@ -401,7 +411,7 @@ Run:
 
 ```bash
 git status --short
-git diff -- Cargo.toml Cargo.lock src/bin/relayd.rs src/service/allocation_service.rs README.md
+git diff -- Cargo.toml Cargo.lock src/bin/relayd.rs src/service/allocation_service.rs README.md docs/superpowers/specs/2026-05-22-tracing-lifecycle-logs-design.md docs/superpowers/plans/2026-05-22-tracing-lifecycle-logs.md
 ```
 
 Expected: only spec, plan, dependency, logging, tests, and README changes are present.
