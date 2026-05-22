@@ -32,7 +32,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
-          components: rustfmt, clippy
+          components: rustfmt, clippy, llvm-tools-preview
           targets: ${{ env.BUILD_TARGET }}
 
       - name: Cache Rust
@@ -46,8 +46,23 @@ jobs:
         with:
           tool: nextest@0.9
 
-      - name: Rust tests
-        run: cargo nextest run --locked
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Rust tests with coverage
+        run: |
+          mkdir -p target/llvm-cov
+          cargo llvm-cov --no-report nextest --locked
+          cargo llvm-cov report
+          cargo llvm-cov report --lcov --output-path target/llvm-cov/lcov.info
+
+      - name: Upload Rust coverage data
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-lcov
+          path: target/llvm-cov/lcov.info
 
       - name: Rust doc tests
         run: cargo test --locked --doc
