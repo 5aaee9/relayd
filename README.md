@@ -39,14 +39,18 @@ Release builds use [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbui
 
 ```bash
 cargo install cargo-zigbuild --locked
+cargo install cargo-nextest --locked
 rustup target add x86_64-unknown-linux-musl
 ```
 
 ```bash
 cargo zigbuild --locked --release --bin relayd --target x86_64-unknown-linux-musl
-cargo test --locked
+cargo nextest run --locked
+cargo test --locked --doc
 cargo clippy --locked --lib --tests -- -D warnings
 ```
+
+CI installs nextest with `taiki-e/install-action@v2` and `tool: nextest@0.9`, runs normal Rust tests with `cargo nextest run --locked`, and keeps `cargo test --locked --doc` as a separate doctest coverage step because nextest does not run doctests.
 
 ## Run
 ```bash

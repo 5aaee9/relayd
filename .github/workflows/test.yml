@@ -41,8 +41,16 @@ jobs:
       - name: Rust format check
         run: cargo fmt -- --check
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9
+
       - name: Rust tests
-        run: cargo test --locked
+        run: cargo nextest run --locked
+
+      - name: Rust doc tests
+        run: cargo test --locked --doc
 
       - name: Rust clippy
         run: cargo clippy --locked --lib --tests -- -D warnings
