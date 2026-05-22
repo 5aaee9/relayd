@@ -23,6 +23,16 @@ Optional compatibility feature gates are parsed only where they are implemented 
 
 If `HTTP_LISTEN` is `:PORT`, relayd binds the HTTP API to `127.0.0.1:PORT`. Relay listeners use `PROXY_LISTEN_HOST` independently, so allocations bind TCP/UDP ports on `0.0.0.0` by default.
 
+## Logging
+
+relayd initializes a `tracing` formatter and writes logs to stderr. The default filter is `info`, which includes lifecycle events for relay allocation creation, binding assignment/update, binding deletion, allocation deletion, startup restore, and shutdown-signal errors.
+
+Use `RUST_LOG` to adjust filtering, for example:
+
+```bash
+RUST_LOG=relayd=debug cargo run --locked --bin relayd -- --http-listen :8080 --proxy-listen-host 127.0.0.1 --auth-token mytoken
+```
+
 ## Build and test
 
 Release builds use [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild) and target `x86_64-unknown-linux-musl` so published artifacts are musl-linked Linux binaries. Install once with:

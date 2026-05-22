@@ -10,13 +10,22 @@ use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tracing::{error, info};
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
+    init_tracing();
     if let Err(error) = run().await {
+        error!(%error, "relayd exited with error");
         eprintln!("relayd: {error}");
         std::process::exit(1);
     }
+}
+
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -279,6 +288,14 @@ async fn run_with_listener(
     config: Config,
     listener: TcpListener,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    info!(
+        http_listen = %listener.local_addr()?,
+        proxy_listen_host = %config.proxy_listen_host,
+        port_range_start = config.port_range.start,
+        port_range_end = config.port_range.end,
+        sqlite_path = %config.db_path,
+        "starting relayd"
+    );
     let metrics = Arc::new(Metrics::default());
     let repo = Repository::open(&config.db_path).await?;
     let runtime = RealRuntime::new(RealRuntimeConfig::with_bind_host(
@@ -292,6 +309,7 @@ async fn run_with_listener(
         config.runtime_apply_timeout_ms,
     ));
     service.restore_all(config.restore_sweep_timeout_ms).await?;
+    info!("restored persisted relay allocations");
     let state = AppState::new(service, metrics, config.auth_token);
     serve_listener(listener, state).await
 }
@@ -316,7 +334,7 @@ async fn serve_listener_until_shutdown(
 
 async fn shutdown_signal() {
     if let Err(error) = tokio::signal::ctrl_c().await {
-        eprintln!("relayd: failed to listen for shutdown signal: {error}");
+        error!(%error, "failed to listen for shutdown signal");
     }
 }
 

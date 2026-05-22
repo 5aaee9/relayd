@@ -9,6 +9,7 @@ use crate::uuid::generate_uuid_v7;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
+use tracing::info;
 
 pub type IdGenerator = Arc<dyn Fn() -> String + Send + Sync>;
 
@@ -137,6 +138,15 @@ impl<R: RuntimeFacade> Service<R> {
                 return Err(error);
             }
 
+            info!(
+                allocation_id = %allocation.id,
+                protocol = %allocation.protocol,
+                relay_port = allocation.port,
+                target_port = ?allocation.target_port,
+                host = ?allocation.host,
+                "relay_allocation_created"
+            );
+
             return Ok(allocation);
         }
 
@@ -262,6 +272,17 @@ impl<R: RuntimeFacade> Service<R> {
             .update(&updated_allocation, self.apply_timeout_ms)
             .await?;
 
+        info!(
+            allocation_id = %binding.allocation_id,
+            protocol = %updated_allocation.protocol,
+            relay_port = updated_allocation.port,
+            target_port = binding.target_port,
+            host = ?binding.host,
+            previous_target_port = ?existing_binding.as_ref().map(|binding| binding.target_port),
+            previous_host = ?existing_binding.as_ref().and_then(|binding| binding.host.as_deref()),
+            "relay_binding_assigned"
+        );
+
         Ok(binding)
     }
 
@@ -271,9 +292,9 @@ impl<R: RuntimeFacade> Service<R> {
         let Some(allocation) = self.repo.get_allocation(id).await? else {
             return Err(ServiceError::NotFound);
         };
-        if self.repo.get_binding(id).await?.is_none() {
+        let Some(existing_binding) = self.repo.get_binding(id).await? else {
             return Err(ServiceError::NotFound);
-        }
+        };
 
         let now = current_time_ms();
         if !self.repo.delete_binding(id, now).await? {
@@ -292,6 +313,15 @@ impl<R: RuntimeFacade> Service<R> {
         self.runtime
             .update(&updated_allocation, self.apply_timeout_ms)
             .await?;
+
+        info!(
+            allocation_id = %id,
+            protocol = %updated_allocation.protocol,
+            relay_port = updated_allocation.port,
+            previous_target_port = existing_binding.target_port,
+            previous_host = ?existing_binding.host,
+            "relay_binding_deleted"
+        );
 
         Ok(())
     }
@@ -347,6 +377,17 @@ impl<R: RuntimeFacade> Service<R> {
             .update(&updated_allocation, self.apply_timeout_ms)
             .await?;
 
+        info!(
+            allocation_id = %binding.allocation_id,
+            protocol = %updated_allocation.protocol,
+            relay_port = updated_allocation.port,
+            target_port = binding.target_port,
+            host = ?binding.host,
+            previous_target_port = ?existing_binding.as_ref().map(|binding| binding.target_port),
+            previous_host = ?existing_binding.as_ref().and_then(|binding| binding.host.as_deref()),
+            "relay_binding_assigned"
+        );
+
         Ok(updated_allocation)
     }
 
@@ -373,6 +414,15 @@ impl<R: RuntimeFacade> Service<R> {
         if !self.repo.delete_allocation(id).await? {
             return Err(ServiceError::NotFound);
         }
+
+        info!(
+            allocation_id = %allocation.id,
+            protocol = %allocation.protocol,
+            relay_port = allocation.port,
+            target_port = ?allocation.target_port,
+            host = ?allocation.host,
+            "relay_allocation_deleted"
+        );
 
         Ok(())
     }
@@ -478,8 +528,10 @@ mod tests {
     use super::*;
     use crate::runtime::facade::InMemoryRuntime;
     use sqlx::Executor;
+    use std::io;
     use std::path::PathBuf;
-    use std::sync::Mutex as StdMutex;
+    use std::sync::{Mutex as StdMutex, Once, OnceLock};
+    use tracing_subscriber::fmt::MakeWriter;
 
     async fn temp_repo() -> Repository {
         let path = temp_db_path();
@@ -557,6 +609,161 @@ mod tests {
             created_at_ms,
             updated_at_ms,
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedLogWriter {
+        buffer: Arc<StdMutex<Vec<u8>>>,
+    }
+
+    impl SharedLogWriter {
+        fn clear(&self) {
+            self.buffer.lock().unwrap().clear();
+        }
+
+        fn contents(&self) -> String {
+            String::from_utf8(self.buffer.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for SharedLogWriter {
+        type Writer = SharedLogSink;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogSink {
+                buffer: Arc::clone(&self.buffer),
+            }
+        }
+    }
+
+    struct SharedLogSink {
+        buffer: Arc<StdMutex<Vec<u8>>>,
+    }
+
+    impl io::Write for SharedLogSink {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn install_log_capture_subscriber(writer: SharedLogWriter) {
+        static INSTALL: Once = Once::new();
+        INSTALL.call_once(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(writer)
+                .with_ansi(false)
+                .with_target(false)
+                .with_level(false)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("test tracing subscriber should install once");
+        });
+    }
+
+    async fn capture_service_logs<F, Fut>(operation: F) -> String
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        static WRITER: OnceLock<SharedLogWriter> = OnceLock::new();
+        static CAPTURE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+        let writer = WRITER.get_or_init(SharedLogWriter::default).clone();
+        install_log_capture_subscriber(writer.clone());
+        let _guard = CAPTURE_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
+        writer.clear();
+        operation().await;
+        writer.contents()
+    }
+
+    #[tokio::test]
+    async fn create_allocation_emits_lifecycle_log() {
+        let svc = service(temp_repo().await, InMemoryRuntime::default());
+
+        let logs = capture_service_logs(|| async {
+            let allocation = svc
+                .create_allocation(Protocol::Tcp, Some(8080))
+                .await
+                .unwrap();
+            assert_eq!(allocation.id, "alloc-1");
+        })
+        .await;
+
+        assert!(logs.contains("relay_allocation_created"));
+        assert!(logs.contains("allocation_id=alloc-1"));
+        assert!(logs.contains("protocol=tcp"));
+        assert!(logs.contains("relay_port=10000"));
+        assert!(logs.contains("target_port=Some(8080)"));
+    }
+
+    #[tokio::test]
+    async fn binding_assignment_and_deletion_emit_lifecycle_logs() {
+        let repo = temp_repo().await;
+        repo.insert_allocation(&allocation("alloc-1", Protocol::Tcp, 10000, None, None))
+            .await
+            .unwrap();
+        let svc = service(repo, InMemoryRuntime::default());
+
+        let logs = capture_service_logs(|| async {
+            svc.put_binding("alloc-1", "127.0.0.1", 8080).await.unwrap();
+            svc.put_binding("alloc-1", "127.0.0.2", 9090).await.unwrap();
+            svc.delete_binding("alloc-1").await.unwrap();
+        })
+        .await;
+
+        assert!(logs.matches("relay_binding_assigned").count() >= 2);
+        assert!(logs.contains("allocation_id=alloc-1"));
+        assert!(logs.contains("relay_port=10000"));
+        assert!(logs.contains("target_port=8080"));
+        assert!(logs.contains("host=Some(\"127.0.0.1\")"));
+        assert!(logs.contains("previous_target_port=Some(8080)"));
+        assert!(logs.contains("previous_host=Some(\"127.0.0.1\")"));
+        assert!(logs.contains("relay_binding_deleted"));
+        assert!(logs.contains("previous_target_port=9090"));
+        assert!(logs.contains("previous_host=Some(\"127.0.0.2\")"));
+    }
+
+    #[tokio::test]
+    async fn update_allocation_and_delete_allocation_emit_lifecycle_logs() {
+        let repo = temp_repo().await;
+        repo.insert_allocation(&allocation(
+            "alloc-1",
+            Protocol::Udp,
+            10000,
+            Some(5353),
+            None,
+        ))
+        .await
+        .unwrap();
+        repo.put_binding(&binding("alloc-1", 5353, Some("127.0.0.1"), 1000, 1100))
+            .await
+            .unwrap();
+        let svc = service(repo, InMemoryRuntime::default());
+
+        let logs = capture_service_logs(|| async {
+            svc.update_allocation("alloc-1", Some(5354), Some("127.0.0.2"))
+                .await
+                .unwrap();
+            svc.delete_allocation("alloc-1").await.unwrap();
+        })
+        .await;
+
+        assert!(logs.contains("relay_binding_assigned"));
+        assert!(logs.contains("protocol=udp"));
+        assert!(logs.contains("target_port=5354"));
+        assert!(logs.contains("host=Some(\"127.0.0.2\")"));
+        assert!(logs.contains("previous_target_port=Some(5353)"));
+        assert!(logs.contains("relay_allocation_deleted"));
+        assert!(logs.contains("target_port=Some(5354)"));
+        assert!(logs.contains("host=Some(\"127.0.0.2\")"));
     }
 
     #[tokio::test]
