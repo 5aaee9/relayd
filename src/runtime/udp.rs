@@ -295,7 +295,7 @@ impl UdpRuntime {
         target_port: u16,
         generation: u64,
     ) -> Option<Arc<UdpSession>> {
-        let upstream = match UdpSocket::bind(("127.0.0.1", 0)).await {
+        let upstream = match Self::bind_upstream_socket().await {
             Ok(socket) => Arc::new(socket),
             Err(_) => {
                 entry.global_metrics.udp_send_errors_total.inc();
@@ -320,6 +320,10 @@ impl UdpRuntime {
             _guard: SessionGuard::new(entry.clone()),
         });
         Some(session)
+    }
+
+    async fn bind_upstream_socket() -> std::io::Result<UdpSocket> {
+        UdpSocket::bind(("0.0.0.0", 0)).await
     }
 
     async fn session_for(
@@ -711,6 +715,16 @@ mod tests {
     async fn free_udp_port() -> u16 {
         let socket = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
         socket.local_addr().unwrap().port()
+    }
+
+    #[tokio::test]
+    async fn udp_upstream_socket_binds_unspecified_addr_for_non_loopback_targets() {
+        let socket = UdpRuntime::bind_upstream_socket().await.unwrap();
+
+        assert_eq!(
+            socket.local_addr().unwrap().ip(),
+            std::net::Ipv4Addr::UNSPECIFIED
+        );
     }
 
     fn temp_db_path() -> PathBuf {
