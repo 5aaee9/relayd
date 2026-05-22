@@ -268,8 +268,9 @@ where
         .with_level(false)
         .finish();
     let dispatch = Dispatch::new(subscriber);
-    dispatcher::with_default(&dispatch, || async move { operation().await })
-        .await;
+    let _guard = dispatcher::set_default(&dispatch);
+    operation().await;
+    drop(_guard);
     writer.contents()
 }
 ```
@@ -346,8 +347,8 @@ async fn update_allocation_and_delete_allocation_emit_lifecycle_logs() {
     assert!(logs.contains("host=Some(\"127.0.0.2\")"));
     assert!(logs.contains("previous_target_port=Some(5353)"));
     assert!(logs.contains("relay_allocation_deleted"));
-    assert!(logs.contains("target_port=Some(5353)"));
-    assert!(logs.contains("host=Some(\"127.0.0.1\")"));
+    assert!(logs.contains("target_port=Some(5354)"));
+    assert!(logs.contains("host=Some(\"127.0.0.2\")"));
 }
 ```
 
