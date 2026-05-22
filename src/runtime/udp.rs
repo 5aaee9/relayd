@@ -47,6 +47,7 @@ pub struct UdpRuntime {
 
 struct ListenerEntry {
     port: u16,
+    bind_host: String,
     listener_socket: Arc<UdpSocket>,
     state: RwLock<EntryState>,
     metrics: ListenerMetrics,
@@ -295,7 +296,7 @@ impl UdpRuntime {
         target_port: u16,
         generation: u64,
     ) -> Option<Arc<UdpSession>> {
-        let upstream = match Self::bind_upstream_socket().await {
+        let upstream = match Self::bind_upstream_socket(&entry.bind_host).await {
             Ok(socket) => Arc::new(socket),
             Err(_) => {
                 entry.global_metrics.udp_send_errors_total.inc();
@@ -322,8 +323,8 @@ impl UdpRuntime {
         Some(session)
     }
 
-    async fn bind_upstream_socket() -> std::io::Result<UdpSocket> {
-        UdpSocket::bind(("0.0.0.0", 0)).await
+    async fn bind_upstream_socket(bind_host: &str) -> std::io::Result<UdpSocket> {
+        UdpSocket::bind((bind_host, 0)).await
     }
 
     async fn session_for(
@@ -567,6 +568,7 @@ impl UdpRuntime {
         let (shutdown, _shutdown_rx) = watch::channel(false);
         let entry = Arc::new(ListenerEntry {
             port: allocation.port,
+            bind_host: self.config.bind_host.clone(),
             listener_socket: socket,
             state: RwLock::new(Self::entry_state_for(allocation)),
             metrics: ListenerMetrics::default(),
@@ -725,11 +727,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn udp_upstream_socket_binds_unspecified_addr_for_non_loopback_targets() {
-        let socket = UdpRuntime::bind_upstream_socket().await.unwrap();
-
+    async fn udp_upstream_socket_uses_configured_bind_host() {
+        let loopback = UdpRuntime::bind_upstream_socket("127.0.0.2").await.unwrap();
         assert_eq!(
-            socket.local_addr().unwrap().ip(),
+            loopback.local_addr().unwrap().ip(),
+            std::net::Ipv4Addr::new(127, 0, 0, 2)
+        );
+
+        let unspecified = UdpRuntime::bind_upstream_socket("0.0.0.0").await.unwrap();
+        assert_eq!(
+            unspecified.local_addr().unwrap().ip(),
             std::net::Ipv4Addr::UNSPECIFIED
         );
     }
@@ -874,6 +881,56 @@ mod tests {
         assert_eq!(metrics.udp_active_sessions.load(), 0);
 
         runtime.delete("alloc-no-host", 500).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn udp_runtime_upstream_sessions_use_configured_bind_host() {
+        let metrics = Arc::new(Metrics::default());
+        let runtime = UdpRuntime::new(UdpRuntimeConfig::with_bind_host(
+            "127.0.0.2",
+            metrics.clone(),
+        ));
+        let relay_port = free_udp_port().await;
+        let capture = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        let target_port = capture.local_addr().unwrap().port();
+
+        runtime
+            .create(
+                &allocation("alloc-source-bind", relay_port, None, None),
+                500,
+            )
+            .await
+            .unwrap();
+        runtime
+            .update(
+                &allocation(
+                    "alloc-source-bind",
+                    relay_port,
+                    Some(target_port),
+                    Some("127.0.0.1"),
+                ),
+                500,
+            )
+            .await
+            .unwrap();
+
+        let client = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        client
+            .send_to(b"source-bind", ("127.0.0.2", relay_port))
+            .await
+            .unwrap();
+
+        let mut buf = [0_u8; 64];
+        let (n, peer) = timeout(Duration::from_millis(500), capture.recv_from(&mut buf))
+            .await
+            .expect("capture target did not receive forwarded datagram")
+            .unwrap();
+
+        assert_eq!(&buf[..n], b"source-bind");
+        assert_eq!(peer.ip(), std::net::Ipv4Addr::new(127, 0, 0, 2));
+        assert_eq!(metrics.udp_session_create_total.load(), 1);
+
+        runtime.delete("alloc-source-bind", 500).await.unwrap();
     }
 
     #[tokio::test]

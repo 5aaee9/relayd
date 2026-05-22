@@ -51,7 +51,7 @@ struct Cli {
     #[arg(
         long,
         value_name = "HOST",
-        help = "TCP/UDP relay listen host (env: PROXY_LISTEN_HOST). Default: 0.0.0.0."
+        help = "TCP/UDP relay listen host and UDP forwarding session source bind host (env: PROXY_LISTEN_HOST). Default: 0.0.0.0."
     )]
     proxy_listen_host: Option<String>,
 
@@ -352,6 +352,7 @@ mod tests {
         assert!(help.contains("env: HTTP_LISTEN"));
         assert!(help.contains("--proxy-listen-host <HOST>"));
         assert!(help.contains("env: PROXY_LISTEN_HOST"));
+        assert!(help.contains("UDP forwarding session source bind host"));
         assert!(help.contains("--port-range <START-END>"));
         assert!(help.contains("--auth-token <TOKEN>"));
         assert!(help.contains("--sqlite-path <PATH>"));
