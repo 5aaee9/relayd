@@ -29,7 +29,7 @@ impl UdpRuntimeConfig {
             bind_host: bind_host.into(),
             metrics,
             session_ttl: Duration::from_millis(60_000),
-            max_sessions: 4096,
+            max_sessions: 65_536,
         }
     }
 
@@ -715,6 +715,13 @@ mod tests {
     async fn free_udp_port() -> u16 {
         let socket = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
         socket.local_addr().unwrap().port()
+    }
+
+    #[test]
+    fn udp_runtime_config_defaults_to_65536_max_sessions() {
+        let config = UdpRuntimeConfig::loopback(Arc::new(Metrics::default()));
+
+        assert_eq!(config.max_sessions, 65_536);
     }
 
     #[tokio::test]
