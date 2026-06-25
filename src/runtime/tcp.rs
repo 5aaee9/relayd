@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, RwLock, watch};
+use tokio::sync::{Mutex, RwLock, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 
@@ -43,7 +43,8 @@ struct ListenerEntry {
     metrics: ListenerMetrics,
     shutdown: watch::Sender<bool>,
     accept_task: Mutex<Option<JoinHandle<()>>>,
-    sessions: Mutex<Vec<JoinHandle<()>>>,
+    sessions: Mutex<HashMap<u64, oneshot::Sender<()>>>,
+    next_session_id: AtomicU64,
     global_metrics: Arc<Metrics>,
 }
 
@@ -90,6 +91,12 @@ impl TcpRuntime {
             config,
             entries: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    #[cfg(test)]
+    async fn session_handle_count(&self, id: &str) -> Option<usize> {
+        let entry = self.entries.lock().await.get(id).cloned()?;
+        Some(entry.sessions.lock().await.len())
     }
 
     fn entry_state_for(allocation: &Allocation) -> EntryState {
@@ -146,11 +153,9 @@ impl TcpRuntime {
     }
 
     async fn handle_client(entry: Arc<ListenerEntry>, mut client: TcpStream) {
-        let mut sessions = entry.sessions.lock().await;
         let state = entry.state.read().await.clone();
         let (Some(host), Some(target_port)) = (state.effective_host, state.effective_target_port)
         else {
-            drop(sessions);
             entry.global_metrics.rejected_no_host_total.inc();
             let mut discard = [0_u8; 1024];
             let _ = timeout(Duration::from_millis(50), client.read(&mut discard)).await;
@@ -158,57 +163,80 @@ impl TcpRuntime {
             return;
         };
 
+        let session_id = entry.next_session_id.fetch_add(1, Ordering::Relaxed);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        entry.sessions.lock().await.insert(session_id, shutdown_tx);
+
         let session_entry = entry.clone();
-        let session = tokio::spawn(async move {
-            match TcpStream::connect((host.as_str(), target_port)).await {
-                Ok(mut upstream) => {
-                    session_entry
-                        .global_metrics
-                        .tcp_upstream_connect_total
-                        .inc();
-                    session_entry.global_metrics.tcp_copy_fallback_total.inc();
-                    let _active_session = ActiveSessionGuard::new(session_entry.clone());
-                    match tokio::io::copy_bidirectional(&mut client, &mut upstream).await {
-                        Ok((from_client, from_upstream)) => {
-                            session_entry
-                                .metrics
-                                .tx
-                                .fetch_add(from_client, Ordering::Relaxed);
-                            session_entry
-                                .metrics
-                                .rx
-                                .fetch_add(from_upstream, Ordering::Relaxed);
-                        }
-                        Err(error) => {
-                            let mut state = session_entry.state.write().await;
-                            state.error_kind = Some(ErrorKind::ApplyFailed);
-                            state.last_error = Some(error.to_string());
+        tokio::spawn(async move {
+            let session_entry_for_cleanup = session_entry.clone();
+            let forwarding = async move {
+                match TcpStream::connect((host.as_str(), target_port)).await {
+                    Ok(mut upstream) => {
+                        session_entry
+                            .global_metrics
+                            .tcp_upstream_connect_total
+                            .inc();
+                        session_entry.global_metrics.tcp_copy_fallback_total.inc();
+                        let _active_session = ActiveSessionGuard::new(session_entry.clone());
+                        match tokio::io::copy_bidirectional(&mut client, &mut upstream).await {
+                            Ok((from_client, from_upstream)) => {
+                                session_entry
+                                    .metrics
+                                    .tx
+                                    .fetch_add(from_client, Ordering::Relaxed);
+                                session_entry
+                                    .metrics
+                                    .rx
+                                    .fetch_add(from_upstream, Ordering::Relaxed);
+                            }
+                            Err(error) => {
+                                let mut state = session_entry.state.write().await;
+                                state.error_kind = Some(ErrorKind::ApplyFailed);
+                                state.last_error = Some(error.to_string());
+                            }
                         }
                     }
+                    Err(error) => {
+                        session_entry
+                            .global_metrics
+                            .tcp_upstream_connect_fail_total
+                            .inc();
+                        let mut state = session_entry.state.write().await;
+                        state.error_kind = Some(ErrorKind::ApplyFailed);
+                        state.last_error = Some(error.to_string());
+                        let _ = client.shutdown().await;
+                    }
                 }
-                Err(error) => {
-                    session_entry
-                        .global_metrics
-                        .tcp_upstream_connect_fail_total
-                        .inc();
-                    let mut state = session_entry.state.write().await;
-                    state.error_kind = Some(ErrorKind::ApplyFailed);
-                    state.last_error = Some(error.to_string());
-                    let _ = client.shutdown().await;
-                }
+            };
+
+            tokio::select! {
+                _ = shutdown_rx => {}
+                _ = forwarding => {}
             }
+
+            Self::remove_session_handle(&session_entry_for_cleanup, session_id).await;
         });
-        sessions.push(session);
+    }
+
+    async fn remove_session_handle(entry: &Arc<ListenerEntry>, session_id: u64) {
+        let mut sessions = entry.sessions.lock().await;
+        sessions.remove(&session_id);
+        if sessions.is_empty() {
+            sessions.shrink_to_fit();
+        }
     }
 
     async fn close_sessions(entry: &ListenerEntry) {
         let sessions = {
             let mut sessions = entry.sessions.lock().await;
-            sessions.drain(..).collect::<Vec<_>>()
+            sessions
+                .drain()
+                .map(|(_, session)| session)
+                .collect::<Vec<_>>()
         };
         for session in sessions {
-            session.abort();
-            let _ = session.await;
+            let _ = session.send(());
         }
     }
 
@@ -247,7 +275,8 @@ impl TcpRuntime {
             metrics: ListenerMetrics::default(),
             shutdown,
             accept_task: Mutex::new(None),
-            sessions: Mutex::new(Vec::new()),
+            sessions: Mutex::new(HashMap::new()),
+            next_session_id: AtomicU64::new(0),
             global_metrics: self.config.metrics.clone(),
         });
         Self::spawn_accept_loop(entry.clone(), listener).await;
@@ -319,7 +348,8 @@ impl RuntimeFacade for TcpRuntime {
             metrics: ListenerMetrics::default(),
             shutdown,
             accept_task: Mutex::new(None),
-            sessions: Mutex::new(Vec::new()),
+            sessions: Mutex::new(HashMap::new()),
+            next_session_id: AtomicU64::new(0),
             global_metrics: self.config.metrics.clone(),
         });
         Self::spawn_accept_loop(entry.clone(), listener).await;
@@ -504,6 +534,19 @@ mod tests {
         .expect("active session gauges did not settle");
     }
 
+    async fn wait_for_session_handles(runtime: &TcpRuntime, id: &str, expected: usize) {
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if runtime.session_handle_count(id).await == Some(expected) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("session handle count did not settle");
+    }
+
     #[tokio::test]
     async fn tcp_runtime_create_without_binding_reports_rejecting_no_host_and_closes_clients() {
         let metrics = Arc::new(Metrics::default());
@@ -575,6 +618,40 @@ mod tests {
         assert!(metrics.runtime_apply_total.load() >= 2);
 
         runtime.delete("alloc-active", 500).await.unwrap();
+        target_task.abort();
+    }
+
+    #[tokio::test]
+    async fn tcp_runtime_removes_completed_session_handles() {
+        let metrics = Arc::new(Metrics::default());
+        let runtime = TcpRuntime::new(TcpRuntimeConfig::loopback(metrics.clone()));
+        let relay_port = free_port().await;
+        let (target_port, target_task) = start_echo_server().await;
+        runtime
+            .create(
+                &allocation(
+                    "alloc-cleanup",
+                    relay_port,
+                    Some(target_port),
+                    Some("127.0.0.1"),
+                ),
+                500,
+            )
+            .await
+            .unwrap();
+
+        let mut client = TcpStream::connect(("127.0.0.1", relay_port)).await.unwrap();
+        client.write_all(b"cleanup").await.unwrap();
+        let mut buf = [0_u8; 7];
+        client.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"cleanup");
+        wait_for_session_handles(&runtime, "alloc-cleanup", 1).await;
+        drop(client);
+
+        wait_for_forwarding_metrics(&runtime, &metrics, 7).await;
+        wait_for_session_handles(&runtime, "alloc-cleanup", 0).await;
+
+        runtime.delete("alloc-cleanup", 500).await.unwrap();
         target_task.abort();
     }
 
