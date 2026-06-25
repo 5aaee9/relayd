@@ -60,6 +60,7 @@ struct ListenerEntry {
     receive_task: Mutex<Option<JoinHandle<()>>>,
     cleanup_task: Mutex<Option<JoinHandle<()>>>,
     sessions: Mutex<HashMap<SocketAddr, Arc<UdpSession>>>,
+    empty_since: Mutex<Option<Instant>>,
     generation: AtomicU64,
     max_sessions: usize,
     global_metrics: Arc<Metrics>,
@@ -138,6 +139,13 @@ impl UdpRuntime {
         self.config.max_sessions
     }
 
+    #[cfg(test)]
+    async fn session_table_stats(&self, id: &str) -> Option<(usize, usize)> {
+        let entry = self.entries.lock().await.get(id).cloned()?;
+        let sessions = entry.sessions.lock().await;
+        Some((sessions.len(), sessions.capacity()))
+    }
+
     fn entry_state_for(allocation: &Allocation) -> EntryState {
         match (&allocation.host, allocation.target_port) {
             (Some(host), Some(target_port)) => EntryState {
@@ -212,6 +220,7 @@ impl UdpRuntime {
                     }
                     _ = interval.tick() => {
                         Self::expire_idle_sessions(&task_entry, session_ttl).await;
+                        Self::compact_empty_sessions_after_idle(&task_entry, session_ttl).await;
                     }
                 }
             }
@@ -370,6 +379,7 @@ impl UdpRuntime {
                 entry.global_metrics.udp_reply_stale_total.inc();
                 return None;
             }
+            *entry.empty_since.lock().await = None;
             sessions.insert(client_addr, session.clone())
         };
         if let Some(replaced) = replaced {
@@ -420,6 +430,7 @@ impl UdpRuntime {
             session.closed.store(true, Ordering::Relaxed);
             Self::record_removal(entry, reason);
             Self::abort_reply_task(&session, false).await;
+            Self::record_empty_since_if_empty(entry).await;
         }
     }
 
@@ -439,6 +450,31 @@ impl UdpRuntime {
                     .await;
             }
         }
+    }
+
+    async fn record_empty_since_if_empty(entry: &Arc<ListenerEntry>) {
+        if entry.sessions.lock().await.is_empty() {
+            let mut empty_since = entry.empty_since.lock().await;
+            empty_since.get_or_insert_with(Instant::now);
+        }
+    }
+
+    async fn compact_empty_sessions_after_idle(entry: &Arc<ListenerEntry>, idle_grace: Duration) {
+        let empty_since = *entry.empty_since.lock().await;
+        let Some(empty_since) = empty_since else {
+            return;
+        };
+        if Instant::now().duration_since(empty_since) < idle_grace {
+            return;
+        }
+
+        {
+            let mut sessions = entry.sessions.lock().await;
+            if sessions.is_empty() {
+                sessions.shrink_to_fit();
+            }
+        }
+        *entry.empty_since.lock().await = None;
     }
 
     async fn handle_datagram(entry: Arc<ListenerEntry>, payload: &[u8], peer: SocketAddr) {
@@ -497,6 +533,7 @@ impl UdpRuntime {
             }
             Self::abort_reply_task(&session, true).await;
         }
+        *entry.empty_since.lock().await = Some(Instant::now());
     }
 
     async fn stop_entry(entry: Arc<ListenerEntry>, count_as_reply_drop: bool) {
@@ -586,6 +623,7 @@ impl UdpRuntime {
             receive_task: Mutex::new(None),
             cleanup_task: Mutex::new(None),
             sessions: Mutex::new(HashMap::new()),
+            empty_since: Mutex::new(None),
             generation: AtomicU64::new(0),
             max_sessions: self.config.max_sessions,
             global_metrics: self.config.metrics.clone(),
@@ -1062,6 +1100,21 @@ mod tests {
         .expect("udp active sessions did not settle");
     }
 
+    async fn wait_for_session_table_len(runtime: &UdpRuntime, id: &str, expected: usize) -> usize {
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some((len, capacity)) = runtime.session_table_stats(id).await
+                    && len == expected
+                {
+                    return capacity;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("udp session table length did not settle")
+    }
+
     struct DelayedUdpServer {
         port: u16,
         received: tokio::sync::oneshot::Receiver<()>,
@@ -1131,6 +1184,59 @@ mod tests {
         assert_eq!(metrics.udp_session_create_total.load(), 2);
         assert!(metrics.udp_session_expire_total.load() >= 1);
         runtime.delete("alloc-ttl", 500).await.unwrap();
+        target_task.abort();
+    }
+
+    #[tokio::test]
+    async fn udp_runtime_delays_empty_session_table_compaction_until_idle_grace() {
+        let metrics = Arc::new(Metrics::default());
+        let runtime = UdpRuntime::new(
+            UdpRuntimeConfig::loopback(metrics.clone()).with_session_ttl(Duration::from_millis(40)),
+        );
+        let relay_port = free_udp_port().await;
+        let (target_port, target_task) = start_udp_echo_server().await;
+        runtime
+            .create(
+                &allocation(
+                    "alloc-compact",
+                    relay_port,
+                    Some(target_port),
+                    Some("127.0.0.1"),
+                ),
+                500,
+            )
+            .await
+            .unwrap();
+
+        for index in 0..16 {
+            let client = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+            let payload = format!("compact-{index}");
+            send_udp_and_expect(&client, relay_port, payload.as_bytes()).await;
+        }
+        wait_for_active_sessions(&runtime, &metrics, 16).await;
+        let expanded_capacity = runtime
+            .session_table_stats("alloc-compact")
+            .await
+            .unwrap()
+            .1;
+        assert!(expanded_capacity >= 16);
+
+        let empty_capacity = wait_for_session_table_len(&runtime, "alloc-compact", 0).await;
+        assert_eq!(empty_capacity, expanded_capacity);
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let (len, capacity) = runtime.session_table_stats("alloc-compact").await.unwrap();
+                if len == 0 && capacity == 0 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("udp session table was not compacted after idle grace");
+
+        runtime.delete("alloc-compact", 500).await.unwrap();
         target_task.abort();
     }
 
