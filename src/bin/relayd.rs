@@ -1,7 +1,9 @@
 use clap::Parser;
-use relayd::config::Config;
+use relayd::config::{Config, RuntimeMode};
 use relayd::http::control_plane::{AppState, router};
 use relayd::metrics::Metrics;
+use relayd::runtime::facade::RuntimeFacade;
+use relayd::runtime::netlink::{NetlinkRuntime, NetlinkRuntimeConfig};
 use relayd::runtime::real::{RealRuntime, RealRuntimeConfig};
 use relayd::service::allocation_service::Service;
 use relayd::storage::sqlite::Repository;
@@ -75,6 +77,27 @@ struct Cli {
         help = "SQLite database path for persisted allocations (env: SQLITE_PATH)."
     )]
     sqlite_path: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "MODE",
+        help = "Runtime forwarding mode: proxy or netlink (env: RELAYD_RUNTIME_MODE). Default: proxy."
+    )]
+    runtime_mode: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "relayd-owned nftables table name for netlink runtime mode (env: RELAYD_NFTABLES_TABLE). Default: relayd."
+    )]
+    nftables_table: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "relayd-owned nftables chain name for netlink runtime mode; startup and runtime changes flush and rewrite this chain (env: RELAYD_NFTABLES_CHAIN). Default: mapping."
+    )]
+    nftables_chain: Option<String>,
 
     #[arg(
         long,
@@ -218,6 +241,9 @@ impl Cli {
         insert_if_present(env, "PORT_RANGE", self.port_range);
         insert_if_present(env, "AUTH_TOKEN", self.auth_token);
         insert_if_present(env, "SQLITE_PATH", self.sqlite_path);
+        insert_if_present(env, "RELAYD_RUNTIME_MODE", self.runtime_mode);
+        insert_if_present(env, "RELAYD_NFTABLES_TABLE", self.nftables_table);
+        insert_if_present(env, "RELAYD_NFTABLES_CHAIN", self.nftables_chain);
         insert_if_present(
             env,
             "RUNTIME_APPLY_TIMEOUT_MS",
@@ -287,6 +313,10 @@ fn real_runtime_config_from_config(config: &Config, metrics: Arc<Metrics>) -> Re
         .with_udp_max_sessions(config.udp_max_sessions)
 }
 
+fn netlink_runtime_config_from_config(config: &Config) -> NetlinkRuntimeConfig {
+    NetlinkRuntimeConfig::new(config.nftables_table.clone(), config.nftables_chain.clone())
+}
+
 async fn run_with_config(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let host: IpAddr = config
         .http_listen_host
@@ -307,11 +337,35 @@ async fn run_with_listener(
         port_range_start = config.port_range.start,
         port_range_end = config.port_range.end,
         sqlite_path = %config.db_path,
+        runtime_mode = config.runtime_mode.as_str(),
+        nftables_table = %config.nftables_table,
+        nftables_chain = %config.nftables_chain,
         "starting relayd"
     );
     let metrics = Arc::new(Metrics::default());
     let repo = Repository::open(&config.db_path).await?;
-    let runtime = RealRuntime::new(real_runtime_config_from_config(&config, metrics.clone()));
+
+    match config.runtime_mode {
+        RuntimeMode::Proxy => {
+            let runtime =
+                RealRuntime::new(real_runtime_config_from_config(&config, metrics.clone()));
+            run_with_runtime(config, listener, metrics, repo, runtime).await
+        }
+        RuntimeMode::Netlink => {
+            let runtime =
+                NetlinkRuntime::with_libnftnl(netlink_runtime_config_from_config(&config))?;
+            run_with_runtime(config, listener, metrics, repo, runtime).await
+        }
+    }
+}
+
+async fn run_with_runtime<R: RuntimeFacade + 'static>(
+    config: Config,
+    listener: TcpListener,
+    metrics: Arc<Metrics>,
+    repo: Repository,
+    runtime: R,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let service = Arc::new(Service::new(
         repo,
         runtime,
@@ -324,16 +378,16 @@ async fn run_with_listener(
     serve_listener(listener, state).await
 }
 
-async fn serve_listener(
+async fn serve_listener<R: RuntimeFacade + 'static>(
     listener: TcpListener,
-    state: AppState<RealRuntime>,
+    state: AppState<R>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     serve_listener_until_shutdown(listener, state, shutdown_signal()).await
 }
 
-async fn serve_listener_until_shutdown(
+async fn serve_listener_until_shutdown<R: RuntimeFacade + 'static>(
     listener: TcpListener,
-    state: AppState<RealRuntime>,
+    state: AppState<R>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     axum::serve(listener, router(state))
@@ -366,6 +420,14 @@ mod tests {
         assert!(help.contains("--port-range <START-END>"));
         assert!(help.contains("--auth-token <TOKEN>"));
         assert!(help.contains("--sqlite-path <PATH>"));
+        assert!(help.contains("--runtime-mode <MODE>"));
+        assert!(help.contains("env: RELAYD_RUNTIME_MODE"));
+        assert!(help.contains("--nftables-table <NAME>"));
+        assert!(help.contains("env: RELAYD_NFTABLES_TABLE"));
+        assert!(help.contains("--nftables-chain <NAME>"));
+        assert!(help.contains("env: RELAYD_NFTABLES_CHAIN"));
+        assert!(help.contains("relayd-owned"));
+        assert!(help.contains("flush"));
         assert!(help.contains("--runtime-apply-timeout-ms <MILLISECONDS>"));
         assert!(help.contains("--udp-max-sessions <COUNT>"));
         assert!(help.contains("env: UDP_MAX_SESSIONS"));
@@ -386,6 +448,12 @@ mod tests {
             "cli-token",
             "--sqlite-path",
             "cli.sqlite3",
+            "--runtime-mode",
+            "netlink",
+            "--nftables-table",
+            "cli_table",
+            "--nftables-chain",
+            "cli_chain",
             "--runtime-apply-timeout-ms",
             "1500",
             "--udp-max-sessions",
@@ -401,6 +469,9 @@ mod tests {
             ("PORT_RANGE".to_owned(), "10000-10010".to_owned()),
             ("AUTH_TOKEN".to_owned(), "env-token".to_owned()),
             ("SQLITE_PATH".to_owned(), "env.sqlite3".to_owned()),
+            ("RELAYD_RUNTIME_MODE".to_owned(), "proxy".to_owned()),
+            ("RELAYD_NFTABLES_TABLE".to_owned(), "env_table".to_owned()),
+            ("RELAYD_NFTABLES_CHAIN".to_owned(), "env_chain".to_owned()),
             ("UDP_MAX_SESSIONS".to_owned(), "333".to_owned()),
         ]);
 
@@ -413,6 +484,9 @@ mod tests {
         assert_eq!(config.port_range.end, 20005);
         assert_eq!(config.auth_token, "cli-token");
         assert_eq!(config.db_path, "cli.sqlite3");
+        assert_eq!(config.runtime_mode, RuntimeMode::Netlink);
+        assert_eq!(config.nftables_table, "cli_table");
+        assert_eq!(config.nftables_chain, "cli_chain");
         assert_eq!(config.runtime_apply_timeout_ms, 1500);
         assert_eq!(config.udp_max_sessions, 777);
         assert!(config.tcp_session_model_enabled);
@@ -435,6 +509,81 @@ mod tests {
         let runtime_config = real_runtime_config_from_config(&config, Arc::new(Metrics::default()));
 
         assert_eq!(runtime_config.udp_max_sessions(), 555);
+    }
+
+    #[test]
+    fn runtime_mode_selection_builds_proxy_runtime_config_without_netlink_settings() {
+        let env = HashMap::from([
+            ("AUTH_TOKEN".to_owned(), "secret-token".to_owned()),
+            ("RELAYD_RUNTIME_MODE".to_owned(), "proxy".to_owned()),
+            (
+                "RELAYD_NFTABLES_TABLE".to_owned(),
+                "custom_table".to_owned(),
+            ),
+            (
+                "RELAYD_NFTABLES_CHAIN".to_owned(),
+                "custom_chain".to_owned(),
+            ),
+            ("UDP_MAX_SESSIONS".to_owned(), "444".to_owned()),
+        ]);
+        let config = Config::from_env_map(&env).unwrap();
+
+        assert_eq!(config.runtime_mode, RuntimeMode::Proxy);
+        assert_eq!(
+            real_runtime_config_from_config(&config, Arc::new(Metrics::default()))
+                .udp_max_sessions(),
+            444
+        );
+    }
+
+    #[test]
+    fn netlink_runtime_config_from_config_carries_table_and_chain() {
+        let env = HashMap::from([
+            ("AUTH_TOKEN".to_owned(), "secret-token".to_owned()),
+            ("RELAYD_RUNTIME_MODE".to_owned(), "netlink".to_owned()),
+            (
+                "RELAYD_NFTABLES_TABLE".to_owned(),
+                "custom_table".to_owned(),
+            ),
+            (
+                "RELAYD_NFTABLES_CHAIN".to_owned(),
+                "custom_chain".to_owned(),
+            ),
+        ]);
+        let config = Config::from_env_map(&env).unwrap();
+        let runtime_config = netlink_runtime_config_from_config(&config);
+
+        assert_eq!(config.runtime_mode, RuntimeMode::Netlink);
+        assert_eq!(runtime_config.table, "custom_table");
+        assert_eq!(runtime_config.chain, "custom_chain");
+    }
+
+    #[cfg(not(feature = "netlink"))]
+    #[tokio::test]
+    async fn netlink_runtime_mode_requires_netlink_feature() {
+        let parent = std::env::current_dir()
+            .unwrap()
+            .join("target/relayd-test-dbs");
+        std::fs::create_dir_all(&parent).unwrap();
+        let dir = tempfile::tempdir_in(parent).unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let env = HashMap::from([
+            ("AUTH_TOKEN".to_owned(), "secret-token".to_owned()),
+            ("RELAYD_RUNTIME_MODE".to_owned(), "netlink".to_owned()),
+            (
+                "SQLITE_PATH".to_owned(),
+                dir.path().join("relayd.sqlite").display().to_string(),
+            ),
+        ]);
+        let config = Config::from_env_map(&env).unwrap();
+
+        let error = run_with_listener(config, listener).await.unwrap_err();
+
+        assert!(
+            error.to_string().contains(
+                "netlink runtime requires building relayd with the netlink Cargo feature"
+            )
+        );
     }
 
     #[tokio::test]

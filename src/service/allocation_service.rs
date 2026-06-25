@@ -430,6 +430,7 @@ impl<R: RuntimeFacade> Service<R> {
     pub async fn restore_all(&self, timeout_ms: u32) -> Result<(), ServiceError> {
         let _mutation_guard = self.mutation_lock.lock().await;
 
+        self.runtime.initialize(timeout_ms).await?;
         for allocation in self.repo.list_allocations().await? {
             self.runtime.restore(&allocation, timeout_ms).await?;
         }
@@ -919,6 +920,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_allocation_does_not_retry_non_retryable_runtime_apply_failed() {
+        let runtime = InMemoryRuntime::default();
+        runtime.fail_apply_port(10000);
+        let svc = service_with_range(temp_repo().await, runtime.clone(), 10000, 10002);
+
+        assert!(matches!(
+            svc.create_allocation(Protocol::Tcp, None).await,
+            Err(ServiceError::Runtime(RuntimeError::RuntimeApplyFailed))
+        ));
+        assert_eq!(runtime.calls().create, vec!["alloc-1".to_owned()]);
+        assert!(svc.repo().list_allocations().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn create_allocation_all_ports_unavailable_returns_no_available_port() {
         let repo = temp_repo().await;
         repo.insert_allocation(&allocation("tcp", Protocol::Tcp, 10000, None, None))
@@ -1299,6 +1314,17 @@ mod tests {
         );
         assert!(runtime.contains("alloc-1"));
         assert!(runtime.contains("alloc-2"));
+    }
+
+    #[tokio::test]
+    async fn restore_all_initializes_runtime_even_with_no_allocations() {
+        let runtime = InMemoryRuntime::default();
+        let svc = service(temp_repo().await, runtime.clone());
+
+        svc.restore_all(500).await.unwrap();
+
+        assert_eq!(runtime.initialize_calls(), 1);
+        assert!(runtime.calls().restore.is_empty());
     }
 
     #[tokio::test]

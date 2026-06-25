@@ -7,7 +7,7 @@ Linux-first Rust port-forwarder with:
 - UDP forwarding with default Tokio listener/session handling
 - dual-protocol allocations (`both`) sharing one TCP+UDP port
 - Prometheus listener metrics with per-scrape byte rates
-
+- optional nftables DNAT runtime through libnftnl when built with `--features netlink`
 
 ## Env
 - `HTTP_LISTEN` — HTTP API listen address, e.g. `:8080` or `127.0.0.1:8080`
@@ -15,6 +15,9 @@ Linux-first Rust port-forwarder with:
 - `PORT_RANGE` — default `10000-30000`
 - `AUTH_TOKEN` — required bearer token
 - `SQLITE_PATH` — optional, default `relayd.sqlite3`
+- `RELAYD_RUNTIME_MODE` — runtime forwarding mode, `proxy` by default. `proxy` starts relayd-owned TCP/UDP forwarding sockets; `netlink` installs nftables DNAT rules instead.
+- `RELAYD_NFTABLES_TABLE` — nftables `inet` table for `netlink` mode, default `relayd`
+- `RELAYD_NFTABLES_CHAIN` — nftables NAT prerouting chain for `netlink` mode, default `mapping`
 - `RUNTIME_APPLY_TIMEOUT_MS` — optional, default `2000`
 - `RESTORE_SWEEP_TIMEOUT_MS` — optional, default `30000`
 - `UDP_MAX_SESSIONS` — maximum active UDP sessions per relay port, default `65536`
@@ -23,6 +26,25 @@ Linux-first Rust port-forwarder with:
 Optional compatibility feature gates are parsed only where they are implemented by the Rust runtime. `TCP_SPLICE_ENABLED` and `FORCE_TCP_COPY_FALLBACK` are intentionally ignored because this Rust runtime does not expose the old Linux `splice(2)` TCP path.
 
 If `HTTP_LISTEN` is `:PORT`, relayd binds the HTTP API to `127.0.0.1:PORT`. Relay listeners use `PROXY_LISTEN_HOST` independently, so allocations bind TCP/UDP ports on `0.0.0.0` by default. UDP forwarding session sockets use the same host as their source bind address.
+
+## Runtime Modes
+
+`proxy` is the default runtime mode and keeps the existing behavior: relayd binds TCP and UDP sockets for allocated relay ports and forwards traffic in user space.
+
+`netlink` mode keeps the HTTP control plane and SQLite allocation model, but forwarding is performed by kernel nftables DNAT rules created through libnftnl/libmnl. The configured nftables table is an `inet` table, and the configured chain is a relayd-owned `nat` prerouting destination-NAT chain. On startup and each runtime change, relayd creates the table/chain when missing, flushes the configured chain, and rewrites rules from the current allocation state. Do not put unrelated rules in that chain.
+
+Unbound allocations reserve the relay port inside relayd but install no nftables DNAT rule. `both` allocations install one TCP rule and one UDP rule. IPv4 and IPv6 targets are both supported. Listener metrics are empty in `netlink` mode because relayd does not own per-port data-plane sockets.
+
+`netlink` mode requires building relayd with `--features netlink`, plus nftables/netlink privileges and system `libnftnl`, `libmnl`, and `pkg-config` development/runtime support. A binary built without that feature still accepts the configuration key, but startup fails clearly if `--runtime-mode netlink` is selected.
+
+```bash
+cargo run --locked --features netlink --bin relayd -- \
+  --http-listen :8080 \
+  --runtime-mode netlink \
+  --nftables-table relayd \
+  --nftables-chain mapping \
+  --auth-token mytoken
+```
 
 ## Logging
 
@@ -49,6 +71,13 @@ cargo zigbuild --locked --release --bin relayd --target x86_64-unknown-linux-mus
 cargo nextest run --locked
 cargo test --locked --doc
 cargo clippy --locked --lib --tests -- -D warnings
+```
+
+The default build does not link `libnftnl`/`libmnl`. To compile and test the optional netlink runtime, install system `libnftnl`, `libmnl`, and `pkg-config`, then run:
+
+```bash
+cargo test --locked --features netlink
+cargo clippy --locked --features netlink --lib --tests -- -D warnings
 ```
 
 CI installs nextest with `taiki-e/install-action@v2` and `tool: nextest@0.9`, runs normal Rust tests with `cargo nextest run --locked`, and keeps `cargo test --locked --doc` as a separate doctest coverage step because nextest does not run doctests.

@@ -20,6 +20,33 @@ impl PortRange {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeMode {
+    Proxy,
+    Netlink,
+}
+
+impl RuntimeMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Proxy => "proxy",
+            Self::Netlink => "netlink",
+        }
+    }
+}
+
+impl FromStr for RuntimeMode {
+    type Err = ConfigError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "proxy" => Ok(Self::Proxy),
+            "netlink" => Ok(Self::Netlink),
+            _ => Err(ConfigError::InvalidRuntimeMode),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub http_listen_host: String,
@@ -44,6 +71,9 @@ pub struct Config {
     pub udp_socket_send_buffer_bytes: u32,
     pub runtime_apply_timeout_ms: u32,
     pub restore_sweep_timeout_ms: u32,
+    pub runtime_mode: RuntimeMode,
+    pub nftables_table: String,
+    pub nftables_chain: String,
     pub db_path: String,
 }
 
@@ -63,6 +93,10 @@ pub enum ConfigError {
     InvalidHost,
     #[error("invalid integer for {0}")]
     InvalidInteger(&'static str),
+    #[error("invalid RELAYD_RUNTIME_MODE")]
+    InvalidRuntimeMode,
+    #[error("invalid nftables name for {0}")]
+    InvalidNftablesName(&'static str),
 }
 
 impl Config {
@@ -112,6 +146,13 @@ impl Config {
             udp_socket_send_buffer_bytes: env_u32(env, "UDP_SOCKET_SNDBUF_BYTES", 8 * 1024 * 1024)?,
             runtime_apply_timeout_ms: env_u32(env, "RUNTIME_APPLY_TIMEOUT_MS", 2000)?,
             restore_sweep_timeout_ms: env_u32(env, "RESTORE_SWEEP_TIMEOUT_MS", 30000)?,
+            runtime_mode: env
+                .get("RELAYD_RUNTIME_MODE")
+                .map(String::as_str)
+                .unwrap_or("proxy")
+                .parse()?,
+            nftables_table: env_nonempty_string(env, "RELAYD_NFTABLES_TABLE", "relayd")?,
+            nftables_chain: env_nonempty_string(env, "RELAYD_NFTABLES_CHAIN", "mapping")?,
             db_path: env
                 .get("SQLITE_PATH")
                 .cloned()
@@ -216,6 +257,18 @@ fn env_nonzero_usize(
     }
 }
 
+fn env_nonempty_string(
+    env: &HashMap<String, String>,
+    name: &'static str,
+    default_value: &'static str,
+) -> Result<String, ConfigError> {
+    let value = env.get(name).map(String::as_str).unwrap_or(default_value);
+    if value.is_empty() {
+        return Err(ConfigError::InvalidNftablesName(name));
+    }
+    Ok(value.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +362,58 @@ mod tests {
     }
 
     #[test]
+    fn config_from_env_map_defaults_runtime_mode_and_nftables_names() {
+        let cfg = Config::from_env_map(&env_with_token()).unwrap();
+        assert_eq!(cfg.runtime_mode, RuntimeMode::Proxy);
+        assert_eq!(cfg.nftables_table, "relayd");
+        assert_eq!(cfg.nftables_chain, "mapping");
+    }
+
+    #[test]
+    fn config_from_env_map_parses_netlink_runtime_mode_and_nftables_names() {
+        let mut env = env_with_token();
+        env.insert("RELAYD_RUNTIME_MODE".to_owned(), "NeTlInK".to_owned());
+        env.insert(
+            "RELAYD_NFTABLES_TABLE".to_owned(),
+            "custom_table".to_owned(),
+        );
+        env.insert(
+            "RELAYD_NFTABLES_CHAIN".to_owned(),
+            "custom_chain".to_owned(),
+        );
+
+        let cfg = Config::from_env_map(&env).unwrap();
+
+        assert_eq!(cfg.runtime_mode, RuntimeMode::Netlink);
+        assert_eq!(cfg.nftables_table, "custom_table");
+        assert_eq!(cfg.nftables_chain, "custom_chain");
+    }
+
+    #[test]
+    fn config_from_env_map_rejects_invalid_runtime_mode_and_empty_nftables_names() {
+        let mut env = env_with_token();
+        env.insert("RELAYD_RUNTIME_MODE".to_owned(), "bad".to_owned());
+        assert!(matches!(
+            Config::from_env_map(&env),
+            Err(ConfigError::InvalidRuntimeMode)
+        ));
+
+        let mut env = env_with_token();
+        env.insert("RELAYD_NFTABLES_TABLE".to_owned(), "".to_owned());
+        assert!(matches!(
+            Config::from_env_map(&env),
+            Err(ConfigError::InvalidNftablesName("RELAYD_NFTABLES_TABLE"))
+        ));
+
+        let mut env = env_with_token();
+        env.insert("RELAYD_NFTABLES_CHAIN".to_owned(), "".to_owned());
+        assert!(matches!(
+            Config::from_env_map(&env),
+            Err(ConfigError::InvalidNftablesName("RELAYD_NFTABLES_CHAIN"))
+        ));
+    }
+
+    #[test]
     fn config_from_env_map_parses_udp_max_sessions_override() {
         let mut env = env_with_token();
         env.insert("UDP_MAX_SESSIONS".to_owned(), "12345".to_owned());
@@ -392,6 +497,9 @@ mod tests {
             udp_socket_send_buffer_bytes: 8 * 1024 * 1024,
             runtime_apply_timeout_ms: 2000,
             restore_sweep_timeout_ms: 30000,
+            runtime_mode: RuntimeMode::Proxy,
+            nftables_table: "relayd".to_owned(),
+            nftables_chain: "mapping".to_owned(),
             db_path: "relayd.sqlite3".to_owned(),
         };
 

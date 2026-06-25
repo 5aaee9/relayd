@@ -215,6 +215,9 @@ fn service_error_response(error: ServiceError) -> Response {
         ServiceError::Runtime(RuntimeError::RuntimeRestoreFailed) => {
             text_response(StatusCode::SERVICE_UNAVAILABLE, "RuntimeRestoreFailed")
         }
+        ServiceError::Runtime(RuntimeError::RuntimeApplyFailed) => {
+            text_response(StatusCode::SERVICE_UNAVAILABLE, "RuntimeApplyFailed")
+        }
         ServiceError::Runtime(RuntimeError::Timeout) => {
             text_response(StatusCode::SERVICE_UNAVAILABLE, "Timeout")
         }
@@ -1186,5 +1189,23 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body, "RuntimeDeleteFailed");
+    }
+
+    #[tokio::test]
+    async fn runtime_apply_failed_maps_to_503() {
+        let (app, _, runtime, _, _file) = test_app().await;
+        runtime.fail_apply_port(10000);
+
+        let (status, _, body) = request(
+            app,
+            Method::POST,
+            "/v1/allocations",
+            r#"{"protocol":"tcp"}"#,
+            Some("Bearer secret-token"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body, "RuntimeApplyFailed");
     }
 }

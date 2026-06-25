@@ -31,12 +31,15 @@ pub enum RuntimeError {
     RuntimeDeleteFailed,
     #[error("runtime restore failed")]
     RuntimeRestoreFailed,
+    #[error("runtime apply failed")]
+    RuntimeApplyFailed,
     #[error("timeout")]
     Timeout,
 }
 
 #[async_trait]
 pub trait RuntimeFacade: Send + Sync {
+    async fn initialize(&self, timeout_ms: u32) -> Result<(), RuntimeError>;
     async fn create(&self, allocation: &Allocation, timeout_ms: u32) -> Result<(), RuntimeError>;
     async fn update(&self, allocation: &Allocation, timeout_ms: u32) -> Result<(), RuntimeError>;
     async fn delete(&self, id: &str, timeout_ms: u32) -> Result<(), RuntimeError>;
@@ -50,10 +53,13 @@ pub trait RuntimeFacade: Send + Sync {
 struct RuntimeState {
     allocations: HashMap<String, Allocation>,
     listener_metrics: Vec<ListenerMetricsSnapshot>,
+    initialize_fail: bool,
     create_fail_ports: HashSet<u16>,
+    apply_fail_ports: HashSet<u16>,
     update_fail_ids: HashSet<String>,
     delete_fail_ids: HashSet<String>,
     restore_fail_ids: HashSet<String>,
+    initialize_calls: u32,
     create_calls: Vec<String>,
     update_calls: Vec<String>,
     delete_calls: Vec<String>,
@@ -74,8 +80,16 @@ pub struct InMemoryRuntime {
 }
 
 impl InMemoryRuntime {
+    pub fn fail_initialize(&self) {
+        self.state.lock().unwrap().initialize_fail = true;
+    }
+
     pub fn fail_create_port(&self, port: u16) {
         self.state.lock().unwrap().create_fail_ports.insert(port);
+    }
+
+    pub fn fail_apply_port(&self, port: u16) {
+        self.state.lock().unwrap().apply_fail_ports.insert(port);
     }
 
     pub fn fail_update_id(&self, id: impl Into<String>) {
@@ -98,6 +112,10 @@ impl InMemoryRuntime {
         self.state.lock().unwrap().allocations.contains_key(id)
     }
 
+    pub fn initialize_calls(&self) -> u32 {
+        self.state.lock().unwrap().initialize_calls
+    }
+
     pub fn calls(&self) -> RuntimeCalls {
         let state = self.state.lock().unwrap();
         RuntimeCalls {
@@ -114,7 +132,9 @@ impl InMemoryRuntime {
 
     pub fn clear_failures(&self) {
         let mut state = self.state.lock().unwrap();
+        state.initialize_fail = false;
         state.create_fail_ports.clear();
+        state.apply_fail_ports.clear();
         state.update_fail_ids.clear();
         state.delete_fail_ids.clear();
         state.restore_fail_ids.clear();
@@ -123,11 +143,23 @@ impl InMemoryRuntime {
 
 #[async_trait]
 impl RuntimeFacade for InMemoryRuntime {
+    async fn initialize(&self, _timeout_ms: u32) -> Result<(), RuntimeError> {
+        let mut state = self.state.lock().unwrap();
+        state.initialize_calls = state.initialize_calls.saturating_add(1);
+        if state.initialize_fail {
+            return Err(RuntimeError::RuntimeApplyFailed);
+        }
+        Ok(())
+    }
+
     async fn create(&self, allocation: &Allocation, _timeout_ms: u32) -> Result<(), RuntimeError> {
         let mut state = self.state.lock().unwrap();
         state.create_calls.push(allocation.id.clone());
         if state.create_fail_ports.contains(&allocation.port) {
             return Err(RuntimeError::RuntimeCreateFailed);
+        }
+        if state.apply_fail_ports.contains(&allocation.port) {
+            return Err(RuntimeError::RuntimeApplyFailed);
         }
         state
             .allocations
@@ -261,6 +293,24 @@ mod tests {
         let runtime = InMemoryRuntime::default();
         let alloc = allocation("a1", 10000, Some(8080), Some("127.0.0.1"));
 
+        runtime.fail_initialize();
+        assert_eq!(
+            runtime.initialize(500).await,
+            Err(RuntimeError::RuntimeApplyFailed)
+        );
+
+        runtime.clear_failures();
+        runtime.initialize(500).await.unwrap();
+        assert_eq!(runtime.initialize_calls(), 2);
+
+        runtime.fail_apply_port(10000);
+        assert_eq!(
+            runtime.create(&alloc, 500).await,
+            Err(RuntimeError::RuntimeApplyFailed)
+        );
+        assert!(!runtime.contains("a1"));
+
+        runtime.clear_failures();
         runtime.fail_create_port(10000);
         assert_eq!(
             runtime.create(&alloc, 500).await,
@@ -313,7 +363,7 @@ mod tests {
         runtime.restore(&alloc, 500).await.unwrap();
 
         let calls = runtime.calls();
-        assert_eq!(calls.create, vec!["a1", "a1"]);
+        assert_eq!(calls.create, vec!["a1", "a1", "a1"]);
         assert_eq!(calls.update, vec!["a1", "a1"]);
         assert_eq!(calls.delete, vec!["a1", "a1"]);
         assert_eq!(calls.restore, vec!["a1", "a1"]);

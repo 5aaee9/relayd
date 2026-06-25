@@ -257,6 +257,10 @@ impl TcpRuntime {
 
 #[async_trait]
 impl RuntimeFacade for TcpRuntime {
+    async fn initialize(&self, _timeout_ms: u32) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
     async fn create(&self, allocation: &Allocation, _timeout_ms: u32) -> Result<(), RuntimeError> {
         if allocation.protocol != Protocol::Tcp {
             return Ok(());

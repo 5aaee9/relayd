@@ -88,6 +88,10 @@ impl RealRuntime {
 
 #[async_trait]
 impl RuntimeFacade for RealRuntime {
+    async fn initialize(&self, _timeout_ms: u32) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
     async fn create(&self, allocation: &Allocation, timeout_ms: u32) -> Result<(), RuntimeError> {
         match allocation.protocol {
             Protocol::Tcp => {
