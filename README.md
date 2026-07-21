@@ -82,6 +82,21 @@ cargo clippy --locked --features netlink --lib --tests -- -D warnings
 
 CI installs nextest with `taiki-e/install-action@v2` and `tool: nextest@0.9`, runs normal Rust tests with `cargo nextest run --locked`, and keeps `cargo test --locked --doc` as a separate doctest coverage step because nextest does not run doctests.
 
+### NixOS VM end-to-end tests
+
+Linux flake checks under [`nix/tests`](nix/tests) exercise relayd as a real systemd service in an isolated three-VM topology (`client -> relay -> backend`):
+
+```bash
+nix build -L .#checks.x86_64-linux.relayd-nixos-functional
+nix build -L .#checks.x86_64-linux.relayd-nixos-netlink
+nix build -L .#checks.x86_64-linux.relayd-nixos-performance-proxy
+nix build -L .#checks.x86_64-linux.relayd-nixos-performance-netlink
+```
+
+The functional checks cover bearer authentication, primary and compatibility API lifecycles, TCP/UDP/`both` forwarding, rebinding and deletion, IPv6 targets, Prometheus output, port exhaustion, and SQLite restore after a service restart. The netlink check sends traffic across separate client/backend VLANs, so it verifies actual nftables DNAT behavior rather than only inspecting generated rules.
+
+Performance checks run three alternating direct/relayed `iperf3` samples for TCP and UDP and compare receiver medians within the same VM topology. They require every sample to exceed 1 Mbit/s. The conservative relay/direct ratio floors are 25% for `proxy` and 50% for `netlink`; UDP loss may exceed the direct median by at most 25 and 15 percentage points respectively. These are regression gates, not host benchmark claims. CI runs the four checks in parallel with a matrix. KVM is recommended; QEMU software emulation is substantially slower.
+
 ## Run
 ```bash
 target/x86_64-unknown-linux-musl/release/relayd \

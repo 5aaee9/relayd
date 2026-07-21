@@ -107,6 +107,12 @@
             '';
           }
         );
+
+        nixosTests = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux (
+          import ./nix/tests {
+            inherit pkgs relayd relayd-netlink;
+          }
+        );
       in
       {
         packages = {
@@ -139,7 +145,8 @@
             inherit src;
             pname = "relayd-fmt";
           };
-        };
+        }
+        // nixosTests;
 
         devShells.default = craneLib.devShell {
           checks = self.checks.${system};

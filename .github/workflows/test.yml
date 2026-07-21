@@ -81,6 +81,37 @@ jobs:
       - name: Rust musl release build
         run: cargo zigbuild --locked --release --bin relayd --target "${BUILD_TARGET}"
 
+  nixos-e2e:
+    name: nixos-e2e (${{ matrix.check }})
+    needs:
+      - test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        check:
+          - relayd-nixos-functional
+          - relayd-nixos-netlink
+          - relayd-nixos-performance-proxy
+          - relayd-nixos-performance-netlink
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enable KVM for NixOS tests
+        run: |
+          test -e /dev/kvm
+          sudo chmod 666 /dev/kvm
+
+      - name: Run NixOS E2E check
+        run: nix build -L ".#checks.x86_64-linux.${{ matrix.check }}"
+
   e2e-bandwidth:
     needs:
       - test
