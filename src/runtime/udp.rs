@@ -11,6 +11,8 @@ use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 
+const MAX_SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
+
 #[derive(Clone)]
 pub struct UdpRuntimeConfig {
     bind_host: String,
@@ -127,6 +129,10 @@ impl Drop for SessionGuard {
 }
 
 impl UdpRuntime {
+    fn session_cleanup_interval(session_ttl: Duration) -> Duration {
+        session_ttl.min(MAX_SESSION_CLEANUP_INTERVAL)
+    }
+
     pub fn new(config: UdpRuntimeConfig) -> Self {
         Self {
             config,
@@ -209,7 +215,8 @@ impl UdpRuntime {
         let mut shutdown_rx = entry.shutdown.subscribe();
         let task_entry = entry.clone();
         let task = tokio::spawn(async move {
-            let interval_duration = session_ttl.min(Duration::from_millis(50));
+            // Avoid scanning every active session 20 times per second at the default 60s TTL.
+            let interval_duration = Self::session_cleanup_interval(session_ttl);
             let mut interval = tokio::time::interval(interval_duration);
             loop {
                 tokio::select! {
@@ -784,6 +791,18 @@ mod tests {
         let config = UdpRuntimeConfig::loopback(Arc::new(Metrics::default()));
 
         assert_eq!(config.max_sessions, 65_536);
+    }
+
+    #[test]
+    fn udp_session_cleanup_interval_tracks_short_ttls_and_caps_default_sweeps() {
+        assert_eq!(
+            UdpRuntime::session_cleanup_interval(Duration::from_millis(25)),
+            Duration::from_millis(25)
+        );
+        assert_eq!(
+            UdpRuntime::session_cleanup_interval(Duration::from_secs(60)),
+            Duration::from_secs(1)
+        );
     }
 
     #[tokio::test]
