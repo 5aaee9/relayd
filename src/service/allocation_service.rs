@@ -101,11 +101,14 @@ impl<R: RuntimeFacade> Service<R> {
             return Err(ServiceError::Timeout);
         }
 
-        for port in self.port_range.start..=self.port_range.end {
-            let existing_allocations = self.repo.list_allocations().await?;
-            if existing_allocations.iter().any(|allocation| {
-                allocation.port == port && conflicts(protocol, allocation.protocol)
-            }) {
+        let existing_allocations = self.repo.list_allocations().await?;
+        let conflicting_ports =
+            conflicting_port_bitmap(self.port_range, protocol, &existing_allocations);
+
+        for (port, conflicting) in
+            (self.port_range.start..=self.port_range.end).zip(conflicting_ports)
+        {
+            if conflicting {
                 continue;
             }
 
@@ -516,6 +519,24 @@ fn current_time_ms() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
+fn conflicting_port_bitmap(
+    port_range: PortRange,
+    requested: Protocol,
+    existing_allocations: &[Allocation],
+) -> Vec<bool> {
+    let Some(span) = port_range.end.checked_sub(port_range.start) else {
+        return Vec::new();
+    };
+    let mut conflicting_ports = vec![false; usize::from(span) + 1];
+    for allocation in existing_allocations {
+        if port_range.contains(allocation.port) && conflicts(requested, allocation.protocol) {
+            let index = usize::from(allocation.port - port_range.start);
+            conflicting_ports[index] = true;
+        }
+    }
+    conflicting_ports
+}
+
 fn conflicts(requested: Protocol, existing: Protocol) -> bool {
     match requested {
         Protocol::Tcp => existing == Protocol::Tcp || existing == Protocol::Both,
@@ -900,6 +921,35 @@ mod tests {
             udp_svc.create_allocation(Protocol::Both, None).await,
             Err(ServiceError::NoAvailablePort)
         ));
+    }
+
+    #[tokio::test]
+    async fn create_allocation_reuses_deleted_lowest_port() {
+        let svc = service_with_range(temp_repo().await, InMemoryRuntime::default(), 10000, 10001);
+        let first = svc.create_allocation(Protocol::Tcp, None).await.unwrap();
+        let second = svc.create_allocation(Protocol::Tcp, None).await.unwrap();
+        assert_eq!((first.port, second.port), (10000, 10001));
+
+        svc.delete_allocation(&first.id).await.unwrap();
+        let replacement = svc.create_allocation(Protocol::Tcp, None).await.unwrap();
+
+        assert_eq!(replacement.port, 10000);
+    }
+
+    #[tokio::test]
+    async fn create_allocation_scans_dense_range_with_one_repository_read() {
+        let repo = temp_repo().await;
+        for (id, port) in [("first", 10000), ("second", 10001), ("third", 10002)] {
+            repo.insert_allocation(&allocation(id, Protocol::Tcp, port, None, None))
+                .await
+                .unwrap();
+        }
+        let svc = service_with_range(repo, InMemoryRuntime::default(), 10000, 10003);
+
+        let created = svc.create_allocation(Protocol::Tcp, None).await.unwrap();
+
+        assert_eq!(created.port, 10003);
+        assert_eq!(svc.repo().list_allocations_call_count(), 1);
     }
 
     #[tokio::test]
