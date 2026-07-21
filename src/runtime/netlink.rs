@@ -188,9 +188,11 @@ impl NftBackend for LibNftnlBackend {
 #[cfg(feature = "netlink")]
 const NF_IP_PRI_NAT_DST: i32 = -100;
 #[cfg(feature = "netlink")]
-const NFT_FIB_RESULT_ADDRTYPE: u32 = 1;
+// Values from linux/netfilter/nf_tables.h. These are kernel ABI values rather
+// than bit positions: ADDRTYPE is result selector 3 and DADDR is flag bit 1.
+const NFT_FIB_RESULT_ADDRTYPE: u32 = 3;
 #[cfg(feature = "netlink")]
-const NFT_FIB_F_DADDR: u32 = 1;
+const NFT_FIB_F_DADDR: u32 = 1 << 1;
 #[cfg(feature = "netlink")]
 const RTN_LOCAL: u8 = 2;
 #[cfg(feature = "netlink")]
