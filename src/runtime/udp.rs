@@ -3,15 +3,46 @@ use crate::model::{Allocation, ErrorKind, Protocol, RuntimeStatus};
 use crate::runtime::facade::{ListenerMetricsSnapshot, ObservedState, RuntimeError, RuntimeFacade};
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::io;
 use std::net::{IpAddr, SocketAddr};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(target_os = "linux")]
+use tokio::io::Interest;
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 
 const MAX_SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
+const UDP_DATAGRAM_BUFFER_BYTES: usize = 2048;
+#[cfg(target_os = "linux")]
+const UDP_RECEIVE_BATCH_SIZE: usize = 16;
+#[cfg(not(target_os = "linux"))]
+const UDP_RECEIVE_BATCH_SIZE: usize = 1;
+
+struct UdpReceiveBatch {
+    buffers: [[u8; UDP_DATAGRAM_BUFFER_BYTES]; UDP_RECEIVE_BATCH_SIZE],
+    lengths: [usize; UDP_RECEIVE_BATCH_SIZE],
+    peers: [Option<SocketAddr>; UDP_RECEIVE_BATCH_SIZE],
+}
+
+struct UdpBatchSendError {
+    sent: usize,
+    error: io::Error,
+}
+
+impl UdpReceiveBatch {
+    fn new() -> Self {
+        Self {
+            buffers: [[0; UDP_DATAGRAM_BUFFER_BYTES]; UDP_RECEIVE_BATCH_SIZE],
+            lengths: [0; UDP_RECEIVE_BATCH_SIZE],
+            peers: [None; UDP_RECEIVE_BATCH_SIZE],
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct UdpRuntimeConfig {
@@ -19,6 +50,7 @@ pub struct UdpRuntimeConfig {
     metrics: Arc<Metrics>,
     session_ttl: Duration,
     max_sessions: usize,
+    udp_batch_enabled: bool,
 }
 
 impl UdpRuntimeConfig {
@@ -32,6 +64,7 @@ impl UdpRuntimeConfig {
             metrics,
             session_ttl: Duration::from_millis(60_000),
             max_sessions: 65_536,
+            udp_batch_enabled: false,
         }
     }
 
@@ -42,6 +75,11 @@ impl UdpRuntimeConfig {
 
     pub fn with_udp_max_sessions(mut self, max_sessions: usize) -> Self {
         self.max_sessions = max_sessions;
+        self
+    }
+
+    pub fn with_udp_batch_enabled(mut self, enabled: bool) -> Self {
+        self.udp_batch_enabled = enabled;
         self
     }
 }
@@ -65,6 +103,7 @@ struct ListenerEntry {
     empty_since: Mutex<Option<Instant>>,
     generation: AtomicU64,
     max_sessions: usize,
+    udp_batch_enabled: bool,
     global_metrics: Arc<Metrics>,
 }
 
@@ -146,6 +185,11 @@ impl UdpRuntime {
     }
 
     #[cfg(test)]
+    pub(crate) fn batch_enabled(&self) -> bool {
+        self.config.udp_batch_enabled
+    }
+
+    #[cfg(test)]
     async fn session_table_stats(&self, id: &str) -> Option<(usize, usize)> {
         let entry = self.entries.lock().await.get(id).cloned()?;
         let sessions = entry.sessions.lock().await;
@@ -182,11 +226,212 @@ impl UdpRuntime {
         Ok(SocketAddr::new(host, port))
     }
 
+    #[cfg(target_os = "linux")]
+    fn socket_addr_from_storage(storage: &libc::sockaddr_storage) -> io::Result<SocketAddr> {
+        match i32::from(storage.ss_family) {
+            libc::AF_INET => {
+                // SAFETY: the kernel set ss_family to AF_INET and wrote a sockaddr_in.
+                let address = unsafe { &*std::ptr::from_ref(storage).cast::<libc::sockaddr_in>() };
+                Ok(SocketAddr::new(
+                    IpAddr::V4(std::net::Ipv4Addr::from(
+                        address.sin_addr.s_addr.to_ne_bytes(),
+                    )),
+                    u16::from_be(address.sin_port),
+                ))
+            }
+            libc::AF_INET6 => {
+                // SAFETY: the kernel set ss_family to AF_INET6 and wrote a sockaddr_in6.
+                let address = unsafe { &*std::ptr::from_ref(storage).cast::<libc::sockaddr_in6>() };
+                Ok(SocketAddr::V6(std::net::SocketAddrV6::new(
+                    std::net::Ipv6Addr::from(address.sin6_addr.s6_addr),
+                    u16::from_be(address.sin6_port),
+                    u32::from_be(address.sin6_flowinfo),
+                    address.sin6_scope_id,
+                )))
+            }
+            family => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported UDP address family {family}"),
+            )),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn recv_batch(socket: &UdpSocket, batch: &mut UdpReceiveBatch) -> io::Result<usize> {
+        let count = Self::recv_one(socket, batch).await?;
+        debug_assert_eq!(count, 1);
+
+        match socket.try_io(Interest::READABLE, || {
+            let remaining_capacity = UDP_RECEIVE_BATCH_SIZE - 1;
+            let mut addresses =
+                // SAFETY: sockaddr_storage is plain data and zero is a valid empty value.
+                [unsafe { std::mem::zeroed::<libc::sockaddr_storage>() };
+                    UDP_RECEIVE_BATCH_SIZE];
+            let mut iovecs: [libc::iovec; UDP_RECEIVE_BATCH_SIZE] =
+                std::array::from_fn(|position| {
+                    let index = (position + 1).min(UDP_RECEIVE_BATCH_SIZE - 1);
+                    libc::iovec {
+                        iov_base: batch.buffers[index].as_mut_ptr().cast(),
+                        iov_len: batch.buffers[index].len(),
+                    }
+                });
+            let mut messages: [libc::mmsghdr; UDP_RECEIVE_BATCH_SIZE] =
+                std::array::from_fn(|position| libc::mmsghdr {
+                    msg_hdr: libc::msghdr {
+                        msg_name: std::ptr::from_mut(&mut addresses[position]).cast(),
+                        msg_namelen: std::mem::size_of::<libc::sockaddr_storage>()
+                            as libc::socklen_t,
+                        msg_iov: std::ptr::from_mut(&mut iovecs[position]),
+                        msg_iovlen: 1,
+                        msg_control: std::ptr::null_mut(),
+                        msg_controllen: 0,
+                        msg_flags: 0,
+                    },
+                    msg_len: 0,
+                });
+
+            // SAFETY: every mmsghdr points to a live address and payload buffer for the
+            // duration of this nonblocking syscall, and the array has the supplied length.
+            let received = unsafe {
+                libc::recvmmsg(
+                    socket.as_raw_fd(),
+                    messages.as_mut_ptr(),
+                    remaining_capacity as libc::c_uint,
+                    libc::MSG_DONTWAIT,
+                    std::ptr::null_mut(),
+                )
+            };
+            if received < 0 {
+                return Err(io::Error::last_os_error());
+            }
+
+            let received = received as usize;
+            for position in 0..received {
+                let index = position + 1;
+                batch.lengths[index] = messages[position].msg_len as usize;
+                batch.peers[index] = Some(Self::socket_addr_from_storage(&addresses[position])?);
+            }
+            Ok(received)
+        }) {
+            Ok(additional) => Ok(1 + additional),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(1),
+            Err(error) => Err(error),
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    async fn recv_batch(socket: &UdpSocket, batch: &mut UdpReceiveBatch) -> std::io::Result<usize> {
+        let (length, peer) = socket.recv_from(&mut batch.buffers[0]).await?;
+        batch.lengths[0] = length;
+        batch.peers[0] = Some(peer);
+        Ok(1)
+    }
+
+    async fn recv_one(socket: &UdpSocket, batch: &mut UdpReceiveBatch) -> io::Result<usize> {
+        let (length, peer) = socket.recv_from(&mut batch.buffers[0]).await?;
+        batch.lengths[0] = length;
+        batch.peers[0] = Some(peer);
+        Ok(1)
+    }
+
+    async fn send_individually(
+        socket: &UdpSocket,
+        batch: &UdpReceiveBatch,
+        indexes: &[usize],
+    ) -> Result<(), UdpBatchSendError> {
+        for (sent, index) in indexes.iter().copied().enumerate() {
+            if let Err(error) = socket
+                .send(&batch.buffers[index][..batch.lengths[index]])
+                .await
+            {
+                return Err(UdpBatchSendError { sent, error });
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn send_batch(
+        socket: &UdpSocket,
+        batch: &UdpReceiveBatch,
+        indexes: &[usize],
+    ) -> Result<(), UdpBatchSendError> {
+        let mut sent = 0;
+        while sent < indexes.len() {
+            let result = socket
+                .async_io(Interest::WRITABLE, || {
+                    let remaining = &indexes[sent..];
+                    let mut iovecs: [libc::iovec; UDP_RECEIVE_BATCH_SIZE] =
+                        std::array::from_fn(|position| {
+                            let index = remaining.get(position).copied().unwrap_or(0);
+                            libc::iovec {
+                                iov_base: batch.buffers[index].as_ptr().cast_mut().cast(),
+                                iov_len: batch.lengths[index],
+                            }
+                        });
+                    let mut messages: [libc::mmsghdr; UDP_RECEIVE_BATCH_SIZE] =
+                        std::array::from_fn(|position| libc::mmsghdr {
+                            msg_hdr: libc::msghdr {
+                                msg_name: std::ptr::null_mut(),
+                                msg_namelen: 0,
+                                msg_iov: std::ptr::from_mut(&mut iovecs[position]),
+                                msg_iovlen: 1,
+                                msg_control: std::ptr::null_mut(),
+                                msg_controllen: 0,
+                                msg_flags: 0,
+                            },
+                            msg_len: 0,
+                        });
+
+                    // SAFETY: the initialized headers point to live payload buffers for this
+                    // nonblocking syscall, and only the requested prefix is passed to the kernel.
+                    let result = unsafe {
+                        libc::sendmmsg(
+                            socket.as_raw_fd(),
+                            messages.as_mut_ptr(),
+                            remaining.len() as libc::c_uint,
+                            libc::MSG_DONTWAIT,
+                        )
+                    };
+                    if result < 0 {
+                        Err(io::Error::last_os_error())
+                    } else if result == 0 {
+                        Err(io::Error::from(io::ErrorKind::WriteZero))
+                    } else {
+                        Ok(result as usize)
+                    }
+                })
+                .await;
+            match result {
+                Ok(count) => sent += count,
+                Err(error) => return Err(UdpBatchSendError { sent, error }),
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    async fn send_batch(
+        socket: &UdpSocket,
+        batch: &UdpReceiveBatch,
+        indexes: &[usize],
+    ) -> Result<(), UdpBatchSendError> {
+        for (sent, index) in indexes.iter().copied().enumerate() {
+            if let Err(error) = socket
+                .send(&batch.buffers[index][..batch.lengths[index]])
+                .await
+            {
+                return Err(UdpBatchSendError { sent, error });
+            }
+        }
+        Ok(())
+    }
+
     async fn spawn_receive_loop(entry: Arc<ListenerEntry>) {
         let mut shutdown_rx = entry.shutdown.subscribe();
         let task_entry = entry.clone();
         let task = tokio::spawn(async move {
-            let mut buf = [0_u8; 2048];
+            let mut batch = Box::new(UdpReceiveBatch::new());
             loop {
                 tokio::select! {
                     changed = shutdown_rx.changed() => {
@@ -194,10 +439,97 @@ impl UdpRuntime {
                             break;
                         }
                     }
-                    received = task_entry.listener_socket.recv_from(&mut buf) => {
+                    received = async {
+                        if task_entry.udp_batch_enabled {
+                            Self::recv_batch(&task_entry.listener_socket, &mut batch).await
+                        } else {
+                            Self::recv_one(&task_entry.listener_socket, &mut batch).await
+                        }
+                    } => {
                         match received {
-                            Ok((n, peer)) => {
-                                Self::handle_datagram(task_entry.clone(), &buf[..n], peer).await;
+                            Ok(count) => {
+                                if task_entry.udp_batch_enabled {
+                                    task_entry.global_metrics.udp_batch_calls_total.inc();
+                                    task_entry
+                                        .global_metrics
+                                        .udp_batch_messages_total
+                                        .add(count as u64);
+                                }
+                                let received_bytes = batch.lengths[..count]
+                                    .iter()
+                                    .map(|length| *length as u64)
+                                    .sum::<u64>();
+                                task_entry
+                                    .global_metrics
+                                    .udp_packets_in_total
+                                    .add(count as u64);
+                                task_entry
+                                    .global_metrics
+                                    .udp_bytes_in_total
+                                    .add(received_bytes);
+                                task_entry
+                                    .metrics
+                                    .rx
+                                    .fetch_add(received_bytes, Ordering::Relaxed);
+                                let sessions =
+                                    Self::prepare_datagram_batch(&task_entry, &batch, count).await;
+
+                                let mut grouped = [false; UDP_RECEIVE_BATCH_SIZE];
+                                for first in 0..count {
+                                    let Some(session) = sessions[first].as_ref() else {
+                                        continue;
+                                    };
+                                    if grouped[first] {
+                                        continue;
+                                    }
+                                    let mut indexes = [0; UDP_RECEIVE_BATCH_SIZE];
+                                    let mut index_count = 0;
+                                    for index in first..count {
+                                        if sessions[index]
+                                            .as_ref()
+                                            .is_some_and(|candidate| Arc::ptr_eq(candidate, session))
+                                        {
+                                            grouped[index] = true;
+                                            indexes[index_count] = index;
+                                            index_count += 1;
+                                        }
+                                    }
+
+                                    let sent = if task_entry.udp_batch_enabled && index_count > 1 {
+                                        Self::send_batch(
+                                            &session.upstream,
+                                            &batch,
+                                            &indexes[..index_count],
+                                        )
+                                        .await
+                                    } else {
+                                        Self::send_individually(
+                                            &session.upstream,
+                                            &batch,
+                                            &indexes[..index_count],
+                                        )
+                                        .await
+                                    };
+                                    if let Err(error) = sent {
+                                        task_entry.global_metrics.udp_send_errors_total.inc();
+                                        task_entry
+                                            .global_metrics
+                                            .udp_drop_total
+                                            .add((index_count - error.sent) as u64);
+                                        tracing::debug!(
+                                            error = %error.error,
+                                            dropped = index_count - error.sent,
+                                            "udp_batch_send_failed"
+                                        );
+                                        Self::remove_session(
+                                            &task_entry,
+                                            session.client_addr,
+                                            session,
+                                            SessionRemovalReason::Error,
+                                        )
+                                        .await;
+                                    }
+                                }
                             }
                             Err(_) => {
                                 task_entry.global_metrics.udp_recv_errors_total.inc();
@@ -484,45 +816,63 @@ impl UdpRuntime {
         *entry.empty_since.lock().await = None;
     }
 
-    async fn handle_datagram(entry: Arc<ListenerEntry>, payload: &[u8], peer: SocketAddr) {
-        entry.global_metrics.udp_packets_in_total.inc();
-        entry
-            .global_metrics
-            .udp_bytes_in_total
-            .add(payload.len() as u64);
-        entry
-            .metrics
-            .rx
-            .fetch_add(payload.len() as u64, Ordering::Relaxed);
-
+    async fn prepare_datagram_batch(
+        entry: &Arc<ListenerEntry>,
+        batch: &UdpReceiveBatch,
+        count: usize,
+    ) -> [Option<Arc<UdpSession>>; UDP_RECEIVE_BATCH_SIZE] {
+        let mut sessions = std::array::from_fn(|_| None);
         let state = entry.state.read().await.clone();
         let generation = state.generation;
         let (Some(host), Some(target_port)) = (state.effective_host, state.effective_target_port)
         else {
-            entry.global_metrics.rejected_no_host_total.inc();
-            return;
+            entry
+                .global_metrics
+                .rejected_no_host_total
+                .add(count as u64);
+            return sessions;
         };
 
-        let Some(session) =
-            Self::session_for(entry.clone(), peer, &host, target_port, generation).await
-        else {
-            return;
-        };
-        if entry.generation.load(Ordering::Relaxed) != generation
-            || session.generation != generation
-            || session.closed.load(Ordering::Relaxed)
-        {
-            session.closed.store(true, Ordering::Relaxed);
-            entry.global_metrics.udp_reply_stale_total.inc();
-            return;
+        for index in 0..count {
+            let peer = batch.peers[index].expect("received UDP datagram must have a peer");
+            sessions[index] = (0..index)
+                .find(|previous| batch.peers[*previous] == Some(peer))
+                .and_then(|previous| sessions[previous].clone());
+            if sessions[index].is_none() {
+                sessions[index] =
+                    Self::session_for(entry.clone(), peer, &host, target_port, generation).await;
+            }
         }
 
-        *session.last_seen.lock().await = Instant::now();
-        if session.upstream.send(payload).await.is_err() {
-            entry.global_metrics.udp_send_errors_total.inc();
-            entry.global_metrics.udp_drop_total.inc();
-            Self::remove_session(&entry, peer, &session, SessionRemovalReason::Error).await;
+        if entry.generation.load(Ordering::Relaxed) != generation {
+            let mut stale = 0;
+            for session in sessions[..count].iter().flatten() {
+                session.closed.store(true, Ordering::Relaxed);
+                stale += 1;
+            }
+            entry.global_metrics.udp_reply_stale_total.add(stale);
+            return std::array::from_fn(|_| None);
         }
+
+        for index in 0..count {
+            let Some(session) = sessions[index].as_ref() else {
+                continue;
+            };
+            if session.generation != generation || session.closed.load(Ordering::Relaxed) {
+                session.closed.store(true, Ordering::Relaxed);
+                entry.global_metrics.udp_reply_stale_total.inc();
+                sessions[index] = None;
+                continue;
+            }
+            if !(0..index).any(|previous| {
+                sessions[previous]
+                    .as_ref()
+                    .is_some_and(|candidate| Arc::ptr_eq(candidate, session))
+            }) {
+                *session.last_seen.lock().await = Instant::now();
+            }
+        }
+        sessions
     }
 
     async fn close_sessions(entry: &ListenerEntry, count_as_reply_drop: bool) {
@@ -633,6 +983,7 @@ impl UdpRuntime {
             empty_since: Mutex::new(None),
             generation: AtomicU64::new(0),
             max_sessions: self.config.max_sessions,
+            udp_batch_enabled: self.config.udp_batch_enabled,
             global_metrics: self.config.metrics.clone(),
         });
         Self::spawn_receive_loop(entry.clone()).await;
@@ -787,6 +1138,17 @@ mod tests {
     }
 
     #[test]
+    fn udp_runtime_config_accepts_optional_batching() {
+        let disabled = UdpRuntime::new(UdpRuntimeConfig::loopback(Arc::new(Metrics::default())));
+        assert!(!disabled.batch_enabled());
+
+        let enabled = UdpRuntime::new(
+            UdpRuntimeConfig::loopback(Arc::new(Metrics::default())).with_udp_batch_enabled(true),
+        );
+        assert!(enabled.batch_enabled());
+    }
+
+    #[test]
     fn udp_runtime_config_defaults_to_65536_max_sessions() {
         let config = UdpRuntimeConfig::loopback(Arc::new(Metrics::default()));
 
@@ -818,6 +1180,27 @@ mod tests {
             unspecified.local_addr().unwrap().ip(),
             std::net::Ipv4Addr::UNSPECIFIED
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn udp_batch_receive_decodes_ipv6_peers() {
+        let receiver = UdpSocket::bind(("::1", 0)).await.unwrap();
+        let receiver_port = receiver.local_addr().unwrap().port();
+        let sender = std::net::UdpSocket::bind(("::1", 0)).unwrap();
+        let sender_addr = sender.local_addr().unwrap();
+        sender.connect(("::1", receiver_port)).unwrap();
+        sender.send(b"first").unwrap();
+        sender.send(b"second").unwrap();
+
+        let mut batch = UdpReceiveBatch::new();
+        let count = UdpRuntime::recv_batch(&receiver, &mut batch).await.unwrap();
+
+        assert_eq!(count, 2);
+        assert_eq!(batch.peers[0], Some(sender_addr));
+        assert_eq!(batch.peers[1], Some(sender_addr));
+        assert_eq!(&batch.buffers[0][..batch.lengths[0]], b"first");
+        assert_eq!(&batch.buffers[1][..batch.lengths[1]], b"second");
     }
 
     fn temp_db_path() -> PathBuf {
@@ -1047,9 +1430,66 @@ mod tests {
         assert_eq!(rows[0].tx_bytes_total, 4);
         assert_eq!(metrics.udp_session_create_total.load(), 1);
         assert_eq!(metrics.udp_active_sessions.load(), 1);
+        assert_eq!(metrics.udp_batch_calls_total.load(), 0);
+        assert_eq!(metrics.udp_batch_messages_total.load(), 0);
 
         runtime.delete("alloc-active", 500).await.unwrap();
         target_task.abort();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn udp_runtime_batches_bursts_without_changing_order_or_metrics() {
+        const PACKETS: usize = UDP_RECEIVE_BATCH_SIZE;
+
+        let metrics = Arc::new(Metrics::default());
+        let runtime = UdpRuntime::new(
+            UdpRuntimeConfig::loopback(metrics.clone()).with_udp_batch_enabled(true),
+        );
+        let relay_port = free_udp_port().await;
+        let (target_port, records, target_task) = start_udp_capture_server(PACKETS).await;
+        runtime
+            .create(
+                &allocation(
+                    "alloc-batch",
+                    relay_port,
+                    Some(target_port),
+                    Some("127.0.0.1"),
+                ),
+                500,
+            )
+            .await
+            .unwrap();
+
+        // Queue the complete burst without yielding so the receive loop can drain it together.
+        let client = std::net::UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+        client.connect(("127.0.0.1", relay_port)).unwrap();
+        for sequence in 0..PACKETS as u64 {
+            client.send(&sequence.to_ne_bytes()).unwrap();
+        }
+        client.set_nonblocking(true).unwrap();
+        let client = UdpSocket::from_std(client).unwrap();
+
+        let mut reply = [0_u8; 8];
+        for sequence in 0..PACKETS as u64 {
+            timeout(Duration::from_secs(1), client.recv(&mut reply))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(u64::from_ne_bytes(reply), sequence);
+        }
+
+        target_task.await.unwrap();
+        let records = records.lock().await;
+        assert_eq!(records.len(), PACKETS);
+        assert!(records.windows(2).all(|rows| rows[0].0 == rows[1].0));
+        drop(records);
+        wait_for_udp_metrics(&runtime, &metrics, PACKETS as u64, PACKETS as u64).await;
+        assert_eq!(metrics.udp_batch_messages_total.load(), PACKETS as u64);
+        assert!(metrics.udp_batch_calls_total.load() < PACKETS as u64);
+        assert_eq!(metrics.udp_session_create_total.load(), 1);
+
+        runtime.delete("alloc-batch", 500).await.unwrap();
     }
 
     #[tokio::test]
@@ -1262,7 +1702,9 @@ mod tests {
     #[tokio::test]
     async fn udp_runtime_update_to_new_target_closes_stale_session_and_uses_new_target() {
         let metrics = Arc::new(Metrics::default());
-        let runtime = UdpRuntime::new(UdpRuntimeConfig::loopback(metrics.clone()));
+        let runtime = UdpRuntime::new(
+            UdpRuntimeConfig::loopback(metrics.clone()).with_udp_batch_enabled(true),
+        );
         let relay_port = free_udp_port().await;
         let (target_one_port, target_one_task) = start_udp_fixed_reply_server(b"one").await;
         let (target_two_port, target_two_task) = start_udp_fixed_reply_server(b"two").await;
@@ -1358,7 +1800,9 @@ mod tests {
     #[tokio::test]
     async fn udp_runtime_delayed_reply_from_replaced_target_is_dropped_and_new_target_replies() {
         let metrics = Arc::new(Metrics::default());
-        let runtime = UdpRuntime::new(UdpRuntimeConfig::loopback(metrics.clone()));
+        let runtime = UdpRuntime::new(
+            UdpRuntimeConfig::loopback(metrics.clone()).with_udp_batch_enabled(true),
+        );
         let relay_port = free_udp_port().await;
         let old = start_delayed_udp_reply_server(b"old").await;
         let (new_port, new_task) = start_udp_fixed_reply_server(b"new").await;
@@ -1419,7 +1863,9 @@ mod tests {
     #[tokio::test]
     async fn udp_runtime_delayed_reply_after_delete_is_dropped_without_leaking_session() {
         let metrics = Arc::new(Metrics::default());
-        let runtime = UdpRuntime::new(UdpRuntimeConfig::loopback(metrics.clone()));
+        let runtime = UdpRuntime::new(
+            UdpRuntimeConfig::loopback(metrics.clone()).with_udp_batch_enabled(true),
+        );
         let relay_port = free_udp_port().await;
         let old = start_delayed_udp_reply_server(b"old-delete").await;
         runtime
@@ -1462,7 +1908,9 @@ mod tests {
     async fn udp_runtime_shutdown_without_delete_releases_listener_sessions_and_drops_late_replies()
     {
         let metrics = Arc::new(Metrics::default());
-        let runtime = UdpRuntime::new(UdpRuntimeConfig::loopback(metrics.clone()));
+        let runtime = UdpRuntime::new(
+            UdpRuntimeConfig::loopback(metrics.clone()).with_udp_batch_enabled(true),
+        );
         let relay_port = free_udp_port().await;
         let delayed = start_delayed_udp_reply_server(b"after-shutdown").await;
         runtime

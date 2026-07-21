@@ -15,6 +15,7 @@ pub struct RealRuntimeConfig {
     bind_host: String,
     udp_session_ttl: Duration,
     udp_max_sessions: usize,
+    udp_batch_enabled: bool,
     tcp_splice_enabled: bool,
     force_tcp_copy_fallback: bool,
 }
@@ -30,6 +31,7 @@ impl RealRuntimeConfig {
             bind_host: bind_host.into(),
             udp_session_ttl: Duration::from_millis(60_000),
             udp_max_sessions: 65_536,
+            udp_batch_enabled: false,
             tcp_splice_enabled: false,
             force_tcp_copy_fallback: false,
         }
@@ -45,6 +47,11 @@ impl RealRuntimeConfig {
         self
     }
 
+    pub fn with_udp_batch_enabled(mut self, enabled: bool) -> Self {
+        self.udp_batch_enabled = enabled;
+        self
+    }
+
     pub fn with_tcp_splice_enabled(mut self, enabled: bool) -> Self {
         self.tcp_splice_enabled = enabled;
         self
@@ -57,6 +64,10 @@ impl RealRuntimeConfig {
 
     pub fn udp_max_sessions(&self) -> usize {
         self.udp_max_sessions
+    }
+
+    pub fn udp_batch_enabled(&self) -> bool {
+        self.udp_batch_enabled
     }
 
     pub fn tcp_splice_enabled(&self) -> bool {
@@ -85,7 +96,8 @@ impl RealRuntime {
         let udp = UdpRuntime::new(
             UdpRuntimeConfig::with_bind_host(config.bind_host, config.metrics.clone())
                 .with_session_ttl(config.udp_session_ttl)
-                .with_udp_max_sessions(config.udp_max_sessions),
+                .with_udp_max_sessions(config.udp_max_sessions)
+                .with_udp_batch_enabled(config.udp_batch_enabled),
         );
         Self {
             tcp,
@@ -294,6 +306,15 @@ mod tests {
         let runtime = RealRuntime::new(config);
 
         assert_eq!(runtime.udp.max_sessions(), 321);
+    }
+
+    #[test]
+    fn real_runtime_config_propagates_udp_batch_mode() {
+        let config =
+            RealRuntimeConfig::loopback(Arc::new(Metrics::default())).with_udp_batch_enabled(true);
+        let runtime = RealRuntime::new(config);
+
+        assert!(runtime.udp.batch_enabled());
     }
 
     async fn free_tcp_port() -> u16 {

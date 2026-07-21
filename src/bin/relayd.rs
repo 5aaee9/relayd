@@ -179,6 +179,13 @@ struct Cli {
     #[arg(
         long,
         action = clap::ArgAction::SetTrue,
+        help = "Enable Linux UDP recvmmsg/sendmmsg batching (env: UDP_BATCH_ENABLED)."
+    )]
+    udp_batch_enabled: bool,
+
+    #[arg(
+        long,
+        action = clap::ArgAction::SetTrue,
         help = "Enable UDP io_uring compatibility flag parsed by config (env: UDP_IO_URING_ENABLED)."
     )]
     udp_io_uring_enabled: bool,
@@ -297,6 +304,7 @@ impl Cli {
         insert_flag(env, "FORCE_TCP_COPY_FALLBACK", self.force_tcp_copy_fallback);
         insert_if_present(env, "UDP_SESSION_WORKERS", self.udp_session_workers);
         insert_if_present(env, "UDP_MAX_SESSIONS", self.udp_max_sessions);
+        insert_flag(env, "UDP_BATCH_ENABLED", self.udp_batch_enabled);
         insert_flag(env, "UDP_IO_URING_ENABLED", self.udp_io_uring_enabled);
         insert_flag(env, "UDP_GRO_ENABLED", self.udp_gro_enabled);
         insert_flag(
@@ -327,6 +335,7 @@ fn config_from_cli_and_env(
 fn real_runtime_config_from_config(config: &Config, metrics: Arc<Metrics>) -> RealRuntimeConfig {
     RealRuntimeConfig::with_bind_host(config.proxy_listen_host.clone(), metrics)
         .with_udp_max_sessions(config.udp_max_sessions)
+        .with_udp_batch_enabled(config.udp_batch_enabled)
         .with_tcp_splice_enabled(config.tcp_splice_enabled)
         .with_force_tcp_copy_fallback(config.force_tcp_copy_fallback)
 }
@@ -449,6 +458,8 @@ mod tests {
         assert!(help.contains("--runtime-apply-timeout-ms <MILLISECONDS>"));
         assert!(help.contains("--udp-max-sessions <COUNT>"));
         assert!(help.contains("env: UDP_MAX_SESSIONS"));
+        assert!(help.contains("--udp-batch-enabled"));
+        assert!(help.contains("env: UDP_BATCH_ENABLED"));
         assert!(help.contains("--tcp-splice-enabled"));
         assert!(help.contains("env: TCP_SPLICE_ENABLED"));
         assert!(help.contains("--force-tcp-copy-fallback"));
@@ -479,6 +490,7 @@ mod tests {
             "1500",
             "--udp-max-sessions",
             "777",
+            "--udp-batch-enabled",
             "--tcp-session-model-enabled",
             "--tcp-splice-enabled",
             "--force-tcp-copy-fallback",
@@ -512,6 +524,7 @@ mod tests {
         assert_eq!(config.nftables_chain, "cli_chain");
         assert_eq!(config.runtime_apply_timeout_ms, 1500);
         assert_eq!(config.udp_max_sessions, 777);
+        assert!(config.udp_batch_enabled);
         assert!(config.tcp_session_model_enabled);
         assert!(config.tcp_splice_enabled);
         assert!(config.force_tcp_copy_fallback);
@@ -534,6 +547,18 @@ mod tests {
         let runtime_config = real_runtime_config_from_config(&config, Arc::new(Metrics::default()));
 
         assert_eq!(runtime_config.udp_max_sessions(), 555);
+    }
+
+    #[test]
+    fn runtime_config_from_config_carries_udp_batch_mode() {
+        let env = HashMap::from([
+            ("AUTH_TOKEN".to_owned(), "secret-token".to_owned()),
+            ("UDP_BATCH_ENABLED".to_owned(), "true".to_owned()),
+        ]);
+        let config = Config::from_env_map(&env).unwrap();
+        let runtime_config = real_runtime_config_from_config(&config, Arc::new(Metrics::default()));
+
+        assert!(runtime_config.udp_batch_enabled());
     }
 
     #[test]

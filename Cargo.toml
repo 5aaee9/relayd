@@ -31,6 +31,7 @@ uuid = { version = "1", features = ["v7", "serde"] }
 clap = { version = "4.6.1", features = ["derive", "env"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 tokio-splice2 = "0.3.2"
 
 [dev-dependencies]

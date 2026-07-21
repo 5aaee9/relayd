@@ -69,6 +69,7 @@ pub struct Config {
     pub udp_fast_path_segment_size: u32,
     pub udp_fast_path_gso_burst: u32,
     pub udp_max_sessions: usize,
+    pub udp_batch_enabled: bool,
     pub udp_socket_recv_buffer_bytes: u32,
     pub udp_socket_send_buffer_bytes: u32,
     pub runtime_apply_timeout_ms: u32,
@@ -146,6 +147,7 @@ impl Config {
             udp_fast_path_segment_size: env_u32(env, "UDP_FAST_PATH_SEGMENT_SIZE", 1472)?,
             udp_fast_path_gso_burst: env_u32(env, "UDP_FAST_PATH_GSO_BURST", 16)?,
             udp_max_sessions: env_nonzero_usize(env, "UDP_MAX_SESSIONS", 65_536)?,
+            udp_batch_enabled: env_bool(env, "UDP_BATCH_ENABLED"),
             udp_socket_recv_buffer_bytes: env_u32(env, "UDP_SOCKET_RCVBUF_BYTES", 8 * 1024 * 1024)?,
             udp_socket_send_buffer_bytes: env_u32(env, "UDP_SOCKET_SNDBUF_BYTES", 8 * 1024 * 1024)?,
             runtime_apply_timeout_ms: env_u32(env, "RUNTIME_APPLY_TIMEOUT_MS", 2000)?,
@@ -357,6 +359,7 @@ mod tests {
         assert_eq!(cfg.tcp_session_model_max_active, 256);
         assert!(!cfg.tcp_splice_enabled);
         assert!(!cfg.force_tcp_copy_fallback);
+        assert!(!cfg.udp_batch_enabled);
         assert_eq!(cfg.udp_fast_path_segment_size, 1472);
         assert_eq!(cfg.udp_socket_recv_buffer_bytes, 8 * 1024 * 1024);
     }
@@ -425,6 +428,16 @@ mod tests {
         env.insert("UDP_MAX_SESSIONS".to_owned(), "12345".to_owned());
         let cfg = Config::from_env_map(&env).unwrap();
         assert_eq!(cfg.udp_max_sessions, 12_345);
+    }
+
+    #[test]
+    fn config_from_env_map_parses_udp_batch_flag() {
+        let mut env = env_with_token();
+        env.insert("UDP_BATCH_ENABLED".to_owned(), "true".to_owned());
+
+        let cfg = Config::from_env_map(&env).unwrap();
+
+        assert!(cfg.udp_batch_enabled);
     }
 
     #[test]

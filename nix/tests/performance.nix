@@ -11,6 +11,7 @@ let
     portRange = "21000-21003";
     withIperf = true;
     tcpSplice = runtimeMode == "proxy";
+    udpBatch = runtimeMode == "proxy";
   };
   c = topology.constants;
 in
@@ -75,6 +76,11 @@ pkgs.testers.runNixOSTest {
             t.assertGreaterEqual(metrics["tcp_splice_attempt_total"], 1)
             t.assertEqual(metrics["tcp_splice_hard_failure_total"], 0)
             t.assertEqual(metrics["tcp_copy_fallback_total"], 0)
+            t.assertGreaterEqual(metrics["udp_batch_calls_total"], 1)
+            t.assertGreater(
+                metrics["udp_batch_messages_total"],
+                metrics["udp_batch_calls_total"],
+            )
 
         summary = {
             "runtime_mode": "${runtimeMode}",
