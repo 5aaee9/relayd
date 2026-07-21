@@ -1,7 +1,7 @@
 use crate::model::{Allocation, Binding, Protocol};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ConnectionTrait, DatabaseConnection, DbBackend, DbErr,
-    EntityTrait, IntoActiveModel, QueryOrder, Schema, Statement,
+    EntityTrait, QueryOrder, Schema, Statement,
 };
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
@@ -132,48 +132,57 @@ impl Repository {
     }
 
     pub async fn put_binding(&self, binding: &Binding) -> Result<()> {
-        match binding_entity::Entity::find_by_id(binding.allocation_id.clone())
-            .one(&self.db)
-            .await?
-        {
-            Some(model) => {
-                let mut active = model.into_active_model();
-                active.target_port = Set(i32::from(binding.target_port));
-                active.host = Set(binding.host.clone());
-                active.updated_at_ms = Set(binding.updated_at_ms);
-                active.update(&self.db).await?;
-            }
-            None => {
-                binding_entity::ActiveModel {
-                    allocation_id: Set(binding.allocation_id.clone()),
-                    target_port: Set(i32::from(binding.target_port)),
-                    host: Set(binding.host.clone()),
-                    created_at_ms: Set(binding.created_at_ms),
-                    updated_at_ms: Set(binding.updated_at_ms),
-                }
-                .insert(&self.db)
-                .await?;
-            }
-        }
-        self.update_legacy_binding_columns(
-            &binding.allocation_id,
-            binding.target_port,
-            binding.host.clone(),
-            binding.updated_at_ms,
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO bindings(
+                allocation_id, target_port, host, created_at_ms, updated_at_ms
+             ) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(allocation_id) DO UPDATE SET
+                target_port = excluded.target_port,
+                host = excluded.host,
+                updated_at_ms = excluded.updated_at_ms;",
         )
+        .bind(&binding.allocation_id)
+        .bind(i32::from(binding.target_port))
+        .bind(binding.host.as_deref())
+        .bind(binding.created_at_ms)
+        .bind(binding.updated_at_ms)
+        .execute(&mut *transaction)
         .await?;
+        sqlx::query(
+            "UPDATE allocations
+             SET target_port = ?, host = ?, updated_at_ms = ?
+             WHERE id = ?;",
+        )
+        .bind(i32::from(binding.target_port))
+        .bind(binding.host.as_deref())
+        .bind(binding.updated_at_ms)
+        .bind(&binding.allocation_id)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
         Ok(())
     }
 
     pub async fn delete_binding(&self, allocation_id: &str, updated_at_ms: i64) -> Result<bool> {
-        let result = binding_entity::Entity::delete_by_id(allocation_id.to_owned())
-            .exec(&self.db)
+        let mut transaction = self.pool.begin().await?;
+        let result = sqlx::query("DELETE FROM bindings WHERE allocation_id = ?;")
+            .bind(allocation_id)
+            .execute(&mut *transaction)
             .await?;
-        let changed = result.rows_affected > 0;
+        let changed = result.rows_affected() > 0;
         if changed {
-            self.clear_legacy_binding_columns(allocation_id, updated_at_ms)
-                .await?;
+            sqlx::query(
+                "UPDATE allocations
+                 SET target_port = 0, host = NULL, updated_at_ms = ?
+                 WHERE id = ?;",
+            )
+            .bind(updated_at_ms)
+            .bind(allocation_id)
+            .execute(&mut *transaction)
+            .await?;
         }
+        transaction.commit().await?;
         Ok(changed)
     }
 
@@ -267,44 +276,6 @@ impl Repository {
                     .to_owned(),
             ))
             .await?;
-        Ok(())
-    }
-
-    async fn update_legacy_binding_columns(
-        &self,
-        allocation_id: &str,
-        target_port: u16,
-        host: Option<String>,
-        updated_at_ms: i64,
-    ) -> Result<()> {
-        if let Some(model) = allocation_entity::Entity::find_by_id(allocation_id.to_owned())
-            .one(&self.db)
-            .await?
-        {
-            let mut active = model.into_active_model();
-            active.target_port = Set(i32::from(target_port));
-            active.host = Set(host);
-            active.updated_at_ms = Set(updated_at_ms);
-            active.update(&self.db).await?;
-        }
-        Ok(())
-    }
-
-    async fn clear_legacy_binding_columns(
-        &self,
-        allocation_id: &str,
-        updated_at_ms: i64,
-    ) -> Result<()> {
-        if let Some(model) = allocation_entity::Entity::find_by_id(allocation_id.to_owned())
-            .one(&self.db)
-            .await?
-        {
-            let mut active = model.into_active_model();
-            active.target_port = Set(0);
-            active.host = Set(None);
-            active.updated_at_ms = Set(updated_at_ms);
-            active.update(&self.db).await?;
-        }
         Ok(())
     }
 
@@ -567,13 +538,16 @@ mod tests {
             allocation_id: "a1".to_owned(),
             target_port: 9090,
             host: None,
-            created_at_ms: 1100,
+            created_at_ms: 9999,
             updated_at_ms: 1150,
         };
         repo.put_binding(&updated_binding).await.unwrap();
         assert_eq!(
             repo.get_binding("a1").await.unwrap().unwrap(),
-            updated_binding
+            Binding {
+                created_at_ms: 1100,
+                ..updated_binding
+            }
         );
         assert_eq!(
             repo.test_i64("SELECT target_port FROM allocations WHERE id = ?", "a1")
@@ -617,6 +591,43 @@ mod tests {
         assert!(repo.get_allocation("a1").await.unwrap().is_none());
         assert!(repo.get_binding("a1").await.unwrap().is_none());
         assert!(!repo.delete_allocation("a1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn sqlite_binding_write_rolls_back_when_legacy_update_fails() {
+        let repo = temp_repo().await;
+        repo.insert_allocation(&allocation("a1", Protocol::Tcp, 10000, None, None))
+            .await
+            .unwrap();
+        sqlx::query(concat!(
+            "CREATE TRIGGER fail_legacy_binding_update ",
+            "BEFORE UPDATE OF target_port ON allocations ",
+            "BEGIN SELECT RAISE(ABORT, 'legacy update failed'); END;"
+        ))
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+        let result = repo
+            .put_binding(&Binding {
+                allocation_id: "a1".to_owned(),
+                target_port: 8080,
+                host: Some("127.0.0.1".to_owned()),
+                created_at_ms: 1100,
+                updated_at_ms: 1100,
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert!(repo.get_binding("a1").await.unwrap().is_none());
+        assert_eq!(
+            repo.get_allocation("a1")
+                .await
+                .unwrap()
+                .unwrap()
+                .target_port,
+            None
+        );
     }
 
     #[tokio::test]
