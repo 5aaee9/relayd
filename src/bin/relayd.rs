@@ -150,6 +150,20 @@ struct Cli {
 
     #[arg(
         long,
+        action = clap::ArgAction::SetTrue,
+        help = "Enable the Linux TCP splice(2) fast path (env: TCP_SPLICE_ENABLED)."
+    )]
+    tcp_splice_enabled: bool,
+
+    #[arg(
+        long,
+        action = clap::ArgAction::SetTrue,
+        help = "Force buffered TCP copying instead of splice(2) (env: FORCE_TCP_COPY_FALLBACK)."
+    )]
+    force_tcp_copy_fallback: bool,
+
+    #[arg(
+        long,
         value_name = "COUNT",
         help = "Compatibility UDP session worker count parsed by config (env: UDP_SESSION_WORKERS)."
     )]
@@ -279,6 +293,8 @@ impl Cli {
             "TCP_SESSION_MODEL_MAX_ACTIVE",
             self.tcp_session_model_max_active,
         );
+        insert_flag(env, "TCP_SPLICE_ENABLED", self.tcp_splice_enabled);
+        insert_flag(env, "FORCE_TCP_COPY_FALLBACK", self.force_tcp_copy_fallback);
         insert_if_present(env, "UDP_SESSION_WORKERS", self.udp_session_workers);
         insert_if_present(env, "UDP_MAX_SESSIONS", self.udp_max_sessions);
         insert_flag(env, "UDP_IO_URING_ENABLED", self.udp_io_uring_enabled);
@@ -311,6 +327,8 @@ fn config_from_cli_and_env(
 fn real_runtime_config_from_config(config: &Config, metrics: Arc<Metrics>) -> RealRuntimeConfig {
     RealRuntimeConfig::with_bind_host(config.proxy_listen_host.clone(), metrics)
         .with_udp_max_sessions(config.udp_max_sessions)
+        .with_tcp_splice_enabled(config.tcp_splice_enabled)
+        .with_force_tcp_copy_fallback(config.force_tcp_copy_fallback)
 }
 
 fn netlink_runtime_config_from_config(config: &Config) -> NetlinkRuntimeConfig {
@@ -431,6 +449,9 @@ mod tests {
         assert!(help.contains("--runtime-apply-timeout-ms <MILLISECONDS>"));
         assert!(help.contains("--udp-max-sessions <COUNT>"));
         assert!(help.contains("env: UDP_MAX_SESSIONS"));
+        assert!(help.contains("--tcp-splice-enabled"));
+        assert!(help.contains("env: TCP_SPLICE_ENABLED"));
+        assert!(help.contains("--force-tcp-copy-fallback"));
         assert!(help.contains("--udp-socket-rcvbuf-bytes <BYTES>"));
     }
 
@@ -459,6 +480,8 @@ mod tests {
             "--udp-max-sessions",
             "777",
             "--tcp-session-model-enabled",
+            "--tcp-splice-enabled",
+            "--force-tcp-copy-fallback",
             "--udp-socket-rcvbuf-bytes",
             "4096",
         ])
@@ -490,6 +513,8 @@ mod tests {
         assert_eq!(config.runtime_apply_timeout_ms, 1500);
         assert_eq!(config.udp_max_sessions, 777);
         assert!(config.tcp_session_model_enabled);
+        assert!(config.tcp_splice_enabled);
+        assert!(config.force_tcp_copy_fallback);
         assert_eq!(config.udp_socket_recv_buffer_bytes, 4096);
     }
 
@@ -509,6 +534,20 @@ mod tests {
         let runtime_config = real_runtime_config_from_config(&config, Arc::new(Metrics::default()));
 
         assert_eq!(runtime_config.udp_max_sessions(), 555);
+    }
+
+    #[test]
+    fn runtime_config_from_config_carries_tcp_copy_mode() {
+        let env = HashMap::from([
+            ("AUTH_TOKEN".to_owned(), "secret-token".to_owned()),
+            ("TCP_SPLICE_ENABLED".to_owned(), "true".to_owned()),
+            ("FORCE_TCP_COPY_FALLBACK".to_owned(), "true".to_owned()),
+        ]);
+        let config = Config::from_env_map(&env).unwrap();
+        let runtime_config = real_runtime_config_from_config(&config, Arc::new(Metrics::default()));
+
+        assert!(runtime_config.tcp_splice_enabled());
+        assert!(runtime_config.force_tcp_copy_fallback());
     }
 
     #[test]

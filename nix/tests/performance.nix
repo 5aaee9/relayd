@@ -10,6 +10,7 @@ let
     inherit pkgs relaydPackage runtimeMode;
     portRange = "21000-21003";
     withIperf = true;
+    tcpSplice = runtimeMode == "proxy";
   };
   c = topology.constants;
 in
@@ -55,6 +56,25 @@ pkgs.testers.runNixOSTest {
                 relayed[protocol].append(
                     iperf_sample(client, RELAY_HOST4, relay_port, protocol)
                 )
+
+        if "${runtimeMode}" == "proxy":
+            deadline = time.monotonic() + 5
+            while True:
+                metrics = api_json(client, "GET", "/v1/metrics")
+                if (
+                    metrics["tcp_active_sessions"] == 0
+                    and metrics["tcp_splice_success_total"]
+                    == metrics["tcp_splice_attempt_total"]
+                ):
+                    break
+                if time.monotonic() >= deadline:
+                    raise AssertionError(
+                        f"TCP splice sessions did not settle: {metrics!r}"
+                    )
+                time.sleep(0.05)
+            t.assertGreaterEqual(metrics["tcp_splice_attempt_total"], 1)
+            t.assertEqual(metrics["tcp_splice_hard_failure_total"], 0)
+            t.assertEqual(metrics["tcp_copy_fallback_total"], 0)
 
         summary = {
             "runtime_mode": "${runtimeMode}",

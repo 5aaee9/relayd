@@ -3,7 +3,7 @@
 Linux-first Rust port-forwarder with:
 - authenticated HTTP API
 - SQLite persistence and startup restore
-- TCP forwarding with default Tokio copy path
+- TCP forwarding with a default buffered Tokio path and optional Linux `splice(2)` fast path
 - UDP forwarding with default Tokio listener/session handling
 - dual-protocol allocations (`both`) sharing one TCP+UDP port
 - Prometheus listener metrics with per-scrape byte rates
@@ -20,10 +20,12 @@ Linux-first Rust port-forwarder with:
 - `RELAYD_NFTABLES_CHAIN` — nftables NAT prerouting chain for `netlink` mode, default `mapping`
 - `RUNTIME_APPLY_TIMEOUT_MS` — optional, default `2000`
 - `RESTORE_SWEEP_TIMEOUT_MS` — optional, default `30000`
+- `TCP_SPLICE_ENABLED` — enable the Linux `splice(2)` TCP forwarding path, default `false`
+- `FORCE_TCP_COPY_FALLBACK` — force buffered TCP copying and disable splice for comparison or recovery, default `false`
 - `UDP_MAX_SESSIONS` — maximum active UDP sessions per relay port, default `65536`
 - `UDP_SOCKET_RCVBUF_BYTES` / `UDP_SOCKET_SNDBUF_BYTES` — parsed for compatibility, default `8388608`
 
-Optional compatibility feature gates are parsed only where they are implemented by the Rust runtime. `TCP_SPLICE_ENABLED` and `FORCE_TCP_COPY_FALLBACK` are intentionally ignored because this Rust runtime does not expose the old Linux `splice(2)` TCP path.
+The splice path preserves the buffered path's bidirectional EOF behavior and falls back to buffered copying if its pipes cannot be created. Each active splice session owns two pipes (four additional file descriptors), so deployments with many concurrent TCP sessions should size `LimitNOFILE` accordingly. Non-Linux builds always use buffered copying.
 
 If `HTTP_LISTEN` is `:PORT`, relayd binds the HTTP API to `127.0.0.1:PORT`. Relay listeners use `PROXY_LISTEN_HOST` independently, so allocations bind TCP/UDP ports on `0.0.0.0` by default. UDP forwarding session sockets use the same host as their source bind address.
 
@@ -95,7 +97,7 @@ nix build -L .#checks.x86_64-linux.relayd-nixos-performance-netlink
 
 The functional checks cover bearer authentication, primary and compatibility API lifecycles, TCP/UDP/`both` forwarding, rebinding and deletion, IPv6 targets, Prometheus output, port exhaustion, and SQLite restore after a service restart. The netlink check sends traffic across separate client/backend VLANs, so it verifies actual nftables DNAT behavior rather than only inspecting generated rules.
 
-Performance checks run three alternating direct/relayed `iperf3` samples for TCP and UDP and compare receiver medians within the same VM topology. They require every sample to exceed 1 Mbit/s. The conservative relay/direct ratio floors are 25% for `proxy` and 50% for `netlink`; UDP loss may exceed the direct median by at most 25 and 15 percentage points respectively. These are regression gates, not host benchmark claims. CI runs the four checks in parallel with a matrix. KVM is recommended; QEMU software emulation is substantially slower.
+Performance checks run three alternating direct/relayed `iperf3` samples for TCP and UDP and compare receiver medians within the same VM topology. The proxy performance check enables `TCP_SPLICE_ENABLED` and asserts that every attempted splice session succeeds without buffered fallback. Every sample must exceed 1 Mbit/s. The conservative relay/direct ratio floors are 25% for `proxy` and 50% for `netlink`; UDP loss may exceed the direct median by at most 25 and 15 percentage points respectively. These are regression gates, not host benchmark claims. CI runs the four checks in parallel with a matrix. KVM is recommended; QEMU software emulation is substantially slower.
 
 ## Run
 ```bash

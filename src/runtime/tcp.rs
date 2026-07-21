@@ -15,10 +15,81 @@ use tokio::time::{Duration, timeout};
 // Amortize readiness and syscall overhead for bulk streams in the userspace proxy path.
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 
+async fn copy_buffered(
+    client: &mut TcpStream,
+    upstream: &mut TcpStream,
+) -> std::io::Result<(u64, u64)> {
+    tokio::io::copy_bidirectional_with_sizes(client, upstream, COPY_BUFFER_BYTES, COPY_BUFFER_BYTES)
+        .await
+}
+
+#[cfg(target_os = "linux")]
+struct SpliceCopyResult {
+    from_client: u64,
+    from_upstream: u64,
+    client_error: Option<std::io::Error>,
+    upstream_error: Option<std::io::Error>,
+}
+
+#[cfg(target_os = "linux")]
+async fn copy_splice(
+    client: &mut TcpStream,
+    upstream: &mut TcpStream,
+) -> std::io::Result<SpliceCopyResult> {
+    // Stop polling each completed direction while the peer direction drains so the original
+    // socket-close result and graceful bidirectional shutdown remain intact.
+    let mut client_to_upstream = std::pin::pin!(tokio_splice2::SpliceIoCtx::prepare()?.into_io());
+    let mut upstream_to_client = std::pin::pin!(tokio_splice2::SpliceIoCtx::prepare()?.into_io());
+    let mut client_result = None;
+    let mut upstream_result = None;
+
+    let (client_result, upstream_result) = std::future::poll_fn(|cx| {
+        if client_result.is_none()
+            && let std::task::Poll::Ready(result) = client_to_upstream.as_mut().poll_execute(
+                cx,
+                std::pin::Pin::new(&mut *client),
+                std::pin::Pin::new(&mut *upstream),
+            )
+        {
+            client_result = Some(result);
+        }
+        if upstream_result.is_none()
+            && let std::task::Poll::Ready(result) = upstream_to_client.as_mut().poll_execute(
+                cx,
+                std::pin::Pin::new(&mut *upstream),
+                std::pin::Pin::new(&mut *client),
+            )
+        {
+            upstream_result = Some(result);
+        }
+
+        match (client_result.take(), upstream_result.take()) {
+            (Some(client_result), Some(upstream_result)) => {
+                std::task::Poll::Ready((client_result, upstream_result))
+            }
+            (client, upstream) => {
+                client_result = client;
+                upstream_result = upstream;
+                std::task::Poll::Pending
+            }
+        }
+    })
+    .await;
+
+    Ok(SpliceCopyResult {
+        from_client: client_to_upstream.has_written() as u64,
+        from_upstream: upstream_to_client.has_written() as u64,
+        client_error: client_result.err(),
+        upstream_error: upstream_result.err(),
+    })
+}
+
 #[derive(Clone)]
 pub struct TcpRuntimeConfig {
     bind_host: String,
     metrics: Arc<Metrics>,
+    tcp_splice_enabled: bool,
+    force_tcp_copy_fallback: bool,
 }
 
 impl TcpRuntimeConfig {
@@ -30,7 +101,19 @@ impl TcpRuntimeConfig {
         Self {
             bind_host: bind_host.into(),
             metrics,
+            tcp_splice_enabled: false,
+            force_tcp_copy_fallback: false,
         }
+    }
+
+    pub fn with_tcp_splice_enabled(mut self, enabled: bool) -> Self {
+        self.tcp_splice_enabled = enabled;
+        self
+    }
+
+    pub fn with_force_tcp_copy_fallback(mut self, force: bool) -> Self {
+        self.force_tcp_copy_fallback = force;
+        self
     }
 }
 
@@ -49,6 +132,8 @@ struct ListenerEntry {
     sessions: Mutex<HashMap<u64, oneshot::Sender<()>>>,
     next_session_id: AtomicU64,
     global_metrics: Arc<Metrics>,
+    tcp_splice_enabled: bool,
+    force_tcp_copy_fallback: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -130,6 +215,75 @@ impl TcpRuntime {
         Ok(SocketAddr::new(host, port))
     }
 
+    #[cfg(target_os = "linux")]
+    fn splice_error_is_clean_close(error: &std::io::Error) -> bool {
+        matches!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::NotConnected
+                | std::io::ErrorKind::WriteZero
+        )
+    }
+
+    fn record_copy_fallback(entry: &ListenerEntry, forced: bool) {
+        entry.global_metrics.tcp_copy_fallback_total.inc();
+        entry.global_metrics.tcp_splice_fallback_total.inc();
+        if forced {
+            entry.global_metrics.tcp_splice_fallback_forced_total.inc();
+        } else {
+            entry
+                .global_metrics
+                .tcp_splice_fallback_unsupported_total
+                .inc();
+        }
+    }
+
+    async fn copy_streams(
+        entry: &ListenerEntry,
+        client: &mut TcpStream,
+        upstream: &mut TcpStream,
+    ) -> std::io::Result<(u64, u64)> {
+        if entry.force_tcp_copy_fallback {
+            Self::record_copy_fallback(entry, true);
+            return copy_buffered(client, upstream).await;
+        }
+        if !entry.tcp_splice_enabled {
+            entry.global_metrics.tcp_copy_fallback_total.inc();
+            return copy_buffered(client, upstream).await;
+        }
+
+        entry.global_metrics.tcp_splice_attempt_total.inc();
+        #[cfg(target_os = "linux")]
+        {
+            match copy_splice(client, upstream).await {
+                Ok(result) => {
+                    if let Some(error) = [result.client_error, result.upstream_error]
+                        .into_iter()
+                        .flatten()
+                        .find(|error| !Self::splice_error_is_clean_close(error))
+                    {
+                        entry.global_metrics.tcp_splice_hard_failure_total.inc();
+                        tracing::warn!(
+                            error = %error,
+                            error_kind = ?error.kind(),
+                            "tcp_splice_hard_failure"
+                        );
+                        return Err(error);
+                    }
+                    entry.global_metrics.tcp_splice_success_total.inc();
+                    entry.global_metrics.tcp_splice_fast_path_total.inc();
+                    return Ok((result.from_client, result.from_upstream));
+                }
+                Err(_) => Self::record_copy_fallback(entry, false),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        Self::record_copy_fallback(entry, false);
+
+        copy_buffered(client, upstream).await
+    }
+
     async fn spawn_accept_loop(entry: Arc<ListenerEntry>, listener: TcpListener) {
         let mut shutdown_rx = entry.shutdown.subscribe();
         let task_entry = entry.clone();
@@ -180,16 +334,8 @@ impl TcpRuntime {
                             .global_metrics
                             .tcp_upstream_connect_total
                             .inc();
-                        session_entry.global_metrics.tcp_copy_fallback_total.inc();
                         let _active_session = ActiveSessionGuard::new(session_entry.clone());
-                        match tokio::io::copy_bidirectional_with_sizes(
-                            &mut client,
-                            &mut upstream,
-                            COPY_BUFFER_BYTES,
-                            COPY_BUFFER_BYTES,
-                        )
-                        .await
-                        {
+                        match Self::copy_streams(&session_entry, &mut client, &mut upstream).await {
                             Ok((from_client, from_upstream)) => {
                                 session_entry
                                     .metrics
@@ -288,6 +434,8 @@ impl TcpRuntime {
             sessions: Mutex::new(HashMap::new()),
             next_session_id: AtomicU64::new(0),
             global_metrics: self.config.metrics.clone(),
+            tcp_splice_enabled: self.config.tcp_splice_enabled,
+            force_tcp_copy_fallback: self.config.force_tcp_copy_fallback,
         });
         Self::spawn_accept_loop(entry.clone(), listener).await;
         Ok(entry)
@@ -361,6 +509,8 @@ impl RuntimeFacade for TcpRuntime {
             sessions: Mutex::new(HashMap::new()),
             next_session_id: AtomicU64::new(0),
             global_metrics: self.config.metrics.clone(),
+            tcp_splice_enabled: self.config.tcp_splice_enabled,
+            force_tcp_copy_fallback: self.config.force_tcp_copy_fallback,
         });
         Self::spawn_accept_loop(entry.clone(), listener).await;
         self.entries
@@ -628,6 +778,105 @@ mod tests {
         assert!(metrics.runtime_apply_total.load() >= 2);
 
         runtime.delete("alloc-active", 500).await.unwrap();
+        target_task.abort();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tcp_splice_treats_normal_socket_shutdown_errors_as_clean_closes() {
+        for kind in [
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::NotConnected,
+            std::io::ErrorKind::WriteZero,
+        ] {
+            assert!(TcpRuntime::splice_error_is_clean_close(
+                &std::io::Error::from(kind)
+            ));
+        }
+        assert!(!TcpRuntime::splice_error_is_clean_close(
+            &std::io::Error::from(std::io::ErrorKind::InvalidData)
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn tcp_runtime_splice_fast_path_forwards_bytes_and_records_metrics() {
+        let metrics = Arc::new(Metrics::default());
+        let runtime = TcpRuntime::new(
+            TcpRuntimeConfig::loopback(metrics.clone()).with_tcp_splice_enabled(true),
+        );
+        let relay_port = free_port().await;
+        let (target_port, target_task) = start_echo_server().await;
+        runtime
+            .create(
+                &allocation(
+                    "alloc-splice",
+                    relay_port,
+                    Some(target_port),
+                    Some("127.0.0.1"),
+                ),
+                500,
+            )
+            .await
+            .unwrap();
+
+        let mut client = TcpStream::connect(("127.0.0.1", relay_port)).await.unwrap();
+        client.write_all(b"splice").await.unwrap();
+        client.shutdown().await.unwrap();
+        let mut buf = [0_u8; 6];
+        client.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"splice");
+        drop(client);
+
+        wait_for_forwarding_metrics(&runtime, &metrics, 6).await;
+        assert_eq!(metrics.tcp_splice_attempt_total.load(), 1);
+        assert_eq!(metrics.tcp_splice_success_total.load(), 1);
+        assert_eq!(metrics.tcp_splice_fast_path_total.load(), 1);
+        assert_eq!(metrics.tcp_splice_fallback_total.load(), 0);
+        assert_eq!(metrics.tcp_splice_hard_failure_total.load(), 0);
+        assert_eq!(metrics.tcp_copy_fallback_total.load(), 0);
+
+        runtime.delete("alloc-splice", 500).await.unwrap();
+        target_task.abort();
+    }
+
+    #[tokio::test]
+    async fn tcp_runtime_forced_copy_bypasses_splice_and_records_fallback() {
+        let metrics = Arc::new(Metrics::default());
+        let runtime = TcpRuntime::new(
+            TcpRuntimeConfig::loopback(metrics.clone())
+                .with_tcp_splice_enabled(true)
+                .with_force_tcp_copy_fallback(true),
+        );
+        let relay_port = free_port().await;
+        let (target_port, target_task) = start_echo_server().await;
+        runtime
+            .create(
+                &allocation(
+                    "alloc-forced-copy",
+                    relay_port,
+                    Some(target_port),
+                    Some("127.0.0.1"),
+                ),
+                500,
+            )
+            .await
+            .unwrap();
+
+        let mut client = TcpStream::connect(("127.0.0.1", relay_port)).await.unwrap();
+        client.write_all(b"copy").await.unwrap();
+        let mut buf = [0_u8; 4];
+        client.read_exact(&mut buf).await.unwrap();
+        drop(client);
+
+        wait_for_forwarding_metrics(&runtime, &metrics, 4).await;
+        assert_eq!(metrics.tcp_splice_attempt_total.load(), 0);
+        assert_eq!(metrics.tcp_splice_fallback_total.load(), 1);
+        assert_eq!(metrics.tcp_splice_fallback_forced_total.load(), 1);
+        assert_eq!(metrics.tcp_copy_fallback_total.load(), 1);
+
+        runtime.delete("alloc-forced-copy", 500).await.unwrap();
         target_task.abort();
     }
 

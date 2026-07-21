@@ -4,6 +4,7 @@
   runtimeMode,
   portRange ? "20000-20031",
   withIperf ? false,
+  tcpSplice ? false,
 }:
 let
   lib = pkgs.lib;
@@ -155,6 +156,7 @@ in
             RELAYD_NFTABLES_CHAIN = "mapping";
             RUNTIME_APPLY_TIMEOUT_MS = "5000";
             RESTORE_SWEEP_TIMEOUT_MS = "30000";
+            TCP_SPLICE_ENABLED = if tcpSplice then "true" else "false";
             RUST_LOG = "relayd=debug";
           };
           serviceConfig = {

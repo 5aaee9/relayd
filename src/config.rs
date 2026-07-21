@@ -59,6 +59,8 @@ pub struct Config {
     pub tcp_session_model_accept_balanced: bool,
     pub tcp_session_model_sharded_accept: bool,
     pub tcp_session_model_max_active: u32,
+    pub tcp_splice_enabled: bool,
+    pub force_tcp_copy_fallback: bool,
     pub udp_session_workers: u32,
     pub udp_io_uring_enabled: bool,
     pub udp_gro_enabled: bool,
@@ -134,6 +136,8 @@ impl Config {
             tcp_session_model_accept_balanced: env_bool(env, "TCP_SESSION_MODEL_ACCEPT_BALANCED"),
             tcp_session_model_sharded_accept: env_bool(env, "TCP_SESSION_MODEL_SHARDED_ACCEPT"),
             tcp_session_model_max_active: env_u32(env, "TCP_SESSION_MODEL_MAX_ACTIVE", 256)?,
+            tcp_splice_enabled: env_bool(env, "TCP_SPLICE_ENABLED"),
+            force_tcp_copy_fallback: env_bool(env, "FORCE_TCP_COPY_FALLBACK"),
             udp_session_workers: env_u32(env, "UDP_SESSION_WORKERS", 0)?,
             udp_io_uring_enabled: env_bool(env, "UDP_IO_URING_ENABLED"),
             udp_gro_enabled: env_bool(env, "UDP_GRO_ENABLED"),
@@ -351,6 +355,8 @@ mod tests {
         assert!(cfg.tcp_session_model_enabled);
         assert_eq!(cfg.runtime_apply_timeout_ms, 1234);
         assert_eq!(cfg.tcp_session_model_max_active, 256);
+        assert!(!cfg.tcp_splice_enabled);
+        assert!(!cfg.force_tcp_copy_fallback);
         assert_eq!(cfg.udp_fast_path_segment_size, 1472);
         assert_eq!(cfg.udp_socket_recv_buffer_bytes, 8 * 1024 * 1024);
     }
@@ -465,45 +471,15 @@ mod tests {
     }
 
     #[test]
-    fn config_surface_does_not_expose_tcp_splice_activation_flags() {
+    fn config_from_env_map_parses_tcp_splice_flags() {
         let mut env = env_with_token();
         env.insert("TCP_SPLICE_ENABLED".to_owned(), "true".to_owned());
         env.insert("FORCE_TCP_COPY_FALLBACK".to_owned(), "true".to_owned());
-        Config::from_env_map(&env).expect("obsolete splice flags should be ignored");
 
-        let cfg = Config {
-            http_listen_host: "127.0.0.1".to_owned(),
-            http_listen_port: 8080,
-            proxy_listen_host: "0.0.0.0".to_owned(),
-            port_range: PortRange {
-                start: 10000,
-                end: 30000,
-            },
-            auth_token: "secret".to_owned(),
-            tcp_session_model_enabled: false,
-            tcp_session_model_workers: 0,
-            tcp_session_model_accept_balanced: false,
-            tcp_session_model_sharded_accept: false,
-            tcp_session_model_max_active: 256,
-            udp_session_workers: 0,
-            udp_io_uring_enabled: false,
-            udp_gro_enabled: false,
-            udp_dataplane_redesign_enabled: false,
-            udp_fast_path_enabled: false,
-            udp_fast_path_segment_size: 1472,
-            udp_fast_path_gso_burst: 16,
-            udp_max_sessions: 65_536,
-            udp_socket_recv_buffer_bytes: 8 * 1024 * 1024,
-            udp_socket_send_buffer_bytes: 8 * 1024 * 1024,
-            runtime_apply_timeout_ms: 2000,
-            restore_sweep_timeout_ms: 30000,
-            runtime_mode: RuntimeMode::Proxy,
-            nftables_table: "relayd".to_owned(),
-            nftables_chain: "mapping".to_owned(),
-            db_path: "relayd.sqlite3".to_owned(),
-        };
+        let cfg = Config::from_env_map(&env).unwrap();
 
-        assert_eq!(cfg.auth_token, "secret");
+        assert!(cfg.tcp_splice_enabled);
+        assert!(cfg.force_tcp_copy_fallback);
     }
 
     #[test]

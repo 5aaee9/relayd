@@ -15,6 +15,8 @@ pub struct RealRuntimeConfig {
     bind_host: String,
     udp_session_ttl: Duration,
     udp_max_sessions: usize,
+    tcp_splice_enabled: bool,
+    force_tcp_copy_fallback: bool,
 }
 
 impl RealRuntimeConfig {
@@ -28,6 +30,8 @@ impl RealRuntimeConfig {
             bind_host: bind_host.into(),
             udp_session_ttl: Duration::from_millis(60_000),
             udp_max_sessions: 65_536,
+            tcp_splice_enabled: false,
+            force_tcp_copy_fallback: false,
         }
     }
 
@@ -41,8 +45,26 @@ impl RealRuntimeConfig {
         self
     }
 
+    pub fn with_tcp_splice_enabled(mut self, enabled: bool) -> Self {
+        self.tcp_splice_enabled = enabled;
+        self
+    }
+
+    pub fn with_force_tcp_copy_fallback(mut self, force: bool) -> Self {
+        self.force_tcp_copy_fallback = force;
+        self
+    }
+
     pub fn udp_max_sessions(&self) -> usize {
         self.udp_max_sessions
+    }
+
+    pub fn tcp_splice_enabled(&self) -> bool {
+        self.tcp_splice_enabled
+    }
+
+    pub fn force_tcp_copy_fallback(&self) -> bool {
+        self.force_tcp_copy_fallback
     }
 }
 
@@ -55,10 +77,11 @@ pub struct RealRuntime {
 
 impl RealRuntime {
     pub fn new(config: RealRuntimeConfig) -> Self {
-        let tcp = TcpRuntime::new(TcpRuntimeConfig::with_bind_host(
-            config.bind_host.clone(),
-            config.metrics.clone(),
-        ));
+        let tcp = TcpRuntime::new(
+            TcpRuntimeConfig::with_bind_host(config.bind_host.clone(), config.metrics.clone())
+                .with_tcp_splice_enabled(config.tcp_splice_enabled)
+                .with_force_tcp_copy_fallback(config.force_tcp_copy_fallback),
+        );
         let udp = UdpRuntime::new(
             UdpRuntimeConfig::with_bind_host(config.bind_host, config.metrics.clone())
                 .with_session_ttl(config.udp_session_ttl)
