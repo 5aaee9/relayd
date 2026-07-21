@@ -12,6 +12,9 @@ use tokio::sync::{Mutex, RwLock, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 
+// Amortize readiness and syscall overhead for bulk streams in the userspace proxy path.
+const COPY_BUFFER_BYTES: usize = 64 * 1024;
+
 #[derive(Clone)]
 pub struct TcpRuntimeConfig {
     bind_host: String,
@@ -179,7 +182,14 @@ impl TcpRuntime {
                             .inc();
                         session_entry.global_metrics.tcp_copy_fallback_total.inc();
                         let _active_session = ActiveSessionGuard::new(session_entry.clone());
-                        match tokio::io::copy_bidirectional(&mut client, &mut upstream).await {
+                        match tokio::io::copy_bidirectional_with_sizes(
+                            &mut client,
+                            &mut upstream,
+                            COPY_BUFFER_BYTES,
+                            COPY_BUFFER_BYTES,
+                        )
+                        .await
+                        {
                             Ok((from_client, from_upstream)) => {
                                 session_entry
                                     .metrics
