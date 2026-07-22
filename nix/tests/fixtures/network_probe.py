@@ -25,7 +25,9 @@ def tcp_probe(host: str, port: int, payload: bytes, expected_size: int, timeout:
         return receive_exact(stream, expected_size)
 
 
-def udp_probe(host: str, port: int, payload: bytes, timeout: float) -> bytes:
+def udp_probe(
+    host: str, port: int, payload: bytes, timeout: float, count: int, send_only: bool
+) -> list[bytes]:
     family, socktype, protocol, _, address = socket.getaddrinfo(
         host,
         port,
@@ -33,9 +35,11 @@ def udp_probe(host: str, port: int, payload: bytes, timeout: float) -> bytes:
     )[0]
     with socket.socket(family, socktype, protocol) as stream:
         stream.settimeout(timeout)
-        stream.sendto(payload, address)
-        response, _ = stream.recvfrom(65535)
-        return response
+        for _ in range(count):
+            stream.sendto(payload, address)
+        if send_only:
+            return []
+        return [stream.recvfrom(65535)[0] for _ in range(count)]
 
 
 def main() -> None:
@@ -46,22 +50,42 @@ def main() -> None:
     parser.add_argument("label")
     parser.add_argument("payload")
     parser.add_argument("--timeout", type=float, default=2.0)
+    parser.add_argument("--count", type=int, default=1)
+    parser.add_argument("--send-only", action="store_true")
     parser.add_argument("--accept-any-response", action="store_true")
     args = parser.parse_args()
+
+    if args.count < 1:
+        parser.error("--count must be at least 1")
+    if args.protocol == "tcp" and args.count != 1:
+        parser.error("--count is only supported for UDP probes")
+    if args.protocol == "tcp" and args.send_only:
+        parser.error("--send-only is only supported for UDP probes")
 
     payload = args.payload.encode("utf-8")
     expected = f"{args.label}:{args.payload}".encode("utf-8")
     if args.protocol == "tcp":
-        response = tcp_probe(args.host, args.port, payload, len(expected), args.timeout)
+        responses = [
+            tcp_probe(args.host, args.port, payload, len(expected), args.timeout)
+        ]
     else:
-        response = udp_probe(args.host, args.port, payload, args.timeout)
+        responses = udp_probe(
+            args.host,
+            args.port,
+            payload,
+            args.timeout,
+            args.count,
+            args.send_only,
+        )
 
-    if args.accept_any_response:
-        if not response:
+    for response in responses:
+        if args.accept_any_response and not response:
             raise SystemExit("peer returned no response")
-    elif response != expected:
-        raise SystemExit(f"unexpected response: expected={expected!r}, actual={response!r}")
-    print(response.decode("utf-8"))
+        if not args.accept_any_response and response != expected:
+            raise SystemExit(
+                f"unexpected response: expected={expected!r}, actual={response!r}"
+            )
+    print("\n".join(response.decode("utf-8") for response in responses))
 
 
 if __name__ == "__main__":

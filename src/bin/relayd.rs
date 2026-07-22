@@ -178,10 +178,13 @@ struct Cli {
 
     #[arg(
         long,
-        action = clap::ArgAction::SetTrue,
-        help = "Enable Linux UDP recvmmsg/sendmmsg batching (env: UDP_BATCH_ENABLED)."
+        value_name = "BOOLEAN",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        help = "Enable or disable adaptive Linux UDP recvmmsg/sendmmsg batching (env: UDP_BATCH_ENABLED). Default: enabled on Linux."
     )]
-    udp_batch_enabled: bool,
+    udp_batch_enabled: Option<bool>,
 
     #[arg(
         long,
@@ -256,6 +259,15 @@ impl Cli {
                 env.insert(name.to_owned(), "true".to_owned());
             }
         }
+        fn insert_optional_flag(
+            env: &mut HashMap<String, String>,
+            name: &'static str,
+            enabled: Option<bool>,
+        ) {
+            if let Some(enabled) = enabled {
+                env.insert(name.to_owned(), enabled.to_string());
+            }
+        }
 
         insert_if_present(env, "HTTP_LISTEN", self.http_listen);
         insert_if_present(env, "PROXY_LISTEN_HOST", self.proxy_listen_host);
@@ -304,7 +316,7 @@ impl Cli {
         insert_flag(env, "FORCE_TCP_COPY_FALLBACK", self.force_tcp_copy_fallback);
         insert_if_present(env, "UDP_SESSION_WORKERS", self.udp_session_workers);
         insert_if_present(env, "UDP_MAX_SESSIONS", self.udp_max_sessions);
-        insert_flag(env, "UDP_BATCH_ENABLED", self.udp_batch_enabled);
+        insert_optional_flag(env, "UDP_BATCH_ENABLED", self.udp_batch_enabled);
         insert_flag(env, "UDP_IO_URING_ENABLED", self.udp_io_uring_enabled);
         insert_flag(env, "UDP_GRO_ENABLED", self.udp_gro_enabled);
         insert_flag(
@@ -553,12 +565,25 @@ mod tests {
     fn runtime_config_from_config_carries_udp_batch_mode() {
         let env = HashMap::from([
             ("AUTH_TOKEN".to_owned(), "secret-token".to_owned()),
-            ("UDP_BATCH_ENABLED".to_owned(), "true".to_owned()),
+            ("UDP_BATCH_ENABLED".to_owned(), "false".to_owned()),
         ]);
         let config = Config::from_env_map(&env).unwrap();
         let runtime_config = real_runtime_config_from_config(&config, Arc::new(Metrics::default()));
 
-        assert!(runtime_config.udp_batch_enabled());
+        assert!(!runtime_config.udp_batch_enabled());
+    }
+
+    #[test]
+    fn cli_udp_batch_flag_supports_explicit_opt_out() {
+        let cli = Cli::try_parse_from(["relayd", "--udp-batch-enabled=false"]).unwrap();
+        let env = HashMap::from([
+            ("AUTH_TOKEN".to_owned(), "secret-token".to_owned()),
+            ("UDP_BATCH_ENABLED".to_owned(), "true".to_owned()),
+        ]);
+
+        let config = config_from_cli_and_env(cli, env).unwrap();
+
+        assert!(!config.udp_batch_enabled);
     }
 
     #[test]

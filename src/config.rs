@@ -147,7 +147,11 @@ impl Config {
             udp_fast_path_segment_size: env_u32(env, "UDP_FAST_PATH_SEGMENT_SIZE", 1472)?,
             udp_fast_path_gso_burst: env_u32(env, "UDP_FAST_PATH_GSO_BURST", 16)?,
             udp_max_sessions: env_nonzero_usize(env, "UDP_MAX_SESSIONS", 65_536)?,
-            udp_batch_enabled: env_bool(env, "UDP_BATCH_ENABLED"),
+            udp_batch_enabled: env_bool_with_default(
+                env,
+                "UDP_BATCH_ENABLED",
+                cfg!(target_os = "linux"),
+            ),
             udp_socket_recv_buffer_bytes: env_u32(env, "UDP_SOCKET_RCVBUF_BYTES", 8 * 1024 * 1024)?,
             udp_socket_send_buffer_bytes: env_u32(env, "UDP_SOCKET_SNDBUF_BYTES", 8 * 1024 * 1024)?,
             runtime_apply_timeout_ms: env_u32(env, "RUNTIME_APPLY_TIMEOUT_MS", 2000)?,
@@ -227,7 +231,15 @@ pub fn parse_ip_literal(host: &str) -> Result<IpAddr, ConfigError> {
 }
 
 fn env_bool(env: &HashMap<String, String>, name: &'static str) -> bool {
-    env.get(name).is_some_and(|value| {
+    env_bool_with_default(env, name, false)
+}
+
+fn env_bool_with_default(
+    env: &HashMap<String, String>,
+    name: &'static str,
+    default_value: bool,
+) -> bool {
+    env.get(name).map_or(default_value, |value| {
         matches!(
             value.to_ascii_lowercase().as_str(),
             "1" | "true" | "yes" | "on"
@@ -359,7 +371,7 @@ mod tests {
         assert_eq!(cfg.tcp_session_model_max_active, 256);
         assert!(!cfg.tcp_splice_enabled);
         assert!(!cfg.force_tcp_copy_fallback);
-        assert!(!cfg.udp_batch_enabled);
+        assert_eq!(cfg.udp_batch_enabled, cfg!(target_os = "linux"));
         assert_eq!(cfg.udp_fast_path_segment_size, 1472);
         assert_eq!(cfg.udp_socket_recv_buffer_bytes, 8 * 1024 * 1024);
     }
@@ -438,6 +450,16 @@ mod tests {
         let cfg = Config::from_env_map(&env).unwrap();
 
         assert!(cfg.udp_batch_enabled);
+    }
+
+    #[test]
+    fn config_from_env_map_supports_udp_batch_opt_out() {
+        let mut env = env_with_token();
+        env.insert("UDP_BATCH_ENABLED".to_owned(), "false".to_owned());
+
+        let cfg = Config::from_env_map(&env).unwrap();
+
+        assert!(!cfg.udp_batch_enabled);
     }
 
     #[test]

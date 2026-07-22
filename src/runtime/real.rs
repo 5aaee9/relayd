@@ -31,7 +31,7 @@ impl RealRuntimeConfig {
             bind_host: bind_host.into(),
             udp_session_ttl: Duration::from_millis(60_000),
             udp_max_sessions: 65_536,
-            udp_batch_enabled: false,
+            udp_batch_enabled: cfg!(target_os = "linux"),
             tcp_splice_enabled: false,
             force_tcp_copy_fallback: false,
         }
@@ -309,12 +309,15 @@ mod tests {
     }
 
     #[test]
-    fn real_runtime_config_propagates_udp_batch_mode() {
-        let config =
-            RealRuntimeConfig::loopback(Arc::new(Metrics::default())).with_udp_batch_enabled(true);
-        let runtime = RealRuntime::new(config);
+    fn real_runtime_config_defaults_udp_batching_by_platform_and_supports_opt_out() {
+        let runtime = RealRuntime::new(RealRuntimeConfig::loopback(Arc::new(Metrics::default())));
+        assert_eq!(runtime.udp.batch_enabled(), cfg!(target_os = "linux"));
 
-        assert!(runtime.udp.batch_enabled());
+        let opted_out = RealRuntime::new(
+            RealRuntimeConfig::loopback(Arc::new(Metrics::default())).with_udp_batch_enabled(false),
+        );
+
+        assert!(!opted_out.udp.batch_enabled());
     }
 
     async fn free_tcp_port() -> u16 {

@@ -64,7 +64,7 @@ impl UdpRuntimeConfig {
             metrics,
             session_ttl: Duration::from_millis(60_000),
             max_sessions: 65_536,
-            udp_batch_enabled: false,
+            udp_batch_enabled: cfg!(target_os = "linux"),
         }
     }
 
@@ -1138,8 +1138,13 @@ mod tests {
     }
 
     #[test]
-    fn udp_runtime_config_accepts_optional_batching() {
-        let disabled = UdpRuntime::new(UdpRuntimeConfig::loopback(Arc::new(Metrics::default())));
+    fn udp_runtime_config_defaults_batching_by_platform_and_accepts_overrides() {
+        let default = UdpRuntime::new(UdpRuntimeConfig::loopback(Arc::new(Metrics::default())));
+        assert_eq!(default.batch_enabled(), cfg!(target_os = "linux"));
+
+        let disabled = UdpRuntime::new(
+            UdpRuntimeConfig::loopback(Arc::new(Metrics::default())).with_udp_batch_enabled(false),
+        );
         assert!(!disabled.batch_enabled());
 
         let enabled = UdpRuntime::new(
@@ -1398,7 +1403,9 @@ mod tests {
     #[tokio::test]
     async fn udp_runtime_forwards_datagrams_after_binding_and_records_metrics() {
         let metrics = Arc::new(Metrics::default());
-        let runtime = UdpRuntime::new(UdpRuntimeConfig::loopback(metrics.clone()));
+        let runtime = UdpRuntime::new(
+            UdpRuntimeConfig::loopback(metrics.clone()).with_udp_batch_enabled(false),
+        );
         let relay_port = free_udp_port().await;
         let (target_port, target_task) = start_udp_echo_server().await;
         runtime

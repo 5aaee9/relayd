@@ -5,7 +5,6 @@
   portRange ? "20000-20031",
   withIperf ? false,
   tcpSplice ? false,
-  udpBatch ? false,
 }:
 let
   lib = pkgs.lib;
@@ -158,7 +157,6 @@ in
             RUNTIME_APPLY_TIMEOUT_MS = "5000";
             RESTORE_SWEEP_TIMEOUT_MS = "30000";
             TCP_SPLICE_ENABLED = if tcpSplice then "true" else "false";
-            UDP_BATCH_ENABLED = if udpBatch then "true" else "false";
             RUST_LOG = "relayd=debug";
           };
           serviceConfig = {

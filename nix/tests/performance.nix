@@ -11,7 +11,6 @@ let
     portRange = "21000-21003";
     withIperf = true;
     tcpSplice = runtimeMode == "proxy";
-    udpBatch = runtimeMode == "proxy";
   };
   c = topology.constants;
 in
@@ -59,6 +58,16 @@ pkgs.testers.runNixOSTest {
                 )
 
         if "${runtimeMode}" == "proxy":
+            batch_allocation = create_bound(
+                client, "udp", BACKEND_HOST4, ${toString c.primaryPort}
+            )
+            udp_burst_probe(
+                client,
+                batch_allocation["port"],
+                "primary",
+                "batch-metrics",
+                256,
+            )
             deadline = time.monotonic() + 5
             while True:
                 metrics = api_json(client, "GET", "/v1/metrics")
@@ -66,11 +75,13 @@ pkgs.testers.runNixOSTest {
                     metrics["tcp_active_sessions"] == 0
                     and metrics["tcp_splice_success_total"]
                     == metrics["tcp_splice_attempt_total"]
+                    and metrics["udp_batch_messages_total"]
+                    > metrics["udp_batch_calls_total"]
                 ):
                     break
                 if time.monotonic() >= deadline:
                     raise AssertionError(
-                        f"TCP splice sessions did not settle: {metrics!r}"
+                        f"proxy fast-path metrics did not settle: {metrics!r}"
                     )
                 time.sleep(0.05)
             t.assertGreaterEqual(metrics["tcp_splice_attempt_total"], 1)

@@ -124,6 +124,27 @@ def probe(machine, protocol, port, label, payload, host=None):
     ).strip()
 
 
+def udp_burst_probe(machine, port, label, payload, count, host=None):
+    relay_host = host or RELAY_HOST4
+    return machine.succeed(
+        shell_join(
+            [
+                "relayd-probe",
+                "udp",
+                relay_host,
+                port,
+                label,
+                payload,
+                "--timeout",
+                "5",
+                "--count",
+                count,
+                "--send-only",
+            ]
+        )
+    ).strip()
+
+
 def expect_probe_failure(machine, protocol, port, host=None):
     relay_host = host or RELAY_HOST4
     machine.fail(
