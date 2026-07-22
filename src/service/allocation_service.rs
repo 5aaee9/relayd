@@ -243,10 +243,11 @@ impl<R: RuntimeFacade> Service<R> {
         parse_ip_literal(host).map_err(|_| ServiceError::InvalidHost)?;
         let _mutation_guard = self.mutation_lock.lock().await;
 
-        let Some(allocation) = self.repo.get_allocation(id).await? else {
+        let Some((allocation, existing_binding)) =
+            self.repo.get_allocation_with_binding(id).await?
+        else {
             return Err(ServiceError::NotFound);
         };
-        let existing_binding = self.repo.get_binding(id).await?;
         let now = current_time_ms();
         let binding = Binding {
             allocation_id: id.to_owned(),
@@ -285,10 +286,12 @@ impl<R: RuntimeFacade> Service<R> {
     pub async fn delete_binding(&self, id: &str) -> Result<(), ServiceError> {
         let _mutation_guard = self.mutation_lock.lock().await;
 
-        let Some(allocation) = self.repo.get_allocation(id).await? else {
+        let Some((allocation, existing_binding)) =
+            self.repo.get_allocation_with_binding(id).await?
+        else {
             return Err(ServiceError::NotFound);
         };
-        let Some(existing_binding) = self.repo.get_binding(id).await? else {
+        let Some(existing_binding) = existing_binding else {
             return Err(ServiceError::NotFound);
         };
 
@@ -334,13 +337,14 @@ impl<R: RuntimeFacade> Service<R> {
     ) -> Result<Allocation, ServiceError> {
         let _mutation_guard = self.mutation_lock.lock().await;
 
-        let Some(allocation) = self.repo.get_allocation(id).await? else {
+        let Some((allocation, existing_binding)) =
+            self.repo.get_allocation_with_binding(id).await?
+        else {
             return Err(ServiceError::NotFound);
         };
         if let Some(host) = host {
             parse_ip_literal(host).map_err(|_| ServiceError::InvalidHost)?;
         }
-        let existing_binding = self.repo.get_binding(id).await?;
         let resolved_target_port = target_port
             .or_else(|| existing_binding.as_ref().map(|binding| binding.target_port))
             .ok_or(ServiceError::NotFound)?;

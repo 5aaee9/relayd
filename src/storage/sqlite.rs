@@ -68,6 +68,22 @@ type AllocationJoinRow = (
     Option<String>,
 );
 
+// The binding id marks whether the LEFT JOIN matched; COALESCE keeps numeric columns non-null.
+type AllocationBindingJoinRow = (
+    String,
+    String,
+    i32,
+    i32,
+    Option<String>,
+    i64,
+    i64,
+    Option<String>,
+    i32,
+    Option<String>,
+    i64,
+    i64,
+);
+
 pub struct Repository {
     pool: SqlitePool,
     db: DatabaseConnection,
@@ -290,6 +306,26 @@ impl Repository {
         .transpose()
     }
 
+    pub(crate) async fn get_allocation_with_binding(
+        &self,
+        id: &str,
+    ) -> Result<Option<(Allocation, Option<Binding>)>> {
+        sqlx::query_as::<_, AllocationBindingJoinRow>(
+            "SELECT a.id, a.protocol, a.port, a.target_port, a.host,
+                    a.created_at_ms, a.updated_at_ms, b.allocation_id,
+                    COALESCE(b.target_port, 0), b.host,
+                    COALESCE(b.created_at_ms, 0), COALESCE(b.updated_at_ms, 0)
+             FROM allocations AS a
+             LEFT JOIN bindings AS b ON b.allocation_id = a.id
+             WHERE a.id = ?;",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(row_to_allocation_with_binding)
+        .transpose()
+    }
+
     pub(crate) async fn list_allocation_protocol_ports(&self) -> Result<Vec<(Protocol, u16)>> {
         #[cfg(test)]
         self.allocation_scan_calls.fetch_add(1, Ordering::Relaxed);
@@ -459,6 +495,57 @@ fn row_to_allocation(row: AllocationJoinRow) -> Result<Allocation> {
     })
 }
 
+fn row_to_allocation_with_binding(
+    row: AllocationBindingJoinRow,
+) -> Result<(Allocation, Option<Binding>)> {
+    let (
+        id,
+        protocol,
+        port,
+        legacy_target_port,
+        legacy_host,
+        created_at_ms,
+        updated_at_ms,
+        binding_allocation_id,
+        binding_target_port,
+        binding_host,
+        binding_created_at_ms,
+        binding_updated_at_ms,
+    ) = row;
+    let binding = binding_allocation_id
+        .map(|allocation_id| -> Result<Binding> {
+            Ok(Binding {
+                allocation_id,
+                target_port: port_from_i32("binding.target_port", binding_target_port)?,
+                host: binding_host.clone(),
+                created_at_ms: binding_created_at_ms,
+                updated_at_ms: binding_updated_at_ms,
+            })
+        })
+        .transpose()?;
+    let target_port = match &binding {
+        Some(binding) => Some(binding.target_port),
+        None if legacy_target_port > 0 => Some(port_from_i32("target_port", legacy_target_port)?),
+        None => None,
+    };
+    let host = binding
+        .as_ref()
+        .and_then(|binding| binding.host.clone())
+        .or(legacy_host);
+    Ok((
+        Allocation {
+            id,
+            protocol: Protocol::from_str(&protocol)?,
+            port: port_from_i32("port", port)?,
+            target_port,
+            host,
+            created_at_ms,
+            updated_at_ms,
+        },
+        binding,
+    ))
+}
+
 fn port_from_i32(field: &'static str, value: i32) -> Result<u16> {
     if value < 0 {
         return Err(RepositoryError::InvalidPort { field, value });
@@ -607,6 +694,10 @@ mod tests {
         let alloc = allocation("a1", Protocol::Tcp, 10000, None, None);
         repo.insert_allocation(&alloc).await.unwrap();
         assert_eq!(repo.get_allocation("a1").await.unwrap().unwrap(), alloc);
+        assert_eq!(
+            repo.get_allocation_with_binding("a1").await.unwrap(),
+            Some((alloc.clone(), None))
+        );
 
         let binding = Binding {
             allocation_id: "a1".to_owned(),
@@ -636,6 +727,10 @@ mod tests {
         let hydrated = repo.get_allocation("a1").await.unwrap().unwrap();
         assert_eq!(hydrated.target_port, Some(8080));
         assert_eq!(hydrated.host.as_deref(), Some("127.0.0.1"));
+        assert_eq!(
+            repo.get_allocation_with_binding("a1").await.unwrap(),
+            Some((hydrated, Some(binding.clone())))
+        );
 
         let updated_binding = Binding {
             allocation_id: "a1".to_owned(),
@@ -693,6 +788,12 @@ mod tests {
         assert!(repo.delete_allocation("a1").await.unwrap());
         assert!(repo.get_allocation("a1").await.unwrap().is_none());
         assert!(repo.get_binding("a1").await.unwrap().is_none());
+        assert!(
+            repo.get_allocation_with_binding("a1")
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(!repo.delete_allocation("a1").await.unwrap());
     }
 
