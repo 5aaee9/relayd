@@ -1,9 +1,9 @@
 use crate::config::parse_port;
 use crate::metrics::Metrics;
-use crate::model::Protocol;
+use crate::model::{Allocation, Protocol};
 use crate::prometheus::{RateCalculator, render_rates};
 use crate::runtime::facade::{RuntimeError, RuntimeFacade};
-use crate::service::allocation_service::{Service, ServiceError};
+use crate::service::allocation_service::{Service, ServiceError, allocation_resource};
 use axum::body::Body;
 use axum::extract::{FromRequestParts, Path, State};
 use axum::http::{
@@ -296,11 +296,7 @@ async fn create_allocation<R: RuntimeFacade>(
         Ok(value) => value,
         Err(error) => return service_error_response(error),
     };
-    match state.service.get_allocation_resource(&allocation.id).await {
-        Ok(Some(resource)) => json_response(StatusCode::CREATED, resource),
-        Ok(None) => text_response(StatusCode::INTERNAL_SERVER_ERROR, "internal server error"),
-        Err(error) => service_error_response(error),
-    }
+    json_response(StatusCode::CREATED, allocation_resource(&allocation))
 }
 
 async fn get_allocation<R: RuntimeFacade>(
@@ -352,16 +348,16 @@ async fn put_binding<R: RuntimeFacade>(
         Ok(value) => value,
         Err(error) => return error.into_response(),
     };
-    if let Err(error) = state
+    let binding = match state
         .service
         .put_binding(&id, &body.host, target_port)
         .await
     {
-        return service_error_response(error);
-    }
-    match state.service.get_binding_view(&id).await {
-        Ok(Some(view)) => json_response(StatusCode::OK, view),
-        Ok(None) => text_response(StatusCode::INTERNAL_SERVER_ERROR, "internal server error"),
+        Ok(binding) => binding,
+        Err(error) => return service_error_response(error),
+    };
+    match state.service.binding_view_for(binding).await {
+        Ok(view) => json_response(StatusCode::OK, view),
         Err(error) => service_error_response(error),
     }
 }
@@ -379,12 +375,11 @@ async fn delete_binding<R: RuntimeFacade>(
 
 async fn aggregate_view<R: RuntimeFacade>(
     state: &AppState<R>,
-    id: &str,
+    allocation: Allocation,
     status: StatusCode,
 ) -> Response {
-    match state.service.get_allocation_view(id).await {
-        Ok(Some(view)) => json_response(status, view),
-        Ok(None) => text_response(StatusCode::NOT_FOUND, "NotFound"),
+    match state.service.allocation_view_for(allocation).await {
+        Ok(view) => json_response(status, view),
         Err(error) => service_error_response(error),
     }
 }
@@ -421,7 +416,7 @@ async fn create_port<R: RuntimeFacade>(
         Ok(value) => value,
         Err(error) => return service_error_response(error),
     };
-    aggregate_view(&state, &allocation.id, StatusCode::CREATED).await
+    aggregate_view(&state, allocation, StatusCode::CREATED).await
 }
 
 async fn set_target<R: RuntimeFacade>(
@@ -437,7 +432,7 @@ async fn set_target<R: RuntimeFacade>(
         Ok(value) => value,
         Err(error) => return service_error_response(error),
     };
-    aggregate_view(&state, &allocation.id, StatusCode::OK).await
+    aggregate_view(&state, allocation, StatusCode::OK).await
 }
 
 async fn update_port<R: RuntimeFacade>(
@@ -468,7 +463,7 @@ async fn update_port<R: RuntimeFacade>(
         Ok(value) => value,
         Err(error) => return service_error_response(error),
     };
-    aggregate_view(&state, &allocation.id, StatusCode::OK).await
+    aggregate_view(&state, allocation, StatusCode::OK).await
 }
 
 async fn delete_port<R: RuntimeFacade>(

@@ -189,7 +189,7 @@ impl<R: RuntimeFacade> Service<R> {
             .list_allocations()
             .await?
             .iter()
-            .map(clone_allocation_resource)
+            .map(allocation_resource)
             .collect())
     }
 
@@ -202,7 +202,7 @@ impl<R: RuntimeFacade> Service<R> {
             .get_allocation(id)
             .await?
             .as_ref()
-            .map(clone_allocation_resource))
+            .map(allocation_resource))
     }
 
     pub async fn list_allocations(&self) -> Result<Vec<AllocationView>, ServiceError> {
@@ -222,16 +222,30 @@ impl<R: RuntimeFacade> Service<R> {
         let Some(allocation) = self.repo.get_allocation(id).await? else {
             return Ok(None);
         };
-        let observed = self.runtime.snapshot(id).await?;
-        Ok(Some(allocation_view(allocation, observed)))
+        Ok(Some(self.allocation_view_for(allocation).await?))
+    }
+
+    pub(crate) async fn allocation_view_for(
+        &self,
+        allocation: Allocation,
+    ) -> Result<AllocationView, ServiceError> {
+        let observed = self.runtime.snapshot(&allocation.id).await?;
+        Ok(allocation_view(allocation, observed))
     }
 
     pub async fn get_binding_view(&self, id: &str) -> Result<Option<BindingView>, ServiceError> {
         let Some(binding) = self.repo.get_binding(id).await? else {
             return Ok(None);
         };
-        let observed = self.runtime.snapshot(id).await?;
-        Ok(Some(binding_view(binding, observed)))
+        Ok(Some(self.binding_view_for(binding).await?))
+    }
+
+    pub(crate) async fn binding_view_for(
+        &self,
+        binding: Binding,
+    ) -> Result<BindingView, ServiceError> {
+        let observed = self.runtime.snapshot(&binding.allocation_id).await?;
+        Ok(binding_view(binding, observed))
     }
 
     pub async fn put_binding(
@@ -445,7 +459,7 @@ impl<R: RuntimeFacade> Service<R> {
     }
 }
 
-fn clone_allocation_resource(allocation: &Allocation) -> AllocationResource {
+pub(crate) fn allocation_resource(allocation: &Allocation) -> AllocationResource {
     AllocationResource {
         id: allocation.id.clone(),
         protocol: allocation.protocol,
