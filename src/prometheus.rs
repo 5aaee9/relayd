@@ -2,7 +2,7 @@ use crate::model::Protocol;
 use crate::runtime::facade::ListenerMetricsSnapshot;
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasherDefault, Hasher};
 
 pub const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
@@ -18,23 +18,28 @@ pub struct ListenerMetricsRate {
     pub tx_bytes_per_second: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Key {
-    port: u16,
-    protocol: Protocol,
-}
+#[derive(Debug, Default)]
+struct PackedKeyHasher(u64);
 
-impl Hash for Key {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.port.hash(state);
-        match self.protocol {
-            Protocol::Tcp => 0_u8,
-            Protocol::Udp => 1,
-            Protocol::Both => 2,
-        }
-        .hash(state);
+impl Hasher for PackedKeyHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        // Retain a deterministic fallback even though this map only hashes packed u32 keys.
+        self.0 = bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        // listener_key is injective, so the packed value itself is collision-free.
+        self.0 = u64::from(value);
     }
 }
+
+type SampleMap = HashMap<u32, Sample, BuildHasherDefault<PackedKeyHasher>>;
 
 #[derive(Debug, Clone, Copy)]
 struct Sample {
@@ -46,7 +51,7 @@ struct Sample {
 
 #[derive(Debug, Default)]
 pub struct RateCalculator {
-    samples: HashMap<Key, Sample>,
+    samples: SampleMap,
     generation: u64,
 }
 
@@ -60,10 +65,7 @@ impl RateCalculator {
         let generation = self.generation;
         let mut rates = Vec::with_capacity(snapshots.len());
         for snapshot in snapshots {
-            let key = Key {
-                port: snapshot.port,
-                protocol: snapshot.protocol,
-            };
+            let key = listener_key(snapshot.port, snapshot.protocol);
             let previous = self.samples.get(&key).copied();
             rates.push(calculate_rate(snapshot, previous, timestamp_ms));
             self.samples.insert(
@@ -84,6 +86,15 @@ impl RateCalculator {
     pub fn sample_count(&self) -> usize {
         self.samples.len()
     }
+}
+
+fn listener_key(port: u16, protocol: Protocol) -> u32 {
+    let protocol = match protocol {
+        Protocol::Tcp => 0,
+        Protocol::Udp => 1,
+        Protocol::Both => 2,
+    };
+    (u32::from(port) << 2) | protocol
 }
 
 fn calculate_rate(
@@ -206,6 +217,14 @@ mod tests {
         assert!(output.contains("relayd_rx_bytes_per_second{port=\"10000\",protocol=\"tcp\"} 0\n"));
         assert!(output.contains("relayd_tx_bytes_per_second{port=\"10001\",protocol=\"udp\"} 0\n"));
         assert!(!output.contains("{\""));
+    }
+
+    #[test]
+    fn packed_listener_keys_keep_ports_and_protocols_distinct() {
+        assert_eq!(listener_key(7000, Protocol::Tcp), 28_000);
+        assert_eq!(listener_key(7000, Protocol::Udp), 28_001);
+        assert_eq!(listener_key(7000, Protocol::Both), 28_002);
+        assert_eq!(listener_key(7001, Protocol::Tcp), 28_004);
     }
 
     #[test]
