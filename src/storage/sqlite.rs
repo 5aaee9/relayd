@@ -131,6 +131,42 @@ impl Repository {
         Ok(())
     }
 
+    pub(crate) async fn insert_allocation_with_binding(
+        &self,
+        allocation: &Allocation,
+        binding: &Binding,
+    ) -> Result<()> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO allocations(
+                id, protocol, port, target_port, host, created_at_ms, updated_at_ms
+             ) VALUES (?, ?, ?, ?, ?, ?, ?);",
+        )
+        .bind(&allocation.id)
+        .bind(allocation.protocol.as_str())
+        .bind(i32::from(allocation.port))
+        .bind(i32::from(binding.target_port))
+        .bind(binding.host.as_deref())
+        .bind(allocation.created_at_ms)
+        .bind(binding.updated_at_ms)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO bindings(
+                allocation_id, target_port, host, created_at_ms, updated_at_ms
+             ) VALUES (?, ?, ?, ?, ?);",
+        )
+        .bind(&allocation.id)
+        .bind(i32::from(binding.target_port))
+        .bind(binding.host.as_deref())
+        .bind(binding.created_at_ms)
+        .bind(binding.updated_at_ms)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
     pub async fn put_binding(&self, binding: &Binding) -> Result<()> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query(
@@ -187,13 +223,17 @@ impl Repository {
     }
 
     pub async fn delete_allocation(&self, id: &str) -> Result<bool> {
-        binding_entity::Entity::delete_by_id(id.to_owned())
-            .exec(&self.db)
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("DELETE FROM bindings WHERE allocation_id = ?;")
+            .bind(id)
+            .execute(&mut *transaction)
             .await?;
-        let result = allocation_entity::Entity::delete_by_id(id.to_owned())
-            .exec(&self.db)
+        let result = sqlx::query("DELETE FROM allocations WHERE id = ?;")
+            .bind(id)
+            .execute(&mut *transaction)
             .await?;
-        Ok(result.rows_affected > 0)
+        transaction.commit().await?;
+        Ok(result.rows_affected() > 0)
     }
 
     pub async fn get_binding(&self, allocation_id: &str) -> Result<Option<Binding>> {
@@ -628,6 +668,35 @@ mod tests {
                 .target_port,
             None
         );
+    }
+
+    #[tokio::test]
+    async fn sqlite_allocation_delete_rolls_back_binding_when_allocation_delete_fails() {
+        let repo = temp_repo().await;
+        repo.insert_allocation(&allocation("a1", Protocol::Tcp, 10000, None, None))
+            .await
+            .unwrap();
+        repo.put_binding(&Binding {
+            allocation_id: "a1".to_owned(),
+            target_port: 8080,
+            host: Some("127.0.0.1".to_owned()),
+            created_at_ms: 1100,
+            updated_at_ms: 1100,
+        })
+        .await
+        .unwrap();
+        sqlx::query(concat!(
+            "CREATE TRIGGER fail_allocation_delete ",
+            "BEFORE DELETE ON allocations ",
+            "BEGIN SELECT RAISE(ABORT, 'allocation delete failed'); END;"
+        ))
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+        assert!(repo.delete_allocation("a1").await.is_err());
+        assert!(repo.get_allocation("a1").await.unwrap().is_some());
+        assert!(repo.get_binding("a1").await.unwrap().is_some());
     }
 
     #[tokio::test]

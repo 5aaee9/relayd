@@ -160,10 +160,6 @@ impl<R: RuntimeFacade> Service<R> {
         &self,
         allocation: &Allocation,
     ) -> Result<(), ServiceError> {
-        if let Err(error) = self.repo.insert_allocation(allocation).await {
-            return Err(ServiceError::Repository(error));
-        }
-
         if let Some(target_port) = allocation.target_port {
             let binding = Binding {
                 allocation_id: allocation.id.clone(),
@@ -173,14 +169,11 @@ impl<R: RuntimeFacade> Service<R> {
                 updated_at_ms: allocation.updated_at_ms,
             };
 
-            if let Err(error) = self.repo.put_binding(&binding).await {
-                let _ = self
-                    .repo
-                    .delete_binding(&allocation.id, allocation.updated_at_ms)
-                    .await;
-                let _ = self.repo.delete_allocation(&allocation.id).await;
-                return Err(ServiceError::Repository(error));
-            }
+            self.repo
+                .insert_allocation_with_binding(allocation, &binding)
+                .await?;
+        } else {
+            self.repo.insert_allocation(allocation).await?;
         }
 
         Ok(())
