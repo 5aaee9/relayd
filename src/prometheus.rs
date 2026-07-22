@@ -1,9 +1,13 @@
 use crate::model::Protocol;
 use crate::runtime::facade::ListenerMetricsSnapshot;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 
 pub const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
+
+// Three metric lines per listener average just under this size in normal output.
+const ESTIMATED_RENDERED_BYTES_PER_LISTENER: usize = 224;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListenerMetricsRate {
@@ -123,33 +127,42 @@ fn bytes_per_second(current: u64, previous: u64, elapsed_seconds: f64) -> f64 {
 }
 
 pub fn render_rates(rows: &[ListenerMetricsRate]) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(
+        rows.len()
+            .saturating_mul(ESTIMATED_RENDERED_BYTES_PER_LISTENER),
+    );
     out.push_str("# TYPE relayd_connections_current gauge\n");
     for row in rows {
-        out.push_str(&format!(
-            "relayd_connections_current{{port=\"{}\",protocol=\"{}\"}} {}\n",
+        writeln!(
+            out,
+            "relayd_connections_current{{port=\"{}\",protocol=\"{}\"}} {}",
             row.port,
             row.protocol.as_str(),
             row.connections_current
-        ));
+        )
+        .expect("writing to a String cannot fail");
     }
     out.push_str("# TYPE relayd_rx_bytes_per_second gauge\n");
     for row in rows {
-        out.push_str(&format!(
-            "relayd_rx_bytes_per_second{{port=\"{}\",protocol=\"{}\"}} {}\n",
+        writeln!(
+            out,
+            "relayd_rx_bytes_per_second{{port=\"{}\",protocol=\"{}\"}} {}",
             row.port,
             row.protocol.as_str(),
             row.rx_bytes_per_second
-        ));
+        )
+        .expect("writing to a String cannot fail");
     }
     out.push_str("# TYPE relayd_tx_bytes_per_second gauge\n");
     for row in rows {
-        out.push_str(&format!(
-            "relayd_tx_bytes_per_second{{port=\"{}\",protocol=\"{}\"}} {}\n",
+        writeln!(
+            out,
+            "relayd_tx_bytes_per_second{{port=\"{}\",protocol=\"{}\"}} {}",
             row.port,
             row.protocol.as_str(),
             row.tx_bytes_per_second
-        ));
+        )
+        .expect("writing to a String cannot fail");
     }
     out
 }
