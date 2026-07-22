@@ -55,6 +55,19 @@ mod binding_entity {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+// Keep this positional row aligned with get_allocation's SELECT to avoid per-column name lookups.
+type AllocationJoinRow = (
+    String,
+    String,
+    i32,
+    i32,
+    Option<String>,
+    i64,
+    i64,
+    Option<i32>,
+    Option<String>,
+);
+
 pub struct Repository {
     pool: SqlitePool,
     db: DatabaseConnection,
@@ -245,16 +258,18 @@ impl Repository {
     }
 
     pub async fn get_allocation(&self, id: &str) -> Result<Option<Allocation>> {
-        let allocation = allocation_entity::Entity::find_by_id(id.to_owned())
-            .one(&self.db)
-            .await?;
-        let Some(allocation) = allocation else {
-            return Ok(None);
-        };
-        let binding = binding_entity::Entity::find_by_id(id.to_owned())
-            .one(&self.db)
-            .await?;
-        Ok(Some(model_to_allocation(allocation, binding.as_ref())?))
+        sqlx::query_as::<_, AllocationJoinRow>(
+            "SELECT a.id, a.protocol, a.port, a.target_port, a.host,
+                    a.created_at_ms, a.updated_at_ms, b.target_port, b.host
+             FROM allocations AS a
+             LEFT JOIN bindings AS b ON b.allocation_id = a.id
+             WHERE a.id = ?;",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(row_to_allocation)
+        .transpose()
     }
 
     pub(crate) async fn list_allocation_protocol_ports(&self) -> Result<Vec<(Protocol, u16)>> {
@@ -395,6 +410,34 @@ fn model_to_allocation(
         host,
         created_at_ms: allocation.created_at_ms,
         updated_at_ms: allocation.updated_at_ms,
+    })
+}
+
+fn row_to_allocation(row: AllocationJoinRow) -> Result<Allocation> {
+    let (
+        id,
+        protocol,
+        port,
+        legacy_target_port,
+        legacy_host,
+        created_at_ms,
+        updated_at_ms,
+        binding_target_port,
+        binding_host,
+    ) = row;
+    let target_port = match binding_target_port {
+        Some(target_port) => Some(port_from_i32("binding.target_port", target_port)?),
+        None if legacy_target_port > 0 => Some(port_from_i32("target_port", legacy_target_port)?),
+        None => None,
+    };
+    Ok(Allocation {
+        id,
+        protocol: Protocol::from_str(&protocol)?,
+        port: port_from_i32("port", port)?,
+        target_port,
+        host: binding_host.or(legacy_host),
+        created_at_ms,
+        updated_at_ms,
     })
 }
 
