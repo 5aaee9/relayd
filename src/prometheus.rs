@@ -1,6 +1,6 @@
 use crate::model::Protocol;
 use crate::runtime::facade::ListenerMetricsSnapshot;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 pub const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
@@ -23,7 +23,12 @@ struct Key {
 impl Hash for Key {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.port.hash(state);
-        self.protocol.as_str().hash(state);
+        match self.protocol {
+            Protocol::Tcp => 0_u8,
+            Protocol::Udp => 1,
+            Protocol::Both => 2,
+        }
+        .hash(state);
     }
 }
 
@@ -32,11 +37,13 @@ struct Sample {
     rx_bytes_total: u64,
     tx_bytes_total: u64,
     timestamp_ms: i64,
+    generation: u64,
 }
 
 #[derive(Debug, Default)]
 pub struct RateCalculator {
     samples: HashMap<Key, Sample>,
+    generation: u64,
 }
 
 impl RateCalculator {
@@ -45,14 +52,14 @@ impl RateCalculator {
         snapshots: &[ListenerMetricsSnapshot],
         timestamp_ms: i64,
     ) -> Vec<ListenerMetricsRate> {
+        self.generation = self.generation.wrapping_add(1);
+        let generation = self.generation;
         let mut rates = Vec::with_capacity(snapshots.len());
-        let mut current_keys = HashSet::with_capacity(snapshots.len());
         for snapshot in snapshots {
             let key = Key {
                 port: snapshot.port,
                 protocol: snapshot.protocol,
             };
-            current_keys.insert(key);
             let previous = self.samples.get(&key).copied();
             rates.push(calculate_rate(snapshot, previous, timestamp_ms));
             self.samples.insert(
@@ -61,10 +68,12 @@ impl RateCalculator {
                     rx_bytes_total: snapshot.rx_bytes_total,
                     tx_bytes_total: snapshot.tx_bytes_total,
                     timestamp_ms,
+                    generation,
                 },
             );
         }
-        self.samples.retain(|key, _| current_keys.contains(key));
+        self.samples
+            .retain(|_, sample| sample.generation == generation);
         rates
     }
 
@@ -376,8 +385,11 @@ mod tests {
             rx_bytes_total: 150,
             tx_bytes_total: 100,
         }];
-        calculator.calculate(&second, 2_000);
-
+        // Scrape generations, rather than timestamps, distinguish consecutive snapshots.
+        calculator.calculate(&second, 1_000);
         assert_eq!(calculator.sample_count(), 1);
+
+        calculator.calculate(&[], 1_000);
+        assert_eq!(calculator.sample_count(), 0);
     }
 }
