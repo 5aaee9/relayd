@@ -877,10 +877,15 @@ fn observed_state_for(allocation: &Allocation) -> ObservedState {
 }
 
 fn rules_for_allocations(allocations: &HashMap<String, Allocation>) -> Vec<NftDnatRule> {
-    let mut allocations: Vec<&Allocation> = allocations.values().collect();
-    allocations.sort_by(|left, right| left.id.cmp(&right.id));
-    let mut rules = Vec::with_capacity(allocations.len().saturating_mul(2));
-    for allocation in allocations {
+    let mut bound_allocations = Vec::with_capacity(allocations.len());
+    bound_allocations.extend(
+        allocations
+            .values()
+            .filter(|allocation| allocation.host.is_some() && allocation.target_port.is_some()),
+    );
+    bound_allocations.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut rules = Vec::with_capacity(bound_allocations.len().saturating_mul(2));
+    for allocation in bound_allocations {
         let Some((out_host, out_port)) = bound_target(allocation) else {
             continue;
         };
