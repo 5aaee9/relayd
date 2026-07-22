@@ -250,11 +250,26 @@ impl Repository {
     }
 
     pub async fn get_binding(&self, allocation_id: &str) -> Result<Option<Binding>> {
-        binding_entity::Entity::find_by_id(allocation_id.to_owned())
-            .one(&self.db)
-            .await?
-            .map(model_to_binding)
-            .transpose()
+        sqlx::query_as::<_, (String, i32, Option<String>, i64, i64)>(
+            "SELECT allocation_id, target_port, host, created_at_ms, updated_at_ms
+             FROM bindings
+             WHERE allocation_id = ?;",
+        )
+        .bind(allocation_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(
+            |(allocation_id, target_port, host, created_at_ms, updated_at_ms)| -> Result<_> {
+                Ok(Binding {
+                    allocation_id,
+                    target_port: port_from_i32("binding.target_port", target_port)?,
+                    host,
+                    created_at_ms,
+                    updated_at_ms,
+                })
+            },
+        )
+        .transpose()
     }
 
     pub async fn get_allocation(&self, id: &str) -> Result<Option<Allocation>> {
@@ -438,16 +453,6 @@ fn row_to_allocation(row: AllocationJoinRow) -> Result<Allocation> {
         host: binding_host.or(legacy_host),
         created_at_ms,
         updated_at_ms,
-    })
-}
-
-fn model_to_binding(binding: binding_entity::Model) -> Result<Binding> {
-    Ok(Binding {
-        allocation_id: binding.allocation_id,
-        target_port: port_from_i32("binding.target_port", binding.target_port)?,
-        host: binding.host,
-        created_at_ms: binding.created_at_ms,
-        updated_at_ms: binding.updated_at_ms,
     })
 }
 
