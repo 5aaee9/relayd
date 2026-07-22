@@ -61,6 +61,7 @@ pub struct NetlinkRuntime<B: NftBackend = LibNftnlBackend> {
     backend: B,
     config: NetlinkRuntimeConfig,
     state: Arc<Mutex<NetlinkState>>,
+    mutation_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Default)]
@@ -82,17 +83,39 @@ impl<B: NftBackend> NetlinkRuntime<B> {
             backend,
             config,
             state: Arc::new(Mutex::new(NetlinkState::default())),
+            mutation_lock: Arc::new(Mutex::new(())),
         }
     }
 
-    fn apply(
-        &self,
-        allocations: &HashMap<String, Allocation>,
-        timeout_ms: u32,
-    ) -> Result<(), NftBackendError> {
-        let rules = rules_for_allocations(allocations);
+    fn apply_rules(&self, rules: &[NftDnatRule], timeout_ms: u32) -> Result<(), NftBackendError> {
         self.backend
-            .replace_ruleset(&self.config.table, &self.config.chain, &rules, timeout_ms)
+            .replace_ruleset(&self.config.table, &self.config.chain, rules, timeout_ms)
+    }
+
+    // Project a candidate without cloning the complete allocation map or exposing
+    // uncommitted state while the backend applies the resulting ruleset.
+    fn project_upsert(&self, allocation: &Allocation) -> Vec<NftDnatRule> {
+        let mut state = self.state.lock().unwrap();
+        let previous = state
+            .allocations
+            .insert(allocation.id.clone(), allocation.clone());
+        let rules = rules_for_allocations(&state.allocations);
+        if let Some(previous) = previous {
+            state.allocations.insert(allocation.id.clone(), previous);
+        } else {
+            state.allocations.remove(&allocation.id);
+        }
+        rules
+    }
+
+    fn project_delete(&self, id: &str) -> Vec<NftDnatRule> {
+        let mut state = self.state.lock().unwrap();
+        let removed = state.allocations.remove_entry(id);
+        let rules = rules_for_allocations(&state.allocations);
+        if let Some((id, allocation)) = removed {
+            state.allocations.insert(id, allocation);
+        }
+        rules
     }
 
     fn mark_fresh(state: &mut NetlinkState) {
@@ -724,86 +747,85 @@ fn size_of_data<T>() -> u32 {
 #[async_trait]
 impl<B: NftBackend> RuntimeFacade for NetlinkRuntime<B> {
     async fn initialize(&self, timeout_ms: u32) -> Result<(), RuntimeError> {
-        let snapshot = self.state.lock().unwrap().allocations.clone();
-        match self.apply(&snapshot, timeout_ms) {
+        let _mutation_guard = self.mutation_lock.lock().unwrap();
+        let rules = {
+            let state = self.state.lock().unwrap();
+            rules_for_allocations(&state.allocations)
+        };
+        let result = self.apply_rules(&rules, timeout_ms);
+        let mut state = self.state.lock().unwrap();
+        match result {
             Ok(()) => {
-                Self::mark_fresh(&mut self.state.lock().unwrap());
+                Self::mark_fresh(&mut state);
                 Ok(())
             }
-            Err(error) => {
-                let mut state = self.state.lock().unwrap();
-                Err(Self::mark_stale(&mut state, error))
-            }
+            Err(error) => Err(Self::mark_stale(&mut state, error)),
         }
     }
 
     async fn create(&self, allocation: &Allocation, timeout_ms: u32) -> Result<(), RuntimeError> {
-        let mut candidate = self.state.lock().unwrap().allocations.clone();
-        candidate.insert(allocation.id.clone(), allocation.clone());
-        match self.apply(&candidate, timeout_ms) {
+        let _mutation_guard = self.mutation_lock.lock().unwrap();
+        let rules = self.project_upsert(allocation);
+        let result = self.apply_rules(&rules, timeout_ms);
+        let mut state = self.state.lock().unwrap();
+        match result {
             Ok(()) => {
-                let mut state = self.state.lock().unwrap();
-                state.allocations = candidate;
+                state
+                    .allocations
+                    .insert(allocation.id.clone(), allocation.clone());
                 Self::mark_fresh(&mut state);
                 Ok(())
             }
-            Err(error) => {
-                let mut state = self.state.lock().unwrap();
-                Err(Self::mark_stale(&mut state, error))
-            }
+            Err(error) => Err(Self::mark_stale(&mut state, error)),
         }
     }
 
     async fn update(&self, allocation: &Allocation, timeout_ms: u32) -> Result<(), RuntimeError> {
-        let mut candidate = self.state.lock().unwrap().allocations.clone();
-        candidate.insert(allocation.id.clone(), allocation.clone());
-        match self.apply(&candidate, timeout_ms) {
+        let _mutation_guard = self.mutation_lock.lock().unwrap();
+        let rules = self.project_upsert(allocation);
+        let result = self.apply_rules(&rules, timeout_ms);
+        let mut state = self.state.lock().unwrap();
+        state
+            .allocations
+            .insert(allocation.id.clone(), allocation.clone());
+        match result {
             Ok(()) => {
-                let mut state = self.state.lock().unwrap();
-                state.allocations = candidate;
                 Self::mark_fresh(&mut state);
                 Ok(())
             }
-            Err(error) => {
-                let mut state = self.state.lock().unwrap();
-                state.allocations = candidate;
-                Err(Self::mark_stale(&mut state, error))
-            }
+            Err(error) => Err(Self::mark_stale(&mut state, error)),
         }
     }
 
     async fn delete(&self, id: &str, timeout_ms: u32) -> Result<(), RuntimeError> {
-        let mut candidate = self.state.lock().unwrap().allocations.clone();
-        candidate.remove(id);
-        match self.apply(&candidate, timeout_ms) {
+        let _mutation_guard = self.mutation_lock.lock().unwrap();
+        let rules = self.project_delete(id);
+        let result = self.apply_rules(&rules, timeout_ms);
+        let mut state = self.state.lock().unwrap();
+        match result {
             Ok(()) => {
-                let mut state = self.state.lock().unwrap();
-                state.allocations = candidate;
+                state.allocations.remove(id);
                 Self::mark_fresh(&mut state);
                 Ok(())
             }
-            Err(error) => {
-                let mut state = self.state.lock().unwrap();
-                Err(Self::mark_stale(&mut state, error))
-            }
+            Err(error) => Err(Self::mark_stale(&mut state, error)),
         }
     }
 
     async fn restore(&self, allocation: &Allocation, timeout_ms: u32) -> Result<(), RuntimeError> {
-        let mut candidate = self.state.lock().unwrap().allocations.clone();
-        candidate.insert(allocation.id.clone(), allocation.clone());
-        match self.apply(&candidate, timeout_ms) {
+        let _mutation_guard = self.mutation_lock.lock().unwrap();
+        let rules = self.project_upsert(allocation);
+        let result = self.apply_rules(&rules, timeout_ms);
+        let mut state = self.state.lock().unwrap();
+        state
+            .allocations
+            .insert(allocation.id.clone(), allocation.clone());
+        match result {
             Ok(()) => {
-                let mut state = self.state.lock().unwrap();
-                state.allocations = candidate;
                 Self::mark_fresh(&mut state);
                 Ok(())
             }
-            Err(error) => {
-                let mut state = self.state.lock().unwrap();
-                state.allocations = candidate;
-                Err(Self::mark_stale(&mut state, error))
-            }
+            Err(error) => Err(Self::mark_stale(&mut state, error)),
         }
     }
 
