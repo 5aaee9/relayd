@@ -101,7 +101,7 @@ impl<R: RuntimeFacade> Service<R> {
             return Err(ServiceError::Timeout);
         }
 
-        let existing_allocations = self.repo.list_allocations().await?;
+        let existing_allocations = self.repo.list_allocation_protocol_ports().await?;
         let conflicting_ports =
             conflicting_port_bitmap(self.port_range, protocol, &existing_allocations);
 
@@ -515,15 +515,15 @@ fn current_time_ms() -> i64 {
 fn conflicting_port_bitmap(
     port_range: PortRange,
     requested: Protocol,
-    existing_allocations: &[Allocation],
+    existing_allocations: &[(Protocol, u16)],
 ) -> Vec<bool> {
     let Some(span) = port_range.end.checked_sub(port_range.start) else {
         return Vec::new();
     };
     let mut conflicting_ports = vec![false; usize::from(span) + 1];
-    for allocation in existing_allocations {
-        if port_range.contains(allocation.port) && conflicts(requested, allocation.protocol) {
-            let index = usize::from(allocation.port - port_range.start);
+    for &(protocol, port) in existing_allocations {
+        if port_range.contains(port) && conflicts(requested, protocol) {
+            let index = usize::from(port - port_range.start);
             conflicting_ports[index] = true;
         }
     }
@@ -942,7 +942,7 @@ mod tests {
         let created = svc.create_allocation(Protocol::Tcp, None).await.unwrap();
 
         assert_eq!(created.port, 10003);
-        assert_eq!(svc.repo().list_allocations_call_count(), 1);
+        assert_eq!(svc.repo().allocation_scan_call_count(), 1);
     }
 
     #[tokio::test]

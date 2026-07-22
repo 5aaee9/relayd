@@ -59,7 +59,7 @@ pub struct Repository {
     pool: SqlitePool,
     db: DatabaseConnection,
     #[cfg(test)]
-    list_allocations_calls: AtomicU64,
+    allocation_scan_calls: AtomicU64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -98,7 +98,7 @@ impl Repository {
             pool,
             db,
             #[cfg(test)]
-            list_allocations_calls: AtomicU64::new(0),
+            allocation_scan_calls: AtomicU64::new(0),
         };
         repo.setup_schema().await?;
         repo.migrate_legacy_bindings().await?;
@@ -257,10 +257,22 @@ impl Repository {
         Ok(Some(model_to_allocation(allocation, binding.as_ref())?))
     }
 
-    pub async fn list_allocations(&self) -> Result<Vec<Allocation>> {
+    pub(crate) async fn list_allocation_protocol_ports(&self) -> Result<Vec<(Protocol, u16)>> {
         #[cfg(test)]
-        self.list_allocations_calls.fetch_add(1, Ordering::Relaxed);
+        self.allocation_scan_calls.fetch_add(1, Ordering::Relaxed);
 
+        let rows: Vec<(String, i32)> =
+            sqlx::query_as("SELECT protocol, port FROM allocations ORDER BY protocol, port;")
+                .fetch_all(&self.pool)
+                .await?;
+        rows.into_iter()
+            .map(|(protocol, port)| {
+                Ok((Protocol::from_str(&protocol)?, port_from_i32("port", port)?))
+            })
+            .collect()
+    }
+
+    pub async fn list_allocations(&self) -> Result<Vec<Allocation>> {
         let allocations = allocation_entity::Entity::find()
             .order_by_asc(allocation_entity::Column::Protocol)
             .order_by_asc(allocation_entity::Column::Port)
@@ -320,8 +332,8 @@ impl Repository {
     }
 
     #[cfg(test)]
-    pub(crate) fn list_allocations_call_count(&self) -> u64 {
-        self.list_allocations_calls.load(Ordering::Relaxed)
+    pub(crate) fn allocation_scan_call_count(&self) -> u64 {
+        self.allocation_scan_calls.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
