@@ -857,24 +857,22 @@ fn observed_state_for(allocation: &Allocation) -> ObservedState {
 fn rules_for_allocations(allocations: &HashMap<String, Allocation>) -> Vec<NftDnatRule> {
     let mut allocations: Vec<&Allocation> = allocations.values().collect();
     allocations.sort_by(|left, right| left.id.cmp(&right.id));
-    allocations
-        .into_iter()
-        .flat_map(|allocation| {
-            let Some((out_host, out_port)) = bound_target(allocation) else {
-                return Vec::new();
-            };
-            protocols_for(allocation.protocol)
-                .into_iter()
-                .map(|protocol| NftDnatRule {
-                    allocation_id: allocation.id.clone(),
-                    protocol,
-                    in_port: allocation.port,
-                    out_host,
-                    out_port,
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect()
+    let mut rules = Vec::with_capacity(allocations.len().saturating_mul(2));
+    for allocation in allocations {
+        let Some((out_host, out_port)) = bound_target(allocation) else {
+            continue;
+        };
+        for protocol in protocols_for(allocation.protocol).iter().copied() {
+            rules.push(NftDnatRule {
+                allocation_id: allocation.id.clone(),
+                protocol,
+                in_port: allocation.port,
+                out_host,
+                out_port,
+            });
+        }
+    }
+    rules
 }
 
 fn bound_target(allocation: &Allocation) -> Option<(IpAddr, u16)> {
@@ -884,11 +882,11 @@ fn bound_target(allocation: &Allocation) -> Option<(IpAddr, u16)> {
     ))
 }
 
-fn protocols_for(protocol: Protocol) -> Vec<Protocol> {
+fn protocols_for(protocol: Protocol) -> &'static [Protocol] {
     match protocol {
-        Protocol::Tcp => vec![Protocol::Tcp],
-        Protocol::Udp => vec![Protocol::Udp],
-        Protocol::Both => vec![Protocol::Tcp, Protocol::Udp],
+        Protocol::Tcp => &[Protocol::Tcp],
+        Protocol::Udp => &[Protocol::Udp],
+        Protocol::Both => &[Protocol::Tcp, Protocol::Udp],
     }
 }
 
