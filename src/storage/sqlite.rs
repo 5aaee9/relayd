@@ -1,7 +1,7 @@
 use crate::model::{Allocation, Binding, Protocol};
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ConnectionTrait, DatabaseConnection, DbBackend, DbErr,
-    EntityTrait, QueryOrder, Schema, Statement,
+    ConnectionTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait, QueryOrder, Schema,
+    Statement,
 };
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
@@ -130,16 +130,19 @@ impl Repository {
     }
 
     pub async fn insert_allocation(&self, allocation: &Allocation) -> Result<()> {
-        allocation_entity::ActiveModel {
-            id: Set(allocation.id.clone()),
-            protocol: Set(allocation.protocol.as_str().to_owned()),
-            port: Set(i32::from(allocation.port)),
-            target_port: Set(allocation.target_port.map(i32::from).unwrap_or(0)),
-            host: Set(allocation.host.clone()),
-            created_at_ms: Set(allocation.created_at_ms),
-            updated_at_ms: Set(allocation.updated_at_ms),
-        }
-        .insert(&self.db)
+        sqlx::query(
+            "INSERT INTO allocations(
+                id, protocol, port, target_port, host, created_at_ms, updated_at_ms
+             ) VALUES (?, ?, ?, ?, ?, ?, ?);",
+        )
+        .bind(&allocation.id)
+        .bind(allocation.protocol.as_str())
+        .bind(i32::from(allocation.port))
+        .bind(allocation.target_port.map(i32::from).unwrap_or(0))
+        .bind(allocation.host.as_deref())
+        .bind(allocation.created_at_ms)
+        .bind(allocation.updated_at_ms)
+        .execute(&self.pool)
         .await?;
         Ok(())
     }
