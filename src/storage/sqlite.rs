@@ -326,18 +326,32 @@ impl Repository {
         .transpose()
     }
 
-    pub(crate) async fn list_allocation_protocol_ports(&self) -> Result<Vec<(Protocol, u16)>> {
+    pub(crate) async fn list_conflicting_allocation_ports(
+        &self,
+        requested: Protocol,
+    ) -> Result<Vec<u16>> {
         #[cfg(test)]
         self.allocation_scan_calls.fetch_add(1, Ordering::Relaxed);
 
-        let rows: Vec<(String, i32)> =
-            sqlx::query_as("SELECT protocol, port FROM allocations ORDER BY protocol, port;")
-                .fetch_all(&self.pool)
-                .await?;
+        let sql = match requested {
+            Protocol::Tcp => {
+                "SELECT port FROM allocations
+                 WHERE protocol IN ('tcp', 'both')
+                 ORDER BY protocol, port;"
+            }
+            Protocol::Udp => {
+                "SELECT port FROM allocations
+                 WHERE protocol IN ('udp', 'both')
+                 ORDER BY protocol, port;"
+            }
+            Protocol::Both => {
+                "SELECT port FROM allocations
+                 ORDER BY protocol, port;"
+            }
+        };
+        let rows: Vec<i32> = sqlx::query_scalar(sql).fetch_all(&self.pool).await?;
         rows.into_iter()
-            .map(|(protocol, port)| {
-                Ok((Protocol::from_str(&protocol)?, port_from_i32("port", port)?))
-            })
+            .map(|port| port_from_i32("port", port))
             .collect()
     }
 
@@ -883,6 +897,39 @@ mod tests {
             .map(|row| row.id)
             .collect();
         assert_eq!(ids, vec!["both", "tcp", "udp"]);
+    }
+
+    #[tokio::test]
+    async fn sqlite_conflict_scan_selects_only_requested_protocols() {
+        let repo = temp_repo().await;
+        for allocation in [
+            allocation("tcp", Protocol::Tcp, 10000, None, None),
+            allocation("udp", Protocol::Udp, 10001, None, None),
+            allocation("both", Protocol::Both, 10002, None, None),
+        ] {
+            repo.insert_allocation(&allocation).await.unwrap();
+        }
+
+        let mut tcp = repo
+            .list_conflicting_allocation_ports(Protocol::Tcp)
+            .await
+            .unwrap();
+        tcp.sort_unstable();
+        assert_eq!(tcp, vec![10000, 10002]);
+
+        let mut udp = repo
+            .list_conflicting_allocation_ports(Protocol::Udp)
+            .await
+            .unwrap();
+        udp.sort_unstable();
+        assert_eq!(udp, vec![10001, 10002]);
+
+        let mut both = repo
+            .list_conflicting_allocation_ports(Protocol::Both)
+            .await
+            .unwrap();
+        both.sort_unstable();
+        assert_eq!(both, vec![10000, 10001, 10002]);
     }
 
     #[tokio::test]

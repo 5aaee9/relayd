@@ -101,9 +101,11 @@ impl<R: RuntimeFacade> Service<R> {
             return Err(ServiceError::Timeout);
         }
 
-        let existing_allocations = self.repo.list_allocation_protocol_ports().await?;
-        let conflicting_ports =
-            conflicting_port_bitmap(self.port_range, protocol, &existing_allocations);
+        let existing_ports = self
+            .repo
+            .list_conflicting_allocation_ports(protocol)
+            .await?;
+        let conflicting_ports = conflicting_port_bitmap(self.port_range, &existing_ports);
 
         for (port, conflicting) in
             (self.port_range.start..=self.port_range.end).zip(conflicting_ports)
@@ -530,30 +532,18 @@ fn current_time_ms() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
-fn conflicting_port_bitmap(
-    port_range: PortRange,
-    requested: Protocol,
-    existing_allocations: &[(Protocol, u16)],
-) -> Vec<bool> {
+fn conflicting_port_bitmap(port_range: PortRange, existing_ports: &[u16]) -> Vec<bool> {
     let Some(span) = port_range.end.checked_sub(port_range.start) else {
         return Vec::new();
     };
     let mut conflicting_ports = vec![false; usize::from(span) + 1];
-    for &(protocol, port) in existing_allocations {
-        if port_range.contains(port) && conflicts(requested, protocol) {
+    for &port in existing_ports {
+        if port_range.contains(port) {
             let index = usize::from(port - port_range.start);
             conflicting_ports[index] = true;
         }
     }
     conflicting_ports
-}
-
-fn conflicts(requested: Protocol, existing: Protocol) -> bool {
-    match requested {
-        Protocol::Tcp => existing == Protocol::Tcp || existing == Protocol::Both,
-        Protocol::Udp => existing == Protocol::Udp || existing == Protocol::Both,
-        Protocol::Both => true,
-    }
 }
 
 #[cfg(test)]
@@ -1411,18 +1401,5 @@ mod tests {
         let svc = service(temp_repo().await, runtime);
 
         assert_eq!(svc.snapshot_listener_metrics().await.unwrap(), rows);
-    }
-
-    #[test]
-    fn protocol_conflicts_match_allocation_rules() {
-        assert!(conflicts(Protocol::Tcp, Protocol::Tcp));
-        assert!(!conflicts(Protocol::Tcp, Protocol::Udp));
-        assert!(conflicts(Protocol::Tcp, Protocol::Both));
-        assert!(!conflicts(Protocol::Udp, Protocol::Tcp));
-        assert!(conflicts(Protocol::Udp, Protocol::Udp));
-        assert!(conflicts(Protocol::Udp, Protocol::Both));
-        assert!(conflicts(Protocol::Both, Protocol::Tcp));
-        assert!(conflicts(Protocol::Both, Protocol::Udp));
-        assert!(conflicts(Protocol::Both, Protocol::Both));
     }
 }
