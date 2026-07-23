@@ -1,6 +1,7 @@
 use crate::model::Protocol;
 use crate::runtime::facade::ListenerMetricsSnapshot;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fmt::Write as _;
 use std::hash::{BuildHasherDefault, Hasher};
 
@@ -66,17 +67,20 @@ impl RateCalculator {
         let mut rates = Vec::with_capacity(snapshots.len());
         for snapshot in snapshots {
             let key = listener_key(snapshot.port, snapshot.protocol);
-            let previous = self.samples.get(&key).copied();
+            let current = Sample {
+                rx_bytes_total: snapshot.rx_bytes_total,
+                tx_bytes_total: snapshot.tx_bytes_total,
+                timestamp_ms,
+                generation,
+            };
+            let previous = match self.samples.entry(key) {
+                Entry::Occupied(mut entry) => Some(entry.insert(current)),
+                Entry::Vacant(entry) => {
+                    entry.insert(current);
+                    None
+                }
+            };
             rates.push(calculate_rate(snapshot, previous, timestamp_ms));
-            self.samples.insert(
-                key,
-                Sample {
-                    rx_bytes_total: snapshot.rx_bytes_total,
-                    tx_bytes_total: snapshot.tx_bytes_total,
-                    timestamp_ms,
-                    generation,
-                },
-            );
         }
         self.samples
             .retain(|_, sample| sample.generation == generation);
