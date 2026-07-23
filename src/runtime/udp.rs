@@ -276,18 +276,16 @@ impl UdpRuntime {
                     }
                 });
             let mut messages: [libc::mmsghdr; UDP_RECEIVE_BATCH_SIZE] =
-                std::array::from_fn(|position| libc::mmsghdr {
-                    msg_hdr: libc::msghdr {
-                        msg_name: std::ptr::from_mut(&mut addresses[position]).cast(),
-                        msg_namelen: std::mem::size_of::<libc::sockaddr_storage>()
-                            as libc::socklen_t,
-                        msg_iov: std::ptr::from_mut(&mut iovecs[position]),
-                        msg_iovlen: 1,
-                        msg_control: std::ptr::null_mut(),
-                        msg_controllen: 0,
-                        msg_flags: 0,
-                    },
-                    msg_len: 0,
+                std::array::from_fn(|position| {
+                    // SAFETY: mmsghdr is a C socket descriptor whose fields and padding
+                    // accept zero initialization; the live buffer pointers are set below.
+                    let mut message = unsafe { std::mem::zeroed::<libc::mmsghdr>() };
+                    message.msg_hdr.msg_name = std::ptr::from_mut(&mut addresses[position]).cast();
+                    message.msg_hdr.msg_namelen =
+                        std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+                    message.msg_hdr.msg_iov = std::ptr::from_mut(&mut iovecs[position]);
+                    message.msg_hdr.msg_iovlen = 1;
+                    message
                 });
 
             // SAFETY: every mmsghdr points to a live address and payload buffer for the
@@ -297,7 +295,7 @@ impl UdpRuntime {
                     socket.as_raw_fd(),
                     messages.as_mut_ptr(),
                     remaining_capacity as libc::c_uint,
-                    libc::MSG_DONTWAIT,
+                    libc::MSG_DONTWAIT as _,
                     std::ptr::null_mut(),
                 )
             };
@@ -370,17 +368,13 @@ impl UdpRuntime {
                             }
                         });
                     let mut messages: [libc::mmsghdr; UDP_RECEIVE_BATCH_SIZE] =
-                        std::array::from_fn(|position| libc::mmsghdr {
-                            msg_hdr: libc::msghdr {
-                                msg_name: std::ptr::null_mut(),
-                                msg_namelen: 0,
-                                msg_iov: std::ptr::from_mut(&mut iovecs[position]),
-                                msg_iovlen: 1,
-                                msg_control: std::ptr::null_mut(),
-                                msg_controllen: 0,
-                                msg_flags: 0,
-                            },
-                            msg_len: 0,
+                        std::array::from_fn(|position| {
+                            // SAFETY: mmsghdr is a C socket descriptor whose fields and padding
+                            // accept zero initialization; the live buffer pointer is set below.
+                            let mut message = unsafe { std::mem::zeroed::<libc::mmsghdr>() };
+                            message.msg_hdr.msg_iov = std::ptr::from_mut(&mut iovecs[position]);
+                            message.msg_hdr.msg_iovlen = 1;
+                            message
                         });
 
                     // SAFETY: the initialized headers point to live payload buffers for this
@@ -390,7 +384,7 @@ impl UdpRuntime {
                             socket.as_raw_fd(),
                             messages.as_mut_ptr(),
                             remaining.len() as libc::c_uint,
-                            libc::MSG_DONTWAIT,
+                            libc::MSG_DONTWAIT as _,
                         )
                     };
                     if result < 0 {
