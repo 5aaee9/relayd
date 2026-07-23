@@ -883,7 +883,7 @@ fn rules_for_allocations(allocations: &HashMap<String, Allocation>) -> Vec<NftDn
             .values()
             .filter(|allocation| allocation.host.is_some() && allocation.target_port.is_some()),
     );
-    bound_allocations.sort_by(|left, right| left.id.cmp(&right.id));
+    bound_allocations.sort_unstable_by(|left, right| left.id.cmp(&right.id));
     let mut rules = Vec::with_capacity(bound_allocations.len().saturating_mul(2));
     for allocation in bound_allocations {
         let Some((out_host, out_port)) = bound_target(allocation) else {
@@ -1093,6 +1093,28 @@ pub(crate) mod tests {
             vec![
                 rule("both", Protocol::Tcp, 10000, "127.0.0.1", 8080),
                 rule("both", Protocol::Udp, 10000, "127.0.0.1", 8080),
+            ]
+        );
+    }
+
+    #[test]
+    fn rule_projection_orders_unique_allocation_ids_deterministically() {
+        let allocations = [
+            allocation("z", Protocol::Tcp, 10002, Some(8082), Some("127.0.0.1")),
+            allocation("a", Protocol::Both, 10000, Some(8080), Some("127.0.0.1")),
+            allocation("m", Protocol::Udp, 10001, Some(8081), Some("127.0.0.1")),
+        ]
+        .into_iter()
+        .map(|allocation| (allocation.id.clone(), allocation))
+        .collect();
+
+        assert_eq!(
+            rules_for_allocations(&allocations),
+            vec![
+                rule("a", Protocol::Tcp, 10000, "127.0.0.1", 8080),
+                rule("a", Protocol::Udp, 10000, "127.0.0.1", 8080),
+                rule("m", Protocol::Udp, 10001, "127.0.0.1", 8081),
+                rule("z", Protocol::Tcp, 10002, "127.0.0.1", 8082),
             ]
         );
     }
