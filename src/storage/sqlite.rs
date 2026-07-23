@@ -326,33 +326,70 @@ impl Repository {
         .transpose()
     }
 
-    pub(crate) async fn list_conflicting_allocation_ports(
+    pub(crate) async fn find_available_allocation_port(
         &self,
         requested: Protocol,
-    ) -> Result<Vec<u16>> {
+        start: u16,
+        end: u16,
+    ) -> Result<Option<u16>> {
         #[cfg(test)]
         self.allocation_scan_calls.fetch_add(1, Ordering::Relaxed);
 
         let sql = match requested {
             Protocol::Tcp => {
-                "SELECT port FROM allocations
-                 WHERE protocol IN ('tcp', 'both')
-                 ORDER BY protocol, port;"
+                "WITH occupied(port) AS (
+                    SELECT DISTINCT port FROM allocations
+                    WHERE protocol IN ('tcp', 'both')
+                      AND port BETWEEN ?1 AND ?2
+                 ), candidate(port) AS (
+                    SELECT ?1 WHERE ?1 <= ?2
+                    UNION ALL
+                    SELECT port + 1 FROM occupied WHERE port < ?2
+                 )
+                 SELECT MIN(port) FROM (
+                    SELECT port FROM candidate
+                    EXCEPT
+                    SELECT port FROM occupied
+                 );"
             }
             Protocol::Udp => {
-                "SELECT port FROM allocations
-                 WHERE protocol IN ('udp', 'both')
-                 ORDER BY protocol, port;"
+                "WITH occupied(port) AS (
+                    SELECT DISTINCT port FROM allocations
+                    WHERE protocol IN ('udp', 'both')
+                      AND port BETWEEN ?1 AND ?2
+                 ), candidate(port) AS (
+                    SELECT ?1 WHERE ?1 <= ?2
+                    UNION ALL
+                    SELECT port + 1 FROM occupied WHERE port < ?2
+                 )
+                 SELECT MIN(port) FROM (
+                    SELECT port FROM candidate
+                    EXCEPT
+                    SELECT port FROM occupied
+                 );"
             }
             Protocol::Both => {
-                "SELECT port FROM allocations
-                 ORDER BY protocol, port;"
+                "WITH occupied(port) AS (
+                    SELECT DISTINCT port FROM allocations
+                    WHERE port BETWEEN ?1 AND ?2
+                 ), candidate(port) AS (
+                    SELECT ?1 WHERE ?1 <= ?2
+                    UNION ALL
+                    SELECT port + 1 FROM occupied WHERE port < ?2
+                 )
+                 SELECT MIN(port) FROM (
+                    SELECT port FROM candidate
+                    EXCEPT
+                    SELECT port FROM occupied
+                 );"
             }
         };
-        let rows: Vec<i32> = sqlx::query_scalar(sql).fetch_all(&self.pool).await?;
-        rows.into_iter()
-            .map(|port| port_from_i32("port", port))
-            .collect()
+        let port: Option<i32> = sqlx::query_scalar(sql)
+            .bind(i32::from(start))
+            .bind(i32::from(end))
+            .fetch_one(&self.pool)
+            .await?;
+        port.map(|port| port_from_i32("port", port)).transpose()
     }
 
     pub async fn list_allocations(&self) -> Result<Vec<Allocation>> {
@@ -395,6 +432,14 @@ impl Repository {
             .col(allocation_entity::Column::Protocol)
             .col(allocation_entity::Column::Port)
             .unique()
+            .to_owned();
+        self.db.execute(builder.build(&index)).await?;
+
+        let index = sea_orm::sea_query::Index::create()
+            .if_not_exists()
+            .name("idx_allocations_port")
+            .table(allocation_entity::Entity)
+            .col(allocation_entity::Column::Port)
             .to_owned();
         self.db.execute(builder.build(&index)).await?;
         Ok(())
@@ -900,7 +945,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sqlite_conflict_scan_selects_only_requested_protocols() {
+    async fn sqlite_first_free_scan_selects_only_requested_protocols() {
         let repo = temp_repo().await;
         for allocation in [
             allocation("tcp", Protocol::Tcp, 10000, None, None),
@@ -910,26 +955,30 @@ mod tests {
             repo.insert_allocation(&allocation).await.unwrap();
         }
 
-        let mut tcp = repo
-            .list_conflicting_allocation_ports(Protocol::Tcp)
+        let tcp = repo
+            .find_available_allocation_port(Protocol::Tcp, 10000, 10003)
             .await
             .unwrap();
-        tcp.sort_unstable();
-        assert_eq!(tcp, vec![10000, 10002]);
+        assert_eq!(tcp, Some(10001));
 
-        let mut udp = repo
-            .list_conflicting_allocation_ports(Protocol::Udp)
+        let udp = repo
+            .find_available_allocation_port(Protocol::Udp, 10000, 10003)
             .await
             .unwrap();
-        udp.sort_unstable();
-        assert_eq!(udp, vec![10001, 10002]);
+        assert_eq!(udp, Some(10000));
 
-        let mut both = repo
-            .list_conflicting_allocation_ports(Protocol::Both)
+        let both = repo
+            .find_available_allocation_port(Protocol::Both, 10000, 10003)
             .await
             .unwrap();
-        both.sort_unstable();
-        assert_eq!(both, vec![10000, 10001, 10002]);
+        assert_eq!(both, Some(10003));
+
+        assert_eq!(
+            repo.find_available_allocation_port(Protocol::Both, 10000, 10002)
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     #[tokio::test]

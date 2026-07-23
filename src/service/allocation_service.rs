@@ -101,18 +101,16 @@ impl<R: RuntimeFacade> Service<R> {
             return Err(ServiceError::Timeout);
         }
 
-        let existing_ports = self
-            .repo
-            .list_conflicting_allocation_ports(protocol)
-            .await?;
-        let conflicting_ports = conflicting_port_bitmap(self.port_range, &existing_ports);
-
-        for (port, conflicting) in
-            (self.port_range.start..=self.port_range.end).zip(conflicting_ports)
-        {
-            if conflicting {
-                continue;
-            }
+        let mut next_port = Some(self.port_range.start);
+        while let Some(start) = next_port {
+            let Some(port) = self
+                .repo
+                .find_available_allocation_port(protocol, start, self.port_range.end)
+                .await?
+            else {
+                break;
+            };
+            next_port = port.checked_add(1);
 
             let now = current_time_ms();
             let allocation = Allocation {
@@ -530,20 +528,6 @@ fn current_time_ms() -> i64 {
         .as_millis()
         .try_into()
         .unwrap_or(i64::MAX)
-}
-
-fn conflicting_port_bitmap(port_range: PortRange, existing_ports: &[u16]) -> Vec<bool> {
-    let Some(span) = port_range.end.checked_sub(port_range.start) else {
-        return Vec::new();
-    };
-    let mut conflicting_ports = vec![false; usize::from(span) + 1];
-    for &port in existing_ports {
-        if port_range.contains(port) {
-            let index = usize::from(port - port_range.start);
-            conflicting_ports[index] = true;
-        }
-    }
-    conflicting_ports
 }
 
 #[cfg(test)]
