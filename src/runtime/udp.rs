@@ -8,6 +8,7 @@ use std::net::{IpAddr, SocketAddr};
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(target_os = "linux")]
 use tokio::io::Interest;
@@ -144,7 +145,8 @@ struct UdpSession {
     client_addr: SocketAddr,
     upstream: Arc<UdpSocket>,
     closed: AtomicBool,
-    last_seen: Mutex<Instant>,
+    // This timestamp is never held across an await; avoid async-mutex overhead per batch/reply.
+    last_seen: StdMutex<Instant>,
     reply_task: Mutex<Option<JoinHandle<()>>>,
     _guard: SessionGuard,
 }
@@ -625,7 +627,7 @@ impl UdpRuntime {
                                     .metrics
                                     .tx
                                     .fetch_add(sent as u64, Ordering::Relaxed);
-                                *task_session.last_seen.lock().await = Instant::now();
+                                *task_session.last_seen.lock().unwrap() = Instant::now();
                             }
                             Err(_) => {
                                 task_entry.global_metrics.udp_send_errors_total.inc();
@@ -685,7 +687,7 @@ impl UdpRuntime {
             client_addr,
             upstream,
             closed: AtomicBool::new(false),
-            last_seen: Mutex::new(Instant::now()),
+            last_seen: StdMutex::new(Instant::now()),
             reply_task: Mutex::new(None),
             _guard: SessionGuard::new(entry.clone()),
         });
@@ -794,7 +796,7 @@ impl UdpRuntime {
         };
         let now = Instant::now();
         for (client_addr, session) in sessions {
-            let last_seen = *session.last_seen.lock().await;
+            let last_seen = *session.last_seen.lock().unwrap();
             if now.duration_since(last_seen) > session_ttl {
                 Self::remove_session(entry, client_addr, &session, SessionRemovalReason::Expired)
                     .await;
@@ -880,7 +882,7 @@ impl UdpRuntime {
                     .as_ref()
                     .is_some_and(|candidate| Arc::ptr_eq(candidate, session))
             }) {
-                *session.last_seen.lock().await = Instant::now();
+                *session.last_seen.lock().unwrap() = Instant::now();
             }
         }
         sessions
@@ -1196,6 +1198,44 @@ mod tests {
         assert_eq!(
             UdpRuntime::session_cleanup_interval(Duration::from_secs(60)),
             Duration::from_secs(1)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "microbenchmark; run explicitly with --ignored --nocapture"]
+    async fn udp_last_seen_lock_benchmark() {
+        const ITERATIONS: usize = 5_000_000;
+
+        fn measure_std(lock: &StdMutex<Instant>) -> Duration {
+            let started = Instant::now();
+            for _ in 0..ITERATIONS {
+                *lock.lock().unwrap() = Instant::now();
+            }
+            std::hint::black_box(*lock.lock().unwrap());
+            started.elapsed()
+        }
+
+        async fn measure_tokio(lock: &Mutex<Instant>) -> Duration {
+            let started = Instant::now();
+            for _ in 0..ITERATIONS {
+                *lock.lock().await = Instant::now();
+            }
+            std::hint::black_box(*lock.lock().await);
+            started.elapsed()
+        }
+
+        let std_lock = StdMutex::new(Instant::now());
+        let tokio_lock = Mutex::new(Instant::now());
+        std::hint::black_box(measure_std(&std_lock));
+        std::hint::black_box(measure_tokio(&tokio_lock).await);
+
+        let previous = measure_tokio(&tokio_lock).await;
+        let synchronous = measure_std(&std_lock);
+        eprintln!(
+            "udp last_seen lock: tokio={:.3}ms std={:.3}ms speedup={:.2}x",
+            previous.as_secs_f64() * 1_000.0,
+            synchronous.as_secs_f64() * 1_000.0,
+            previous.as_secs_f64() / synchronous.as_secs_f64(),
         );
     }
 
