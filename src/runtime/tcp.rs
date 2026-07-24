@@ -14,6 +14,8 @@ use tokio::time::{Duration, timeout};
 
 // Amortize readiness and syscall overhead for bulk streams in the userspace proxy path.
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
+// Reuse small idle session tables while releasing memory after large connection bursts.
+const RETAINED_IDLE_SESSION_CAPACITY: usize = 64;
 
 async fn copy_buffered(
     client: &mut TcpStream,
@@ -185,6 +187,12 @@ impl TcpRuntime {
     async fn session_handle_count(&self, id: &str) -> Option<usize> {
         let entry = self.entries.lock().await.get(id).cloned()?;
         Some(entry.sessions.lock().await.len())
+    }
+
+    #[cfg(test)]
+    async fn session_handle_capacity(&self, id: &str) -> Option<usize> {
+        let entry = self.entries.lock().await.get(id).cloned()?;
+        Some(entry.sessions.lock().await.capacity())
     }
 
     fn entry_state_for(allocation: &Allocation) -> EntryState {
@@ -375,12 +383,16 @@ impl TcpRuntime {
         });
     }
 
+    fn compact_idle_session_handles<T>(sessions: &mut HashMap<u64, T>) {
+        if sessions.is_empty() && sessions.capacity() > RETAINED_IDLE_SESSION_CAPACITY {
+            sessions.shrink_to(RETAINED_IDLE_SESSION_CAPACITY);
+        }
+    }
+
     async fn remove_session_handle(entry: &Arc<ListenerEntry>, session_id: u64) {
         let mut sessions = entry.sessions.lock().await;
         sessions.remove(&session_id);
-        if sessions.is_empty() {
-            sessions.shrink_to_fit();
-        }
+        Self::compact_idle_session_handles(&mut sessions);
     }
 
     async fn close_sessions(entry: &ListenerEntry) {
@@ -781,6 +793,64 @@ mod tests {
         target_task.abort();
     }
 
+    #[test]
+    fn tcp_idle_session_table_retains_small_capacity_and_compacts_large_bursts() {
+        let mut small = HashMap::new();
+        let (sender, _receiver) = oneshot::channel::<()>();
+        small.insert(1, sender);
+        small.clear();
+        let small_capacity = small.capacity();
+
+        TcpRuntime::compact_idle_session_handles(&mut small);
+
+        assert_eq!(small.capacity(), small_capacity);
+        assert!(small.capacity() > 0);
+
+        let mut large = HashMap::new();
+        for session_id in 0..256 {
+            let (sender, _receiver) = oneshot::channel::<()>();
+            large.insert(session_id, sender);
+        }
+        let peak_capacity = large.capacity();
+        large.clear();
+
+        TcpRuntime::compact_idle_session_handles(&mut large);
+
+        assert!(large.capacity() < peak_capacity);
+        assert!(large.capacity() >= RETAINED_IDLE_SESSION_CAPACITY);
+    }
+
+    #[test]
+    #[ignore = "microbenchmark; run explicitly with --ignored --nocapture"]
+    fn tcp_session_table_churn_benchmark() {
+        const ITERATIONS: u64 = 2_000_000;
+
+        fn measure(shrink_every_time: bool) -> Duration {
+            let mut sessions = HashMap::new();
+            let started = std::time::Instant::now();
+            for session_id in 0..ITERATIONS {
+                sessions.insert(session_id, session_id);
+                std::hint::black_box(sessions.remove(&session_id));
+                if shrink_every_time {
+                    sessions.shrink_to_fit();
+                } else {
+                    TcpRuntime::compact_idle_session_handles(&mut sessions);
+                }
+            }
+            std::hint::black_box(sessions.capacity());
+            started.elapsed()
+        }
+
+        let previous = measure(true);
+        let retained = measure(false);
+        eprintln!(
+            "tcp session table churn: previous={:.3}ms retained={:.3}ms speedup={:.2}x",
+            previous.as_secs_f64() * 1_000.0,
+            retained.as_secs_f64() * 1_000.0,
+            previous.as_secs_f64() / retained.as_secs_f64(),
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn tcp_splice_treats_normal_socket_shutdown_errors_as_clean_closes() {
@@ -909,6 +979,13 @@ mod tests {
 
         wait_for_forwarding_metrics(&runtime, &metrics, 7).await;
         wait_for_session_handles(&runtime, "alloc-cleanup", 0).await;
+        assert!(
+            runtime
+                .session_handle_capacity("alloc-cleanup")
+                .await
+                .unwrap()
+                > 0
+        );
 
         runtime.delete("alloc-cleanup", 500).await.unwrap();
         target_task.abort();
