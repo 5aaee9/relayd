@@ -385,15 +385,14 @@ impl UdpRuntime {
                                 iov_len: batch.lengths[index],
                             }
                         });
+                    // SAFETY: mmsghdr is a C socket descriptor whose fields and padding accept
+                    // zero initialization; live buffer pointers are set before the syscall.
                     let mut messages: [libc::mmsghdr; UDP_MAX_RECEIVE_BATCH_SIZE] =
-                        std::array::from_fn(|position| {
-                            // SAFETY: mmsghdr is a C socket descriptor whose fields and padding
-                            // accept zero initialization; the live buffer pointer is set below.
-                            let mut message = unsafe { std::mem::zeroed::<libc::mmsghdr>() };
-                            message.msg_hdr.msg_iov = std::ptr::from_mut(&mut iovecs[position]);
-                            message.msg_hdr.msg_iovlen = 1;
-                            message
-                        });
+                        unsafe { std::mem::zeroed() };
+                    for (message, iovec) in messages.iter_mut().zip(&mut iovecs) {
+                        message.msg_hdr.msg_iov = std::ptr::from_mut(iovec);
+                        message.msg_hdr.msg_iovlen = 1;
+                    }
 
                     // SAFETY: the initialized headers point to live payload buffers for this
                     // nonblocking syscall, and only the requested prefix is passed to the kernel.
@@ -1236,6 +1235,55 @@ mod tests {
             previous.as_secs_f64() * 1_000.0,
             synchronous.as_secs_f64() * 1_000.0,
             previous.as_secs_f64() / synchronous.as_secs_f64(),
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "microbenchmark; run explicitly with --ignored --nocapture"]
+    fn udp_send_message_header_initialization_benchmark() {
+        const ITERATIONS: usize = 500_000;
+
+        fn measure(from_fn: bool) -> Duration {
+            // SAFETY: iovec accepts zero initialization and is only used as a pointer target.
+            let mut iovecs: [libc::iovec; UDP_MAX_RECEIVE_BATCH_SIZE] =
+                unsafe { std::mem::zeroed() };
+            let started = Instant::now();
+            for _ in 0..ITERATIONS {
+                let messages: [libc::mmsghdr; UDP_MAX_RECEIVE_BATCH_SIZE] = if from_fn {
+                    std::array::from_fn(|position| {
+                        // SAFETY: mmsghdr accepts zero initialization; the live iovec pointer is
+                        // set exactly as it was in the previous send path.
+                        let mut message = unsafe { std::mem::zeroed::<libc::mmsghdr>() };
+                        message.msg_hdr.msg_iov = std::ptr::from_mut(&mut iovecs[position]);
+                        message.msg_hdr.msg_iovlen = 1;
+                        message
+                    })
+                } else {
+                    // SAFETY: mmsghdr accepts zero initialization; live iovec pointers are set
+                    // before the headers could be passed to a syscall.
+                    let mut messages: [libc::mmsghdr; UDP_MAX_RECEIVE_BATCH_SIZE] =
+                        unsafe { std::mem::zeroed() };
+                    for (message, iovec) in messages.iter_mut().zip(&mut iovecs) {
+                        message.msg_hdr.msg_iov = std::ptr::from_mut(iovec);
+                        message.msg_hdr.msg_iovlen = 1;
+                    }
+                    messages
+                };
+                std::hint::black_box(messages);
+            }
+            started.elapsed()
+        }
+
+        std::hint::black_box(measure(true));
+        std::hint::black_box(measure(false));
+        let previous = measure(true);
+        let direct = measure(false);
+        eprintln!(
+            "udp send message headers: from_fn={:.3}ms direct={:.3}ms speedup={:.2}x",
+            previous.as_secs_f64() * 1_000.0,
+            direct.as_secs_f64() * 1_000.0,
+            previous.as_secs_f64() / direct.as_secs_f64(),
         );
     }
 
