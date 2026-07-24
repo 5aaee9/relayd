@@ -19,14 +19,19 @@ use tokio::time::{Duration, Instant};
 const MAX_SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
 const UDP_DATAGRAM_BUFFER_BYTES: usize = 2048;
 #[cfg(target_os = "linux")]
-const UDP_RECEIVE_BATCH_SIZE: usize = 16;
+const UDP_INITIAL_RECEIVE_BATCH_SIZE: usize = 16;
+#[cfg(target_os = "linux")]
+// Start each listener at 32 KiB; saturated listeners grow to at most 128 KiB.
+const UDP_MAX_RECEIVE_BATCH_SIZE: usize = 64;
 #[cfg(not(target_os = "linux"))]
-const UDP_RECEIVE_BATCH_SIZE: usize = 1;
+const UDP_INITIAL_RECEIVE_BATCH_SIZE: usize = 1;
+#[cfg(not(target_os = "linux"))]
+const UDP_MAX_RECEIVE_BATCH_SIZE: usize = 1;
 
 struct UdpReceiveBatch {
-    buffers: [[u8; UDP_DATAGRAM_BUFFER_BYTES]; UDP_RECEIVE_BATCH_SIZE],
-    lengths: [usize; UDP_RECEIVE_BATCH_SIZE],
-    peers: [Option<SocketAddr>; UDP_RECEIVE_BATCH_SIZE],
+    buffers: Vec<[u8; UDP_DATAGRAM_BUFFER_BYTES]>,
+    lengths: [usize; UDP_MAX_RECEIVE_BATCH_SIZE],
+    peers: [Option<SocketAddr>; UDP_MAX_RECEIVE_BATCH_SIZE],
 }
 
 struct UdpBatchSendError {
@@ -37,10 +42,20 @@ struct UdpBatchSendError {
 impl UdpReceiveBatch {
     fn new() -> Self {
         Self {
-            buffers: [[0; UDP_DATAGRAM_BUFFER_BYTES]; UDP_RECEIVE_BATCH_SIZE],
-            lengths: [0; UDP_RECEIVE_BATCH_SIZE],
-            peers: [None; UDP_RECEIVE_BATCH_SIZE],
+            buffers: vec![[0; UDP_DATAGRAM_BUFFER_BYTES]; UDP_INITIAL_RECEIVE_BATCH_SIZE],
+            lengths: [0; UDP_MAX_RECEIVE_BATCH_SIZE],
+            peers: [None; UDP_MAX_RECEIVE_BATCH_SIZE],
         }
+    }
+
+    fn grow_if_saturated(&mut self, received: usize) {
+        let capacity = self.buffers.len();
+        if received < capacity || capacity >= UDP_MAX_RECEIVE_BATCH_SIZE {
+            return;
+        }
+        let new_capacity = capacity.saturating_mul(2).min(UDP_MAX_RECEIVE_BATCH_SIZE);
+        self.buffers
+            .resize(new_capacity, [0; UDP_DATAGRAM_BUFFER_BYTES]);
     }
 }
 
@@ -262,20 +277,21 @@ impl UdpRuntime {
         debug_assert_eq!(count, 1);
 
         match socket.try_io(Interest::READABLE, || {
-            let remaining_capacity = UDP_RECEIVE_BATCH_SIZE - 1;
+            let remaining_capacity = batch.buffers.len() - 1;
+            let last_buffer_index = batch.buffers.len() - 1;
             let mut addresses =
                 // SAFETY: sockaddr_storage is plain data and zero is a valid empty value.
                 [unsafe { std::mem::zeroed::<libc::sockaddr_storage>() };
-                    UDP_RECEIVE_BATCH_SIZE];
-            let mut iovecs: [libc::iovec; UDP_RECEIVE_BATCH_SIZE] =
+                    UDP_MAX_RECEIVE_BATCH_SIZE];
+            let mut iovecs: [libc::iovec; UDP_MAX_RECEIVE_BATCH_SIZE] =
                 std::array::from_fn(|position| {
-                    let index = (position + 1).min(UDP_RECEIVE_BATCH_SIZE - 1);
+                    let index = (position + 1).min(last_buffer_index);
                     libc::iovec {
                         iov_base: batch.buffers[index].as_mut_ptr().cast(),
                         iov_len: batch.buffers[index].len(),
                     }
                 });
-            let mut messages: [libc::mmsghdr; UDP_RECEIVE_BATCH_SIZE] =
+            let mut messages: [libc::mmsghdr; UDP_MAX_RECEIVE_BATCH_SIZE] =
                 std::array::from_fn(|position| {
                     // SAFETY: mmsghdr is a C socket descriptor whose fields and padding
                     // accept zero initialization; the live buffer pointers are set below.
@@ -359,7 +375,7 @@ impl UdpRuntime {
             let result = socket
                 .async_io(Interest::WRITABLE, || {
                     let remaining = &indexes[sent..];
-                    let mut iovecs: [libc::iovec; UDP_RECEIVE_BATCH_SIZE] =
+                    let mut iovecs: [libc::iovec; UDP_MAX_RECEIVE_BATCH_SIZE] =
                         std::array::from_fn(|position| {
                             let index = remaining.get(position).copied().unwrap_or(0);
                             libc::iovec {
@@ -367,7 +383,7 @@ impl UdpRuntime {
                                 iov_len: batch.lengths[index],
                             }
                         });
-                    let mut messages: [libc::mmsghdr; UDP_RECEIVE_BATCH_SIZE] =
+                    let mut messages: [libc::mmsghdr; UDP_MAX_RECEIVE_BATCH_SIZE] =
                         std::array::from_fn(|position| {
                             // SAFETY: mmsghdr is a C socket descriptor whose fields and padding
                             // accept zero initialization; the live buffer pointer is set below.
@@ -468,7 +484,7 @@ impl UdpRuntime {
                                 let sessions =
                                     Self::prepare_datagram_batch(&task_entry, &batch, count).await;
 
-                                let mut grouped = [false; UDP_RECEIVE_BATCH_SIZE];
+                                let mut grouped = [false; UDP_MAX_RECEIVE_BATCH_SIZE];
                                 for first in 0..count {
                                     let Some(session) = sessions[first].as_ref() else {
                                         continue;
@@ -476,7 +492,7 @@ impl UdpRuntime {
                                     if grouped[first] {
                                         continue;
                                     }
-                                    let mut indexes = [0; UDP_RECEIVE_BATCH_SIZE];
+                                    let mut indexes = [0; UDP_MAX_RECEIVE_BATCH_SIZE];
                                     let mut index_count = 0;
                                     for index in first..count {
                                         if sessions[index]
@@ -524,6 +540,7 @@ impl UdpRuntime {
                                         .await;
                                     }
                                 }
+                                batch.grow_if_saturated(count);
                             }
                             Err(_) => {
                                 task_entry.global_metrics.udp_recv_errors_total.inc();
@@ -814,7 +831,7 @@ impl UdpRuntime {
         entry: &Arc<ListenerEntry>,
         batch: &UdpReceiveBatch,
         count: usize,
-    ) -> [Option<Arc<UdpSession>>; UDP_RECEIVE_BATCH_SIZE] {
+    ) -> [Option<Arc<UdpSession>>; UDP_MAX_RECEIVE_BATCH_SIZE] {
         let mut sessions = std::array::from_fn(|_| None);
         let state = entry.state.read().await.clone();
         let generation = state.generation;
@@ -1154,6 +1171,22 @@ mod tests {
         assert_eq!(config.max_sessions, 65_536);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn udp_linux_receive_batch_grows_only_after_saturation() {
+        let mut batch = UdpReceiveBatch::new();
+        assert_eq!(batch.buffers.len(), 16);
+
+        batch.grow_if_saturated(15);
+        assert_eq!(batch.buffers.len(), 16);
+        batch.grow_if_saturated(16);
+        assert_eq!(batch.buffers.len(), 32);
+        batch.grow_if_saturated(32);
+        assert_eq!(batch.buffers.len(), 64);
+        batch.grow_if_saturated(64);
+        assert_eq!(batch.buffers.len(), 64);
+    }
+
     #[test]
     fn udp_session_cleanup_interval_tracks_short_ttls_and_caps_default_sweeps() {
         assert_eq!(
@@ -1441,7 +1474,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn udp_runtime_batches_bursts_without_changing_order_or_metrics() {
-        const PACKETS: usize = UDP_RECEIVE_BATCH_SIZE;
+        const PACKETS: usize = UDP_MAX_RECEIVE_BATCH_SIZE;
 
         let metrics = Arc::new(Metrics::default());
         let runtime = UdpRuntime::new(
