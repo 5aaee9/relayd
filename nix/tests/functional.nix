@@ -114,6 +114,7 @@ pkgs.testers.runNixOSTest {
         if IS_NETLINK:
             ruleset = relay.succeed("nft --handle list table inet relayd_e2e")
             t.assertIn("fib daddr type local", ruleset)
+            t.assertIn(" map ", ruleset)
         t.assertEqual(probe(client, "tcp", tcp_port, "primary", "first"), "primary:first")
         put_binding(client, tcp_id, BACKEND_HOST4, SECONDARY_PORT)
         t.assertEqual(probe(client, "tcp", tcp_port, "secondary", "rebound"), "secondary:rebound")
@@ -142,6 +143,19 @@ pkgs.testers.runNixOSTest {
         )
         t.assertEqual(both_row["protocol"], "both")
         t.assertEqual(both_row["port"], both_port)
+
+    if IS_NETLINK:
+        with subtest("map dispatch stays bounded as allocations grow"):
+            extra = [create_bound(client, "both", BACKEND_HOST4, PRIMARY_PORT) for _ in range(8)]
+            ruleset = relay.succeed("nft --handle list table inet relayd_e2e")
+            t.assertEqual(ruleset.count("dnat ip to"), 2)
+            for item in (extra[0], extra[-1]):
+                for protocol in ("tcp", "udp"):
+                    t.assertEqual(probe(client, protocol, item["port"], "primary", "mapped"), "primary:mapped")
+            for item in extra:
+                api(client, "DELETE", f"/v1/allocations/{item['id']}", expected_status=204)
+            for protocol in ("tcp", "udp"):
+                expect_probe_failure(client, protocol, extra[-1]["port"])
 
     with subtest("IPv6 upstream uses the supported runtime data planes"):
         # A proxy UDP session socket intentionally uses PROXY_LISTEN_HOST as its

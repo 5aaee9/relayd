@@ -16,6 +16,9 @@ use std::ptr;
 #[cfg(feature = "netlink")]
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "netlink")]
+mod maps;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NftDnatRule {
     pub allocation_id: String,
@@ -181,10 +184,50 @@ impl NftBackend for LibNftnlBackend {
             &FlushChain::new(table_name.as_c_str(), chain_name.as_c_str()),
             MsgType::Del,
         );
-        for rule in rules {
-            let mut nft_rule = Rule::new(&chain);
-            add_dnat_rule_exprs(&mut nft_rule, rule);
-            batch.add(&nft_rule, MsgType::Add);
+        // Four dispatch rules at most, independent of allocation count. Separate
+        // address/port maps avoid concatenation padding and work for both families.
+        let mut id = 1;
+        for ipv6 in [false, true] {
+            for protocol in [Protocol::Tcp, Protocol::Udp] {
+                let group: Vec<_> = rules
+                    .iter()
+                    .filter(|r| r.out_host.is_ipv6() == ipv6 && r.protocol == protocol)
+                    .collect();
+                let Some(first) = group.first() else { continue };
+                let mut addresses = maps::port_map(
+                    &table,
+                    id,
+                    if ipv6 { 8 } else { 7 },
+                    if ipv6 { 16 } else { 4 },
+                );
+                let mut ports = maps::port_map(&table, id + 1, 13, 2);
+                id += 2;
+                let mut seen = std::collections::HashSet::new();
+                for entry in &group {
+                    // Preserve the old first-match behavior for duplicate keys.
+                    if !seen.insert(entry.in_port) {
+                        continue;
+                    }
+                    match entry.out_host {
+                        IpAddr::V4(addr) => {
+                            maps::add_element(&mut addresses, entry.in_port, &addr.octets())
+                        }
+                        IpAddr::V6(addr) => {
+                            maps::add_element(&mut addresses, entry.in_port, &addr.octets())
+                        }
+                    }
+                    maps::add_element(&mut ports, entry.in_port, &entry.out_port.to_be_bytes());
+                }
+                for set in [&addresses, &ports] {
+                    batch.add(set, MsgType::Add);
+                    for elements in set.elems_iter() {
+                        batch.add(&elements, MsgType::Add);
+                    }
+                }
+                let mut nft_rule = Rule::new(&chain);
+                add_dnat_rule_exprs(&mut nft_rule, first, &addresses, &ports);
+                batch.add(&nft_rule, MsgType::Add);
+            }
         }
 
         send_and_process(&batch.finalize(), timeout_ms).map_err(|error| {
@@ -240,7 +283,12 @@ fn cstring_error(kind: &'static str, error: NulError) -> NftBackendError {
 }
 
 #[cfg(feature = "netlink")]
-fn add_dnat_rule_exprs(rule: &mut nftnl::Rule<'_>, dnat: &NftDnatRule) {
+fn add_dnat_rule_exprs(
+    rule: &mut nftnl::Rule<'_>,
+    dnat: &NftDnatRule,
+    addresses: &nftnl::set::Set<'_, maps::PortKey>,
+    ports: &nftnl::set::Set<'_, maps::PortKey>,
+) {
     use nftnl::expr::{Counter, Meta, Nat, NatType};
 
     let nfproto = nfproto_for(dnat.out_host);
@@ -262,19 +310,18 @@ fn add_dnat_rule_exprs(rule: &mut nftnl::Rule<'_>, dnat: &NftDnatRule) {
         len: 2,
         register: REG_PORT,
     });
-    rule.add_expr(&CmpRegister::new(REG_PORT, dnat.in_port.to_be()));
     rule.add_expr(&FibDaddrType {
         register: REG_FIB_TYPE,
     });
     rule.add_expr(&CmpRegister::new(REG_FIB_TYPE, RTN_LOCAL));
-    match dnat.out_host {
-        IpAddr::V4(addr) => rule.add_expr(&ImmediateRegister::new(REG_DNAT_ADDR, addr.octets())),
-        IpAddr::V6(addr) => rule.add_expr(&ImmediateRegister::new(REG_DNAT_ADDR, addr.octets())),
-    }
-    rule.add_expr(&ImmediateRegister::new(
-        REG_DNAT_PORT,
-        dnat.out_port.to_be(),
-    ));
+    rule.add_expr(&maps::MapLookup {
+        set: addresses,
+        destination: REG_DNAT_ADDR,
+    });
+    rule.add_expr(&maps::MapLookup {
+        set: ports,
+        destination: REG_DNAT_PORT,
+    });
     rule.add_expr(&Counter);
     rule.add_expr(&Nat {
         nat_type: NatType::DNat,
@@ -666,44 +713,6 @@ impl<T: Copy> nftnl::expr::Expression for CmpRegister<T> {
 }
 
 #[cfg(feature = "netlink")]
-struct ImmediateRegister<T> {
-    register: nftnl::expr::Register,
-    data: T,
-}
-
-#[cfg(feature = "netlink")]
-impl<T> ImmediateRegister<T> {
-    fn new(register: nftnl::expr::Register, data: T) -> Self {
-        Self { register, data }
-    }
-}
-
-#[cfg(feature = "netlink")]
-impl<T: Copy> nftnl::expr::Expression for ImmediateRegister<T> {
-    fn to_expr(&self, _rule: &nftnl::Rule<'_>) -> ptr::NonNull<nftnl::nftnl_sys::nftnl_expr> {
-        use nftnl::nftnl_sys as sys;
-
-        let expr = ptr::NonNull::new(unsafe { sys::nftnl_expr_alloc(c"immediate".as_ptr()) })
-            .expect("nftnl_expr_alloc returned null");
-        // SAFETY: expression is newly allocated; libnftnl copies the immediate bytes.
-        unsafe {
-            sys::nftnl_expr_set_u32(
-                expr.as_ptr(),
-                sys::NFTNL_EXPR_IMM_DREG as u16,
-                self.register.to_raw(),
-            );
-            sys::nftnl_expr_set(
-                expr.as_ptr(),
-                sys::NFTNL_EXPR_IMM_DATA as u16,
-                &self.data as *const _ as *const c_void,
-                size_of_data::<T>(),
-            );
-        }
-        expr
-    }
-}
-
-#[cfg(feature = "netlink")]
 struct FibDaddrType {
     register: nftnl::expr::Register,
 }
@@ -1015,6 +1024,52 @@ pub(crate) mod tests {
             out_host: out_host.parse().unwrap(),
             out_port,
         }
+    }
+
+    /// Run in a disposable network namespace, e.g. unshare -Urn cargo test
+    /// --features netlink kernel_maps_replace_atomically -- --ignored.
+    #[cfg(feature = "netlink")]
+    #[test]
+    #[ignore = "requires CAP_NET_ADMIN in an isolated network namespace and nft"]
+    fn kernel_maps_replace_atomically() {
+        let backend = LibNftnlBackend::new().unwrap();
+        let mut rules = Vec::new();
+        for port in 10000..10300 {
+            for protocol in [Protocol::Tcp, Protocol::Udp] {
+                for host in ["192.0.2.1", "2001:db8::1"] {
+                    rules.push(rule("test", protocol, port, host, 8080));
+                }
+            }
+        }
+        let dump = || {
+            let output = std::process::Command::new("nft")
+                .args(["list", "table", "inet", "relayd_map_test"])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap()
+        };
+        for _ in 0..3 {
+            backend
+                .replace_ruleset("relayd_map_test", "mapping", &rules, 5000)
+                .unwrap();
+            let text = dump();
+            assert_eq!(text.matches("dnat ").count(), 4, "{text}");
+            assert_eq!(text.matches(" map ").count(), 8, "{text}");
+            assert!(text.contains("10299"));
+        }
+        backend
+            .replace_ruleset("relayd_map_test", "mapping", &rules[..1], 5000)
+            .unwrap();
+        let text = dump();
+        assert_eq!(text.matches("dnat ").count(), 1);
+        assert!(!text.contains("10299"));
+        backend
+            .replace_ruleset("relayd_map_test", "mapping", &[], 5000)
+            .unwrap();
+        let text = dump();
+        assert!(!text.contains("dnat "));
+        assert!(!text.contains("map "));
     }
 
     #[tokio::test]
